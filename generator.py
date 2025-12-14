@@ -27,14 +27,13 @@ from chatterbox.tts import ChatterboxTTS
 # ==========================================
 # 2. CONFIGURATION & INPUTS
 # ==========================================
-# Injected by GitHub Action
-MODE = """{{MODE_PLACEHOLDER}}"""          # "topic" or "script"
+MODE = """{{MODE_PLACEHOLDER}}"""
 TOPIC = """{{TOPIC_PLACEHOLDER}}"""
 SCRIPT_TEXT = """{{SCRIPT_PLACEHOLDER}}"""
 DURATION_MINS = float("""{{DURATION_PLACEHOLDER}}""")
 VOICE_URL = """{{VOICE_URL_PLACEHOLDER}}"""
 
-# Secrets from Env
+# Secrets
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
@@ -46,7 +45,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ==========================================
-# 3. UNIVERSAL VISUAL DICTIONARY
+# 3. VISUAL DICTIONARY
 # ==========================================
 VISUAL_MAP = {
     "tech": ["futuristic technology", "circuit board", "data center", "hologram", "coding"],
@@ -65,10 +64,7 @@ def get_visual_queries(text):
     text = text.lower()
     queries = []
     for cat, terms in VISUAL_MAP.items():
-        if cat in text:
-            queries.extend(terms[:2])
-    
-    # Fallback: Extract interesting nouns
+        if cat in text: queries.extend(terms[:2])
     words = [w for w in re.findall(r'\w+', text) if len(w) > 5]
     if words: queries.append(random.choice(words) + " cinematic")
     if not queries: queries = VISUAL_MAP["abstract"]
@@ -91,30 +87,74 @@ def download_voice_sample(url, path):
     return False
 
 def generate_script(topic, minutes):
-    words = int(minutes * 150)
+    words = int(minutes * 130) # Reduced speed slightly
     print(f"Generating {words} word script for: {topic}")
     genai.configure(api_key=GEMINI_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
-    prompt = f"Write a YouTube script about '{topic}'. Length: {words} words. Plain text only. No scene directions. No timestamps. Engaging tone."
+    prompt = f"Write a YouTube script about '{topic}'. Length: {words} words. Plain text only. No scene directions. No timestamps. Engaging tone. Do not use asterisks."
     try:
         return model.generate_content(prompt).text.strip().replace("*", "")
     except Exception as e:
         print(f"Script Error: {e}")
         return f"Welcome to our video about {topic}. Please enjoy the visuals."
 
-def clone_voice(text, ref_audio, out_path):
-    print("Cloning Voice...")
+# --- FIXED VOICE CLONING (CHUNKED) ---
+def clone_voice_long(text, ref_audio_path, out_path):
+    print("Cloning Voice (Chunking Mode)...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ChatterboxTTS.from_pretrained(device=device)
-    with torch.no_grad():
-        wav = model.generate(text, ref_audio, exaggeration=0.5, cfg_weight=0.5)
-    torchaudio.save(out_path, wav.cpu(), model.sr)
-    return out_path
+    
+    try:
+        model = ChatterboxTTS.from_pretrained(device=device)
+        
+        # 1. Load Reference Audio safely
+        try:
+            ref_audio, sr = torchaudio.load(ref_audio_path)
+        except Exception as e:
+            print(f"❌ Error loading reference audio: {e}")
+            return False
+
+        # 2. Split text into sentences to avoid CUDA crashes
+        # Split by . ? ! but keep the punctuation
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        audio_chunks = []
+        
+        for i, sentence in enumerate(sentences):
+            if not sentence: continue
+            print(f"  Synthesizing chunk {i+1}/{len(sentences)}...")
+            try:
+                with torch.no_grad():
+                    # Generate chunk
+                    wav = model.generate(sentence, ref_audio, exaggeration=0.5, cfg_weight=0.5)
+                    audio_chunks.append(wav.cpu())
+            except Exception as e:
+                print(f"  ⚠️ Chunk failed: {e}")
+                continue
+
+        if not audio_chunks:
+            print("❌ All chunks failed.")
+            return False
+
+        # 3. Concatenate all chunks
+        print("  Stitching audio...")
+        final_wav = torch.cat(audio_chunks, dim=1)
+        torchaudio.save(out_path, final_wav, model.sr)
+        return True
+
+    except Exception as e:
+        print(f"❌ Critical TTS Error: {e}")
+        return False
 
 def get_subtitles(audio_path):
     print("Transcribing...")
     aai.settings.api_key = ASSEMBLY_KEY
     t = aai.Transcriber().transcribe(str(audio_path))
+    
+    if t.status == aai.TranscriptStatus.error:
+        print(f"Transcription failed: {t.error}")
+        return [], None
+
     srt_path = TEMP_DIR / "subs.srt"
     with open(srt_path, "w") as f: f.write(t.export_subtitles_srt())
     
@@ -164,7 +204,7 @@ def search_and_download_clips(sentences):
             subprocess.run(cmd, shell=True)
             clips.append(str(out_p))
         else:
-            # Create black fallback
+            # Black fallback
             p = TEMP_DIR / f"seg_{i}.mp4"
             subprocess.run(f"ffmpeg -y -f lavfi -i color=c=black:s=1920x1080:d={duration} -an {p}", shell=True)
             clips.append(str(p))
@@ -179,7 +219,6 @@ def render_video(clips, audio, srt, output):
     subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual.mp4", shell=True)
     
     # Mux & Burn Subs
-    # Note: Escaping path for filter_complex
     srt_esc = str(srt).replace("\\", "/").replace(":", "\\:")
     cmd = [
         "ffmpeg", "-y", "-i", "visual.mp4", "-i", str(audio),
@@ -197,7 +236,6 @@ if not download_voice_sample(VOICE_URL, ref_voice):
     print("Failed to download voice sample")
     exit(1)
 
-# Logic Switch
 final_text = ""
 if MODE == "topic":
     final_text = generate_script(TOPIC, DURATION_MINS)
@@ -206,12 +244,16 @@ else:
 
 print("Script Ready. Generating Audio...")
 audio_out = TEMP_DIR / "tts_out.wav"
-clone_voice(final_text, ref_voice, audio_out)
 
-sentences, srt_file = get_subtitles(audio_out)
-
-print("Fetching Visuals...")
-clips = search_and_download_clips(sentences)
-
-render_video(clips, audio_out, srt_file, OUTPUT_DIR / "final_video.mp4")
-print("--- DONE ---")
+# USE NEW CHUNKED FUNCTION
+if clone_voice_long(final_text, ref_voice, audio_out):
+    sentences, srt_file = get_subtitles(audio_out)
+    if sentences:
+        print("Fetching Visuals...")
+        clips = search_and_download_clips(sentences)
+        render_video(clips, audio_out, srt_file, OUTPUT_DIR / "final_video.mp4")
+        print("--- DONE ---")
+    else:
+        print("❌ Subtitle generation failed. Cannot proceed.")
+else:
+    print("❌ Audio generation failed.")
