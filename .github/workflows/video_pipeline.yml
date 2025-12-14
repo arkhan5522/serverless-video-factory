@@ -32,6 +32,7 @@ jobs:
           USER_SCRIPT: ${{ github.event.client_payload.script }}
           USER_DURATION: ${{ github.event.client_payload.duration }}
           USER_VOICE_URL: ${{ github.event.client_payload.voice_url }}
+          USER_JOB_ID: ${{ github.event.client_payload.job_id }}
         run: |
           mkdir -p ~/.kaggle
           echo "{\"username\":\"$KAGGLE_USERNAME\",\"key\":\"$KAGGLE_KEY\"}" > ~/.kaggle/kaggle.json
@@ -44,13 +45,14 @@ jobs:
           with open('generator.py', 'r') as f:
               content = f.read()
           
-          # Replace placeholders safely
+          # Replace placeholders
           replacements = {
               '{{MODE_PLACEHOLDER}}': os.environ.get('USER_MODE', 'topic'),
               '{{TOPIC_PLACEHOLDER}}': os.environ.get('USER_TOPIC', ''),
               '{{SCRIPT_PLACEHOLDER}}': os.environ.get('USER_SCRIPT', ''),
               '{{DURATION_PLACEHOLDER}}': os.environ.get('USER_DURATION', '3'),
-              '{{VOICE_URL_PLACEHOLDER}}': os.environ.get('USER_VOICE_URL', '')
+              '{{VOICE_URL_PLACEHOLDER}}': os.environ.get('USER_VOICE_URL', ''),
+              '{{JOB_ID_PLACEHOLDER}}': os.environ.get('USER_JOB_ID', 'debug_run')
           }
           
           for key, val in replacements.items():
@@ -85,7 +87,6 @@ jobs:
            PEXELS_KEYS: ${{ secrets.PEXELS_KEYS }}
            PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
         run: |
-          # Create auth/config header
           echo "import os" > config_header.py
           echo "os.environ['GH_PAT'] = '$GH_PAT'" >> config_header.py
           echo "os.environ['GEMINI_API_KEY'] = '$GEMINI_KEY'" >> config_header.py
@@ -94,17 +95,14 @@ jobs:
           echo "os.environ['PIXABAY_KEYS'] = '$PIXABAY_KEYS'" >> config_header.py
 
           cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
-          
           kaggle kernels push -p .
 
       - name: Wait for Result (Long Polling)
         run: |
           echo "Polling Kaggle (Timeout: 45 mins)..."
-          # 90 attempts * 30 seconds = 45 minutes
           for i in {1..90}; do
             OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-runner)
             echo "$OUTPUT"
-            
             if [[ "$OUTPUT" == *"COMPLETE"* ]]; then
               echo "Kernel finished successfully!"
               break
@@ -120,16 +118,15 @@ jobs:
         run: |
           kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-runner -p ./output
           
+          # Clean deployment folder
           mkdir public_video
-          # Find the mp4 file (name varies) and rename it
-          find ./output -name "*.mp4" -exec mv {} ./public_video/final_video.mp4 \;
           
-          # Check if file exists
-          if [ ! -f ./public_video/final_video.mp4 ]; then
-            echo "Error: No MP4 found in output!"
-            ls -R ./output
-            exit 1
-          fi
+          # Move the unique file
+          # We use a wildcard because the filename contains the dynamic JobID
+          mv ./output/final_video_*.mp4 ./public_video/ || echo "No video found!"
+          
+          # Verify
+          ls -R ./public_video
 
       - name: Publish to Branch
         uses: peaceiris/actions-gh-pages@v3
@@ -137,7 +134,8 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./public_video
           publish_branch: video-results
-          force_orphan: true # Keeps repo size small by overwriting history
+          force_orphan: false  # FALSE: Keep history so multiple videos can exist if needed, or set true to clean
+          keep_files: false
           user_name: 'Video Bot'
           user_email: 'bot@video.com'
           commit_message: 'New Video Rendered'
