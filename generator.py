@@ -48,7 +48,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ==========================================
-# 3. MASSIVE VISUAL DICTIONARY (Expanded)
+# 3. MASSIVE VISUAL DICTIONARY (Broad & Deep)
 # ==========================================
 VISUAL_MAP = {
     # TECH & FUTURE
@@ -102,8 +102,10 @@ def get_visual_queries(text):
     if "global" in text: queries.append("earth rotating")
     if "speed" in text: queries.append("fast car")
     if "love" in text: queries.append("couple holding hands")
+    if "ancient" in text: queries.append("ruins")
+    if "future" in text: queries.append("futuristic city")
     
-    # 3. Noun Extraction
+    # 3. Noun Extraction (Broad)
     words = [w for w in re.findall(r'\w+', text) if len(w) > 5]
     if words: 
         queries.append(random.choice(words) + " cinematic")
@@ -143,7 +145,7 @@ def generate_script(topic, minutes):
     Write a YouTube video script about '{topic}'.
     
     STRICT CONSTRAINTS:
-    - Total Word Count: Approximately {words} words.
+    - Total Word Count: Approximately {words} words (CRITICAL for timing).
     - Format: Plain spoken text ONLY. No [Scene Directions]. No (Timecodes). No *Asterisks*.
     - Structure: Engaging Hook -> Intro -> detailed Body -> Conclusion.
     - Style: Professional, storytelling, engaging.
@@ -196,13 +198,14 @@ def generate_styled_subtitles(audio_path):
     if t.status == aai.TranscriptStatus.error: return [], None
     
     ass_path = TEMP_DIR / "style.ass"
+    # Yellow, Bold, Shadow
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
 PlayResY: 1080
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,65,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,60,1
+Style: Default,Arial,70,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,70,1
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
