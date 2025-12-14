@@ -1,0 +1,143 @@
+name: Universal Video Generator
+
+on:
+  repository_dispatch:
+    types: [trigger-video]
+
+jobs:
+  run-video-factory:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Kaggle API
+        run: pip install kaggle
+
+      - name: Prepare Kaggle Script
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          # Inputs from Dashboard
+          USER_MODE: ${{ github.event.client_payload.mode }}
+          USER_TOPIC: ${{ github.event.client_payload.topic }}
+          USER_SCRIPT: ${{ github.event.client_payload.script }}
+          USER_DURATION: ${{ github.event.client_payload.duration }}
+          USER_VOICE_URL: ${{ github.event.client_payload.voice_url }}
+        run: |
+          mkdir -p ~/.kaggle
+          echo "{\"username\":\"$KAGGLE_USERNAME\",\"key\":\"$KAGGLE_KEY\"}" > ~/.kaggle/kaggle.json
+          chmod 600 ~/.kaggle/kaggle.json
+
+          # Safe Injection Builder
+          cat <<EOF > builder.py
+          import os
+          
+          with open('generator.py', 'r') as f:
+              content = f.read()
+          
+          # Replace placeholders safely
+          replacements = {
+              '{{MODE_PLACEHOLDER}}': os.environ.get('USER_MODE', 'topic'),
+              '{{TOPIC_PLACEHOLDER}}': os.environ.get('USER_TOPIC', ''),
+              '{{SCRIPT_PLACEHOLDER}}': os.environ.get('USER_SCRIPT', ''),
+              '{{DURATION_PLACEHOLDER}}': os.environ.get('USER_DURATION', '3'),
+              '{{VOICE_URL_PLACEHOLDER}}': os.environ.get('USER_VOICE_URL', '')
+          }
+          
+          for key, val in replacements.items():
+              content = content.replace(key, val.replace('"', '\\"').replace('\\n', ' '))
+          
+          with open('final_script.py', 'w') as f:
+              f.write(content)
+          EOF
+
+          python builder.py
+
+          # Metadata
+          echo '{
+            "id": "'"$KAGGLE_USERNAME"'/video-factory-runner",
+            "title": "Video Factory Runner",
+            "code_file": "final_script.py",
+            "language": "python",
+            "kernel_type": "script",
+            "is_private": "true",
+            "enable_gpu": "true",
+            "enable_internet": "true",
+            "dataset_sources": [],
+            "kernel_sources": [],
+            "competition_sources": []
+          }' > kernel-metadata.json
+
+      - name: Push to Kaggle
+        env:
+           GH_PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+           ASSEMBLY_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
+           PEXELS_KEYS: ${{ secrets.PEXELS_KEYS }}
+           PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
+        run: |
+          # Create auth/config header
+          echo "import os" > config_header.py
+          echo "os.environ['GH_PAT'] = '$GH_PAT'" >> config_header.py
+          echo "os.environ['GEMINI_API_KEY'] = '$GEMINI_KEY'" >> config_header.py
+          echo "os.environ['ASSEMBLYAI_API_KEY'] = '$ASSEMBLY_KEY'" >> config_header.py
+          echo "os.environ['PEXELS_KEYS'] = '$PEXELS_KEYS'" >> config_header.py
+          echo "os.environ['PIXABAY_KEYS'] = '$PIXABAY_KEYS'" >> config_header.py
+
+          cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
+          
+          kaggle kernels push -p .
+
+      - name: Wait for Result (Long Polling)
+        run: |
+          echo "Polling Kaggle (Timeout: 45 mins)..."
+          # 90 attempts * 30 seconds = 45 minutes
+          for i in {1..90}; do
+            OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-runner)
+            echo "$OUTPUT"
+            
+            if [[ "$OUTPUT" == *"COMPLETE"* ]]; then
+              echo "Kernel finished successfully!"
+              break
+            elif [[ "$OUTPUT" == *"ERROR"* ]]; then
+              echo "Kernel failed! Check Kaggle logs."
+              exit 1
+            fi
+            echo "Rendering Video... (Attempt $i/90)"
+            sleep 30
+          done
+
+      - name: Download & Deploy Video
+        run: |
+          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-runner -p ./output
+          
+          mkdir public_video
+          # Find the mp4 file (name varies) and rename it
+          find ./output -name "*.mp4" -exec mv {} ./public_video/final_video.mp4 \;
+          
+          # Check if file exists
+          if [ ! -f ./public_video/final_video.mp4 ]; then
+            echo "Error: No MP4 found in output!"
+            ls -R ./output
+            exit 1
+          fi
+
+      - name: Publish to Branch
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public_video
+          publish_branch: video-results
+          force_orphan: true # Keeps repo size small by overwriting history
+          user_name: 'Video Bot'
+          user_email: 'bot@video.com'
+          commit_message: 'New Video Rendered'
