@@ -26,7 +26,6 @@ jobs:
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-          # Inputs from Dashboard
           USER_MODE: ${{ github.event.client_payload.mode }}
           USER_TOPIC: ${{ github.event.client_payload.topic }}
           USER_SCRIPT: ${{ github.event.client_payload.script }}
@@ -41,11 +40,9 @@ jobs:
           # Safe Injection Builder
           cat <<EOF > builder.py
           import os
-          
           with open('generator.py', 'r') as f:
               content = f.read()
           
-          # Replace placeholders
           replacements = {
               '{{MODE_PLACEHOLDER}}': os.environ.get('USER_MODE', 'topic'),
               '{{TOPIC_PLACEHOLDER}}': os.environ.get('USER_TOPIC', ''),
@@ -64,10 +61,10 @@ jobs:
 
           python builder.py
 
-          # Metadata
+          # Metadata: Requesting T4 GPU explicitly
           echo '{
-            "id": "'"$KAGGLE_USERNAME"'/video-factory-runner",
-            "title": "Video Factory Runner",
+            "id": "'"$KAGGLE_USERNAME"'/video-factory-t4",
+            "title": "Video Factory T4 Runner",
             "code_file": "final_script.py",
             "language": "python",
             "kernel_type": "script",
@@ -99,9 +96,10 @@ jobs:
 
       - name: Wait for Result (Long Polling)
         run: |
-          echo "Polling Kaggle (Timeout: 45 mins)..."
-          for i in {1..90}; do
-            OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-runner)
+          echo "Polling Kaggle (Timeout: 6 Hours for long videos)..."
+          # 360 attempts * 60 seconds = 6 hours
+          for i in {1..360}; do
+            OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-t4)
             echo "$OUTPUT"
             if [[ "$OUTPUT" == *"COMPLETE"* ]]; then
               echo "Kernel finished successfully!"
@@ -110,22 +108,16 @@ jobs:
               echo "Kernel failed! Check Kaggle logs."
               exit 1
             fi
-            echo "Rendering Video... (Attempt $i/90)"
-            sleep 30
+            echo "Rendering... (Minute $i/360)"
+            sleep 60
           done
 
-      - name: Download & Deploy Video
+      - name: Download & Deploy
         run: |
-          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-runner -p ./output
-          
-          # Clean deployment folder
+          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-t4 -p ./output
           mkdir public_video
-          
-          # Move the unique file
-          # We use a wildcard because the filename contains the dynamic JobID
+          # Find the uniquely named file
           mv ./output/final_video_*.mp4 ./public_video/ || echo "No video found!"
-          
-          # Verify
           ls -R ./public_video
 
       - name: Publish to Branch
@@ -134,7 +126,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./public_video
           publish_branch: video-results
-          force_orphan: false  # FALSE: Keep history so multiple videos can exist if needed, or set true to clean
+          force_orphan: false 
           keep_files: false
           user_name: 'Video Bot'
           user_email: 'bot@video.com'
