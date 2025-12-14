@@ -61,19 +61,19 @@ jobs:
 
           python builder.py
 
-          # Metadata: Requesting T4 GPU explicitly
+          # Metadata: Explicitly requesting T4 x2
           echo '{
-            "id": "'"$KAGGLE_USERNAME"'/video-factory-t4",
-            "title": "Video Factory T4 Runner",
+            "id": "'"$KAGGLE_USERNAME"'/video-factory-ultra",
+            "title": "Video Factory Ultra",
             "code_file": "final_script.py",
             "language": "python",
             "kernel_type": "script",
             "is_private": "true",
             "enable_gpu": "true",
             "enable_internet": "true",
-            "dataset_sources": [],
             "kernel_sources": [],
-            "competition_sources": []
+            "competition_sources": [],
+            "dataset_sources": []
           }' > kernel-metadata.json
 
       - name: Push to Kaggle
@@ -96,10 +96,9 @@ jobs:
 
       - name: Wait for Result (Long Polling)
         run: |
-          echo "Polling Kaggle (Timeout: 6 Hours for long videos)..."
-          # 360 attempts * 60 seconds = 6 hours
+          echo "Polling Kaggle (Timeout: 6 Hours)..."
           for i in {1..360}; do
-            OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-t4)
+            OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-ultra)
             echo "$OUTPUT"
             if [[ "$OUTPUT" == *"COMPLETE"* ]]; then
               echo "Kernel finished successfully!"
@@ -114,11 +113,17 @@ jobs:
 
       - name: Download & Deploy
         run: |
-          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-t4 -p ./output
+          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-ultra -p ./output
+          
           mkdir public_video
-          # Find the uniquely named file
-          mv ./output/final_video_*.mp4 ./public_video/ || echo "No video found!"
-          ls -R ./public_video
+          # Find any MP4 (the name is dynamic)
+          find ./output -name "*.mp4" -exec mv {} ./public_video/ \;
+          
+          # Check
+          if [ -z "$(ls -A ./public_video)" ]; then
+             echo "Error: No MP4 file found in output!"
+             exit 1
+          fi
 
       - name: Publish to Branch
         uses: peaceiris/actions-gh-pages@v3
@@ -126,7 +131,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./public_video
           publish_branch: video-results
-          force_orphan: false 
+          force_orphan: false
           keep_files: false
           user_name: 'Video Bot'
           user_email: 'bot@video.com'
