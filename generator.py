@@ -14,7 +14,8 @@ from pathlib import Path
 # ==========================================
 print("Installing Dependencies...")
 try:
-    libs = ["chatterbox-tts", "torchaudio", "assemblyai", "google-generativeai", "requests", "beautifulsoup4", "pydub", "--quiet"]
+    # Ensure NLTK is installed for sentence splitting
+    libs = ["chatterbox-tts", "torchaudio", "assemblyai", "google-generativeai", "requests", "beautifulsoup4", "pydub", "nltk", "--quiet"]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
 except Exception as e:
@@ -25,7 +26,13 @@ import torchaudio
 import assemblyai as aai
 import google.generativeai as genai
 import requests
+import nltk
+from pydub import AudioSegment
+import scipy.io.wavfile as wav
 from chatterbox.tts import ChatterboxTTS
+
+# Ensure NLTK data is present
+nltk.download('punkt')
 
 # ==========================================
 # 2. CONFIGURATION
@@ -44,6 +51,8 @@ PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
 
 OUTPUT_DIR = Path("output")
 TEMP_DIR = Path("temp")
+# Clean start
+if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
@@ -93,43 +102,79 @@ def download_voice_sample(url, path):
     return False
 
 def generate_script(topic, minutes):
-    words = int(minutes * 150)
+    # Estimate word count (approx 140 words per minute)
+    words = int(minutes * 140)
     print(f"Generating {words} word script for: {topic} ({minutes} mins)")
     genai.configure(api_key=GEMINI_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-2.0-flash') # Updated model name if available, else use standard
     
-    # For long videos, we ask for structure
     prompt = f"""
-    Write a {words}-word YouTube script about '{topic}'.
-    Format: Plain spoken text ONLY. No headers. No *Asterisks*.
+    Write a detailed YouTube video script about '{topic}'.
+    Target Length: Approximately {words} words.
+    Style: Engaging, documentary style.
+    Format: Plain text only. NO headers, NO scene directions, NO [bracketed text]. Just the spoken narration.
     """
     try:
         text = model.generate_content(prompt).text
-        text = text.replace("*", "").replace("#", "")
+        # Clean up any potential markdown or formatting
+        text = text.replace("*", "").replace("#", "").replace("[", "").replace("]", "")
         return text.strip()
-    except: return f"Welcome to our video about {topic}."
+    except: 
+        return f"This is a video about {topic}. We will explore its history and significance."
 
 def clone_voice_chunked(text, ref_audio_path, out_path):
-    print("Cloning Voice...")
+    print("--- 🎙️ Starting Long-Form Voice Cloning ---")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     try:
+        # Load Model ONCE
         model = ChatterboxTTS.from_pretrained(device=device)
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 1]
+        
+        # 1. Intelligent Sentence Splitting
+        print("   Splitting text...")
+        sentences = nltk.sent_tokenize(text)
+        print(f"   Total Sentences: {len(sentences)}")
+        
         all_wavs = []
-        for i, chunk in enumerate(sentences):
-            chunk = chunk.replace('"', '').replace("'", "")
+        
+        # 2. Loop through sentences
+        for i, sentence in enumerate(sentences):
+            clean_sent = sentence.strip()
+            if len(clean_sent) < 2: continue
+            
+            # Progress marker every 10 sentences
+            if i % 10 == 0: print(f"   Processing sentence {i}/{len(sentences)}...")
+
             try:
                 with torch.no_grad():
-                    wav = model.generate(text=chunk, audio_prompt_path=str(ref_audio_path), exaggeration=0.5, cfg_weight=0.5)
-                    all_wavs.append(wav.cpu())
-            except: pass
+                    # Generate audio tensor
+                    wav_tensor = model.generate(
+                        text=clean_sent, 
+                        audio_prompt_path=str(ref_audio_path), 
+                        exaggeration=0.5, 
+                        cfg_weight=0.5
+                    )
+                    all_wavs.append(wav_tensor.cpu())
+                    
+                    # Optional: Add tiny silence between sentences (0.2s)
+                    silence = torch.zeros(1, int(24000 * 0.2)) # 24khz sample rate
+                    all_wavs.append(silence)
+                    
+            except Exception as e:
+                print(f"   ⚠️ Skipped sentence {i}: {e}")
+                continue
+
         if not all_wavs: return False
+
+        # 3. Merge and Save
+        print("   Merging audio chunks...")
         final_wav = torch.cat(all_wavs, dim=1)
-        torchaudio.save(out_path, final_wav, model.sr)
+        torchaudio.save(out_path, final_wav, 24000) # Ensure SR matches model (usually 24k)
+        print(f"   ✅ Audio saved to {out_path}")
         return True
+
     except Exception as e:
-        print(f"TTS Error: {e}")
+        print(f"TTS Critical Error: {e}")
         return False
 
 def generate_styled_subtitles(audio_path):
@@ -168,6 +213,7 @@ def format_time_ass(ms):
 
 # --- VIDEO PROCESSING ---
 def sanitize_clip(input_path, output_path, duration):
+    # Ensure even dimensions for h264
     cmd = [
         "ffmpeg", "-y", "-i", str(input_path),
         "-t", str(duration),
@@ -177,8 +223,9 @@ def sanitize_clip(input_path, output_path, duration):
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # AGGRESSIVE CLEANUP: Delete raw file immediately
-    if os.path.exists(input_path):
-        os.remove(input_path)
+    try:
+        if os.path.exists(input_path): os.remove(input_path)
+    except: pass
     return output_path
 
 def download_and_process_clip(data):
@@ -214,10 +261,11 @@ def download_and_process_clip(data):
         try:
             with open(raw_p, "wb") as f: f.write(requests.get(found_url).content)
             sanitize_clip(raw_p, out_p, duration)
-            print(f"  ✓ Clip {i} Ready")
+            # print(f"  ✓ Clip {i} Ready") # Reduce spam
             return str(out_p)
         except: pass
     
+    # Fallback Black Screen
     subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=1920x1080:d={duration}", "-t", str(duration), "-vf", "fps=30,pix_fmt=yuv420p", str(out_p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return str(out_p)
 
@@ -230,9 +278,11 @@ def process_batches(sentences, audio_path, ass_file, final_output):
     
     used_ids = set()
     
+    print(f"\n--- 🎬 Starting Visual Processing ({total_segments} clips) ---")
+
     for start_idx in range(0, total_segments, BATCH_SIZE):
         end_idx = min(start_idx + BATCH_SIZE, total_segments)
-        print(f"\n--- Processing Batch {start_idx}-{end_idx} / {total_segments} ---")
+        print(f"   Processing Batch {start_idx}-{end_idx}...")
         
         batch_sentences = sentences[start_idx:end_idx]
         
@@ -257,14 +307,15 @@ def process_batches(sentences, audio_path, ass_file, final_output):
         subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(batch_list), "-c", "copy", str(batch_video)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         # CLEANUP: Delete the small clips immediately
-        print("  🧹 Cleaning up batch clips...")
         for c in processed_clips:
-            if os.path.exists(c): os.remove(c)
+            try:
+                if os.path.exists(c): os.remove(c)
+            except: pass
             
         batch_files.append(str(batch_video))
         
     # Final Merge of Batches
-    print("\n--- Merging All Batches ---")
+    print("   Merging All Video Batches...")
     final_list = TEMP_DIR / "final_list.txt"
     visual_only = TEMP_DIR / "visual_full.mp4"
     
@@ -274,13 +325,14 @@ def process_batches(sentences, audio_path, ass_file, final_output):
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(final_list), "-c", "copy", str(visual_only)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     # Final Burn
+    print("   Burning Subtitles & Final Render...")
     ass_abs = Path(ass_file).resolve()
     ass_str = str(ass_abs).replace("\\", "/").replace(":", "\\:")
     
     cmd = [
         "ffmpeg", "-y", "-i", str(visual_only), "-i", str(audio_path),
         "-vf", f"ass='{ass_str}'",
-        "-c:v", "libx264", "-preset", "medium", "-b:v", "6000k",
+        "-c:v", "libx264", "-preset", "medium", "-b:v", "5000k", # Lower bitrate slightly for long vids
         "-c:a", "aac", "-b:a", "192k",
         "-shortest", str(final_output)
     ]
@@ -296,16 +348,23 @@ if not download_voice_sample(VOICE_URL, ref_voice):
     print("Failed to download voice")
     exit(1)
 
-text = generate_script(TOPIC, DURATION_MINS) if MODE == "topic" else SCRIPT_TEXT
-audio_out = TEMP_DIR / "tts_out.wav"
+# Generate Text
+if MODE == "topic":
+    text = generate_script(TOPIC, DURATION_MINS)
+else:
+    text = SCRIPT_TEXT
 
+# Audio Processing
+audio_out = TEMP_DIR / "tts_out.wav"
 if clone_voice_chunked(text, ref_voice, audio_out):
+    
+    # Subtitles
     sentences, ass_file = generate_styled_subtitles(audio_out)
     if sentences:
         final_video_name = f"final_video_{JOB_ID}.mp4"
         final_path = OUTPUT_DIR / final_video_name
         
-        # Use Batch Processor
+        # Video Processing
         process_batches(sentences, audio_out, ass_file, final_path)
         
         print(f"--- DONE: {final_video_name} ---")
