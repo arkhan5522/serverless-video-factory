@@ -104,7 +104,7 @@ def generate_script(topic, minutes):
     # Use the requested high-performance model
     # Note: 'gemini-2.0-flash-exp' is the current technical name for next-gen flash
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        model = genai.GenerativeModel('gemini-2.5-flash')
     except:
         model = genai.GenerativeModel('gemini-1.5-flash')
 
