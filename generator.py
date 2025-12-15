@@ -139,7 +139,7 @@ def generate_script(topic, minutes):
     print(f"Generating {words} word script for: {topic} ({minutes} mins)")
     
     genai.configure(api_key=GEMINI_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash-lite')
     
     prompt = f"""
     Write a YouTube video script about '{topic}'.
