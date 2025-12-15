@@ -10,12 +10,14 @@ import concurrent.futures
 from pathlib import Path
 
 # ==========================================
-# 1. AUTO-INSTALLER
+# 1. AUTO-INSTALLER & SETUP
 # ==========================================
 print("Installing Dependencies...")
 try:
-    # Ensure NLTK is installed for sentence splitting
-    libs = ["chatterbox-tts", "torchaudio", "assemblyai", "google-generativeai", "requests", "beautifulsoup4", "pydub", "nltk", "--quiet"]
+    libs = [
+        "chatterbox-tts", "torchaudio", "assemblyai", "google-generativeai", 
+        "requests", "beautifulsoup4", "pydub", "nltk", "numpy", "--quiet"
+    ]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
 except Exception as e:
@@ -28,15 +30,15 @@ import google.generativeai as genai
 import requests
 import nltk
 from pydub import AudioSegment
-import scipy.io.wavfile as wav
 from chatterbox.tts import ChatterboxTTS
 
-# Ensure NLTK data is present
-nltk.download('punkt')
+# Download NLTK data for sentence splitting
+nltk.download('punkt', quiet=True)
 
 # ==========================================
 # 2. CONFIGURATION
 # ==========================================
+# Template Placeholders (Do not change these manually)
 MODE = """{{MODE_PLACEHOLDER}}"""
 TOPIC = """{{TOPIC_PLACEHOLDER}}"""
 SCRIPT_TEXT = """{{SCRIPT_PLACEHOLDER}}"""
@@ -44,14 +46,17 @@ DURATION_MINS = float("""{{DURATION_PLACEHOLDER}}""")
 VOICE_URL = """{{VOICE_URL_PLACEHOLDER}}"""
 JOB_ID = """{{JOB_ID_PLACEHOLDER}}"""
 
+# API Keys
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
 PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
 
+# Paths
 OUTPUT_DIR = Path("output")
 TEMP_DIR = Path("temp")
-# Clean start
+
+# Aggressive Cleanup Start
 if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
@@ -71,14 +76,17 @@ VISUAL_MAP = {
 def get_visual_queries(text):
     text = text.lower()
     queries = []
+    # 1. Match categories
     for cat, terms in VISUAL_MAP.items():
         if cat in text:
             queries.extend(random.sample(terms, min(2, len(terms))))
     
-    words = [w for w in re.findall(r'\w+', text) if len(w) > 5]
+    # 2. Extract significant words
+    words = [w for w in re.findall(r'\w+', text) if len(w) > 6]
     if words: 
         queries.append(random.choice(words) + " cinematic")
     
+    # 3. Fallback
     if not queries: 
         queries = random.sample(VISUAL_MAP["abstract"], 3)
     
@@ -86,9 +94,141 @@ def get_visual_queries(text):
     return list(set(queries))[:3]
 
 # ==========================================
-# 4. CORE FUNCTIONS
+# 4. SCRIPT GENERATION (OPTIMIZED)
 # ==========================================
+def generate_script(topic, minutes):
+    # Word count estimation (approx 145 words/min for smooth reading)
+    total_words = int(minutes * 145)
+    genai.configure(api_key=GEMINI_KEY)
+    
+    # Use the requested high-performance model
+    # Note: 'gemini-2.0-flash-exp' is the current technical name for next-gen flash
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    except:
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
+    print(f"--- 📝 Generating Script: {topic} ({minutes} mins / ~{total_words} words) ---")
+
+    # CASE A: Short/Medium Video (<= 15 mins) -> Single Shot (Better Flow)
+    if minutes <= 15:
+        print("   Mode: Single-Shot Generation")
+        prompt = f"""
+        Write a complete spoken-word script for a video about '{topic}'.
+        Target Length: {total_words} words.
+        Style: Engaging, storytelling, documentary flow.
+        Format: RAW TEXT ONLY. No headers, no 'Scene 1', no [Music]. Just the narration.
+        """
+        try:
+            return model.generate_content(prompt).text.strip()
+        except Exception as e:
+            print(f"Generation Error: {e}")
+            return f"Welcome to our deep dive into {topic}."
+
+    # CASE B: Long Video (> 15 mins) -> Chunked Generation (To avoid limits)
+    else:
+        print("   Mode: Chunked Generation (Marathon)")
+        
+        # 1. Create a Hidden Flow (Outline)
+        num_sections = int(minutes / 5) # One chunk every 5 mins
+        outline_prompt = f"""
+        Plan a {minutes}-minute documentary on '{topic}'.
+        Break it down into {num_sections} key narrative sections.
+        Output just the list of sections.
+        """
+        try:
+            outline_res = model.generate_content(outline_prompt).text
+            sections = [s for s in outline_res.split('\n') if s.strip() and not s.startswith('*')]
+        except:
+            sections = [f"Aspect {i} of {topic}" for i in range(num_sections)]
+            
+        full_script = []
+        
+        # 2. Write Chunks
+        for i, section in enumerate(sections):
+            print(f"   Writing Section {i+1}/{len(sections)}: {section}...")
+            
+            chunk_words = int(total_words / len(sections))
+            
+            context_prompt = ""
+            if i > 0:
+                prev_text = full_script[-1][-200:] # Last 200 chars for context
+                context_prompt = f"Context: The previous section ended with: '...{prev_text}'."
+
+            prompt = f"""
+            Write the next part of the script focusing on: "{section}".
+            {context_prompt}
+            Length: ~{chunk_words} words.
+            Constraint: Write as a CONTINUOUS FLOW. Do NOT use headings like 'Part 1'. Do NOT say 'Welcome back'.
+            Make it sound like one seamless story.
+            """
+            
+            try:
+                res = model.generate_content(prompt).text
+                # Clean formatting
+                clean_text = res.replace("##", "").replace("**", "").replace("Section:", "")
+                full_script.append(clean_text.strip())
+            except Exception as e:
+                print(f"     ⚠️ Skip section {i}: {e}")
+                time.sleep(1)
+
+        print(f"   ✓ Script Assembled: {len(' '.join(full_script).split())} words")
+        return " ".join(full_script)
+
+# ==========================================
+# 5. AUDIO ENGINE (ROBUST)
+# ==========================================
+def clone_voice_robust(text, ref_audio_path, out_path):
+    print("\n--- 🎙️ Starting Voice Cloning Engine ---")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    try:
+        model = ChatterboxTTS.from_pretrained(device=device)
+        
+        # Intelligent Splitting
+        sentences = nltk.sent_tokenize(text)
+        print(f"   Queue: {len(sentences)} sentences")
+        
+        all_tensors = []
+        
+        for i, sent in enumerate(sentences):
+            clean = sent.strip()
+            if len(clean) < 2: continue
+            
+            if i % 10 == 0: print(f"   Rendering Audio {i}/{len(sentences)}...")
+            
+            try:
+                with torch.no_grad():
+                    # Generate
+                    wav = model.generate(
+                        text=clean, 
+                        audio_prompt_path=str(ref_audio_path), 
+                        exaggeration=0.5, 
+                        cfg_weight=0.5
+                    )
+                    all_tensors.append(wav.cpu())
+                    
+                    # Micro-pause for natural flow (0.25s)
+                    silence = torch.zeros(1, int(24000 * 0.25))
+                    all_tensors.append(silence)
+            except: 
+                continue
+
+        if not all_tensors: return False
+
+        # Merge
+        print("   Merging Audio Streams...")
+        final_wav = torch.cat(all_tensors, dim=1)
+        torchaudio.save(out_path, final_wav, 24000)
+        return True
+
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        return False
+
+# ==========================================
+# 6. VISUAL ENGINE (BATCHED)
+# ==========================================
 def download_voice_sample(url, path):
     print(f"Downloading voice: {url}")
     try:
@@ -101,96 +241,21 @@ def download_voice_sample(url, path):
     except: pass
     return False
 
-def generate_script(topic, minutes):
-    # Estimate word count (approx 140 words per minute)
-    words = int(minutes * 140)
-    print(f"Generating {words} word script for: {topic} ({minutes} mins)")
-    genai.configure(api_key=GEMINI_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash') # Updated model name if available, else use standard
-    
-    prompt = f"""
-    Write a detailed YouTube video script about '{topic}'.
-    Target Length: Approximately {words} words.
-    Style: Engaging, documentary style.
-    Format: Plain text only. NO headers, NO scene directions, NO [bracketed text]. Just the spoken narration.
-    """
-    try:
-        text = model.generate_content(prompt).text
-        # Clean up any potential markdown or formatting
-        text = text.replace("*", "").replace("#", "").replace("[", "").replace("]", "")
-        return text.strip()
-    except: 
-        return f"This is a video about {topic}. We will explore its history and significance."
-
-def clone_voice_chunked(text, ref_audio_path, out_path):
-    print("--- 🎙️ Starting Long-Form Voice Cloning ---")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    try:
-        # Load Model ONCE
-        model = ChatterboxTTS.from_pretrained(device=device)
-        
-        # 1. Intelligent Sentence Splitting
-        print("   Splitting text...")
-        sentences = nltk.sent_tokenize(text)
-        print(f"   Total Sentences: {len(sentences)}")
-        
-        all_wavs = []
-        
-        # 2. Loop through sentences
-        for i, sentence in enumerate(sentences):
-            clean_sent = sentence.strip()
-            if len(clean_sent) < 2: continue
-            
-            # Progress marker every 10 sentences
-            if i % 10 == 0: print(f"   Processing sentence {i}/{len(sentences)}...")
-
-            try:
-                with torch.no_grad():
-                    # Generate audio tensor
-                    wav_tensor = model.generate(
-                        text=clean_sent, 
-                        audio_prompt_path=str(ref_audio_path), 
-                        exaggeration=0.5, 
-                        cfg_weight=0.5
-                    )
-                    all_wavs.append(wav_tensor.cpu())
-                    
-                    # Optional: Add tiny silence between sentences (0.2s)
-                    silence = torch.zeros(1, int(24000 * 0.2)) # 24khz sample rate
-                    all_wavs.append(silence)
-                    
-            except Exception as e:
-                print(f"   ⚠️ Skipped sentence {i}: {e}")
-                continue
-
-        if not all_wavs: return False
-
-        # 3. Merge and Save
-        print("   Merging audio chunks...")
-        final_wav = torch.cat(all_wavs, dim=1)
-        torchaudio.save(out_path, final_wav, 24000) # Ensure SR matches model (usually 24k)
-        print(f"   ✅ Audio saved to {out_path}")
-        return True
-
-    except Exception as e:
-        print(f"TTS Critical Error: {e}")
-        return False
-
-def generate_styled_subtitles(audio_path):
+def generate_subtitles(audio_path):
     print("Generating Subtitles...")
     aai.settings.api_key = ASSEMBLY_KEY
     t = aai.Transcriber().transcribe(str(audio_path))
     if t.status == aai.TranscriptStatus.error: return [], None
     
     ass_path = TEMP_DIR / "style.ass"
+    # High Quality Subtitle Style
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
 PlayResY: 1080
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,65,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,60,1
+Style: Default,Arial,65,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,60,1
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
@@ -199,8 +264,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for s in t.get_sentences():
             start = format_time_ass(s.start)
             end = format_time_ass(s.end)
-            clean_text = s.text.replace("'", "").replace('"', '')
-            f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{clean_text}\n")
+            clean = s.text.replace("'", "").replace('"', '')
+            f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{clean}\n")
             
     sentences = [{"text": s.text, "start": s.start/1000, "end": s.end/1000} for s in t.get_sentences()]
     return sentences, ass_path
@@ -211,162 +276,130 @@ def format_time_ass(ms):
     h, m = divmod(m, 60)
     return f"{h}:{m:02d}:{s:02d}.{ms//10:02d}"
 
-# --- VIDEO PROCESSING ---
-def sanitize_clip(input_path, output_path, duration):
-    # Ensure even dimensions for h264
-    cmd = [
-        "ffmpeg", "-y", "-i", str(input_path),
-        "-t", str(duration),
-        "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-        "-pix_fmt", "yuv420p", "-an", str(output_path)
-    ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # AGGRESSIVE CLEANUP: Delete raw file immediately
-    try:
-        if os.path.exists(input_path): os.remove(input_path)
-    except: pass
-    return output_path
-
-def download_and_process_clip(data):
+def process_clip(data):
     i, sent, used_ids = data
     duration = max(3.5, sent['end'] - sent['start'])
     queries = get_visual_queries(sent['text'])
     out_p = TEMP_DIR / f"seg_{i}.mp4"
     
+    # Try Pexels first, then Pixabay
     found_url = None
-    # Pexels
     if PEXELS_KEYS:
         try:
             h = {"Authorization": random.choice(PEXELS_KEYS)}
-            r = requests.get(f"https://api.pexels.com/videos/search?query={queries[0]}&orientation=landscape&size=medium", headers=h, timeout=5)
+            r = requests.get(f"https://api.pexels.com/videos/search?query={queries[0]}&orientation=landscape&size=medium", headers=h, timeout=4)
             videos = r.json().get('videos', [])
             for v in videos:
                 if v['id'] not in used_ids:
                     found_url = v['video_files'][0]['link']; used_ids.add(v['id']); break
-            if not found_url and videos: found_url = videos[0]['video_files'][0]['link']
         except: pass
         
-    # Pixabay
     if not found_url and PIXABAY_KEYS:
         try:
             k = random.choice(PIXABAY_KEYS)
-            r = requests.get(f"https://pixabay.com/api/videos/?key={k}&q={queries[0]}&video_type=film", timeout=5)
+            r = requests.get(f"https://pixabay.com/api/videos/?key={k}&q={queries[0]}&video_type=film", timeout=4)
             hits = r.json().get('hits', [])
             if hits: found_url = hits[0]['videos']['medium']['url']
         except: pass
 
+    # FFmpeg Processing
     if found_url:
-        raw_p = TEMP_DIR / f"raw_{i}.mp4"
         try:
+            raw_p = TEMP_DIR / f"raw_{i}.mp4"
             with open(raw_p, "wb") as f: f.write(requests.get(found_url).content)
-            sanitize_clip(raw_p, out_p, duration)
-            # print(f"  ✓ Clip {i} Ready") # Reduce spam
+            
+            subprocess.run([
+                "ffmpeg", "-y", "-i", str(raw_p), "-t", str(duration),
+                "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-an", str(out_p)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            if os.path.exists(raw_p): os.remove(raw_p)
             return str(out_p)
         except: pass
-    
-    # Fallback Black Screen
-    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=1920x1080:d={duration}", "-t", str(duration), "-vf", "fps=30,pix_fmt=yuv420p", str(out_p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # Fallback
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=1920x1080:d={duration}", "-t", str(duration), "-vf", "fps=30", str(out_p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return str(out_p)
 
-# --- BATCH PROCESSOR ---
-def process_batches(sentences, audio_path, ass_file, final_output):
-    """Handles long videos by processing in 50-segment batches"""
+def render_final_video(sentences, audio_path, ass_file, final_output):
     BATCH_SIZE = 50
-    total_segments = len(sentences)
-    batch_files = []
-    
+    total = len(sentences)
+    parts = []
     used_ids = set()
-    
-    print(f"\n--- 🎬 Starting Visual Processing ({total_segments} clips) ---")
 
-    for start_idx in range(0, total_segments, BATCH_SIZE):
-        end_idx = min(start_idx + BATCH_SIZE, total_segments)
-        print(f"   Processing Batch {start_idx}-{end_idx}...")
+    print(f"\n--- 🎬 Visual Processing ({total} clips) ---")
+
+    for start in range(0, total, BATCH_SIZE):
+        end = min(start + BATCH_SIZE, total)
+        print(f"   Batch {start}-{end}...")
         
-        batch_sentences = sentences[start_idx:end_idx]
+        tasks = [(start + i, sent, used_ids) for i, sent in enumerate(sentences[start:end])]
         
-        # Parallel Download for this batch
-        tasks = []
-        for i, sent in enumerate(batch_sentences):
-            # Maintain global index for filenames
-            global_idx = start_idx + i
-            tasks.append((global_idx, sent, used_ids))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as exe:
+            clips = list(exe.map(process_clip, tasks))
             
-        processed_clips = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            processed_clips = list(executor.map(download_and_process_clip, tasks))
+        # Concat Batch
+        batch_txt = TEMP_DIR / f"list_{start}.txt"
+        batch_vid = TEMP_DIR / f"part_{start}.mp4"
+        with open(batch_txt, "w") as f:
+            for c in clips: f.write(f"file '{c}'\n")
             
-        # Concat this batch into a temp video part
-        batch_list = TEMP_DIR / f"batch_{start_idx}.txt"
-        batch_video = TEMP_DIR / f"video_part_{start_idx}.mp4"
+        subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(batch_txt), "-c", "copy", str(batch_vid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        with open(batch_list, "w") as f:
-            for c in processed_clips: f.write(f"file '{c}'\n")
-            
-        subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(batch_list), "-c", "copy", str(batch_video)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # CLEANUP: Delete the small clips immediately
-        for c in processed_clips:
-            try:
-                if os.path.exists(c): os.remove(c)
-            except: pass
-            
-        batch_files.append(str(batch_video))
-        
-    # Final Merge of Batches
-    print("   Merging All Video Batches...")
+        # Cleanup clips
+        for c in clips: 
+            if os.path.exists(c): os.remove(c)
+        parts.append(str(batch_vid))
+
+    # Merge All
+    print("   Merging Batches...")
+    full_vis = TEMP_DIR / "full_visual.mp4"
     final_list = TEMP_DIR / "final_list.txt"
-    visual_only = TEMP_DIR / "visual_full.mp4"
-    
     with open(final_list, "w") as f:
-        for b in batch_files: f.write(f"file '{b}'\n")
+        for p in parts: f.write(f"file '{p}'\n")
         
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(final_list), "-c", "copy", str(visual_only)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(final_list), "-c", "copy", str(full_vis)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     # Final Burn
-    print("   Burning Subtitles & Final Render...")
-    ass_abs = Path(ass_file).resolve()
-    ass_str = str(ass_abs).replace("\\", "/").replace(":", "\\:")
-    
+    print("   Final Render (Burning Subtitles)...")
+    ass_fix = str(Path(ass_file).resolve()).replace("\\", "/").replace(":", "\\:")
     cmd = [
-        "ffmpeg", "-y", "-i", str(visual_only), "-i", str(audio_path),
-        "-vf", f"ass='{ass_str}'",
-        "-c:v", "libx264", "-preset", "medium", "-b:v", "5000k", # Lower bitrate slightly for long vids
+        "ffmpeg", "-y", "-i", str(full_vis), "-i", str(audio_path),
+        "-vf", f"ass='{ass_fix}'",
+        "-c:v", "libx264", "-preset", "medium", "-b:v", "4500k",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest", str(final_output)
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # ==========================================
-# 5. EXECUTION
+# 7. MAIN EXECUTION
 # ==========================================
-print("--- STARTING MARATHON VIDEO PIPELINE ---")
+print("--- INITIALIZING PIPELINE ---")
 ref_voice = TEMP_DIR / "ref_voice.mp3"
 
 if not download_voice_sample(VOICE_URL, ref_voice):
-    print("Failed to download voice")
+    print("Critical: Failed to download voice sample.")
     exit(1)
 
-# Generate Text
+# 1. Script
 if MODE == "topic":
     text = generate_script(TOPIC, DURATION_MINS)
 else:
     text = SCRIPT_TEXT
 
-# Audio Processing
+# 2. Audio
 audio_out = TEMP_DIR / "tts_out.wav"
-if clone_voice_chunked(text, ref_voice, audio_out):
+if clone_voice_robust(text, ref_voice, audio_out):
     
-    # Subtitles
-    sentences, ass_file = generate_styled_subtitles(audio_out)
+    # 3. Subtitles & Video
+    sentences, ass_file = generate_subtitles(audio_out)
     if sentences:
-        final_video_name = f"final_video_{JOB_ID}.mp4"
-        final_path = OUTPUT_DIR / final_video_name
-        
-        # Video Processing
-        process_batches(sentences, audio_out, ass_file, final_path)
-        
-        print(f"--- DONE: {final_video_name} ---")
-    else: print("Subtitles failed")
-else: print("Audio failed")
+        final_file = OUTPUT_DIR / f"final_video_{JOB_ID}.mp4"
+        render_final_video(sentences, audio_out, ass_file, final_file)
+        print(f"--- SUCCESS: {final_file} ---")
+    else:
+        print("Subtitle Generation Failed.")
+else:
+    print("Audio Generation Failed.")
