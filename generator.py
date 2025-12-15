@@ -48,74 +48,33 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ==========================================
-# 3. MASSIVE VISUAL DICTIONARY (Broad & Deep)
+# 3. VISUAL DICTIONARY
 # ==========================================
 VISUAL_MAP = {
-    # TECH & FUTURE
-    "tech": ["futuristic technology", "server room", "coding screen", "robot arm", "circuit board", "hologram", "microchip"],
-    "ai": ["artificial intelligence abstract", "brain neural network", "cyborg eye", "digital mind", "robot face"],
-    "cyber": ["hacker hoodie", "matrix code", "security padlock", "digital shield", "cyber city", "fingerprint scan"],
-    "innovation": ["light bulb turning on", "rocket launch", "drone flying", "3d printer printing", "vr headset"],
-
-    # BUSINESS
-    "business": ["corporate meeting", "handshake slow motion", "office skyscraper", "man in suit walking", "team brainstorming"],
-    "finance": ["stock market graph", "money falling", "gold coins", "bitcoin", "wallet", "credit card", "bank vault"],
-    "work": ["typing on keyboard", "writing in notebook", "whiteboard strategy", "laptop coffee", "architect drawing"],
-
-    # NATURE
-    "nature": ["forest aerial", "ocean waves", "mountain sunset", "flowers blooming", "waterfall", "desert sand"],
-    "space": ["galaxy stars", "planet earth rotating", "astronaut", "moon surface", "nebula", "mars surface"],
-    "elements": ["fire flames", "water splash slow motion", "smoke swirling", "lightning storm", "clouds timelapse"],
-
-    # HISTORY
-    "history": ["ancient ruins", "museum statue", "old map", "vintage library", "pyramids", "colosseum rome", "medieval castle"],
-    "war": ["soldiers marching", "tank mud", "flag waving", "military aircraft", "cannon fire"],
-    "art": ["painting canvas", "sculpture museum", "artist drawing", "color palette", "gallery walk"],
-
-    # LIFESTYLE
-    "happy": ["people laughing", "party confetti", "smiling face", "friends jumping", "toast cheers"],
-    "sad": ["rainy window", "lonely person sitting", "dark clouds", "tear eye", "empty chair"],
-    "health": ["doctor stethoscope", "yoga sunset", "healthy food", "running track", "gym workout"],
-    "city": ["city timelapse night", "busy street walking", "traffic lights", "subway train", "skyscraper view"],
-
-    # CONCEPTS (Abstract mappings)
-    "time": ["clock ticking", "hourglass sand", "time lapse city", "calendar flip", "sunrise sunset"],
-    "freedom": ["bird flying", "running field", "open road", "mountain top"],
-    "mystery": ["foggy forest", "dark alley", "shadow figure", "candle light", "old book dust"],
-    "communication": ["talking phone", "writing letter", "satellite dish", "network nodes"],
-    
-    # SAFETY NET
-    "abstract": ["ink in water", "light leaks", "particles dust", "geometric shapes", "bokeh lights", "fractal animation"]
+    "tech": ["futuristic technology", "server room", "coding screen", "robot arm", "circuit board", "hologram"],
+    "business": ["corporate meeting", "handshake slow motion", "office skyscraper", "man in suit walking"],
+    "finance": ["stock market graph", "money falling", "gold coins", "bitcoin", "wallet"],
+    "nature": ["forest aerial", "ocean waves", "mountain sunset", "flowers blooming", "waterfall"],
+    "history": ["ancient ruins", "museum statue", "old map", "vintage library", "pyramids"],
+    "abstract": ["ink in water", "light leaks", "particles dust", "geometric shapes", "smoke swirling", "bokeh lights"]
 }
 
 def get_visual_queries(text):
     text = text.lower()
     queries = []
-    
-    # 1. Direct Map
     for cat, terms in VISUAL_MAP.items():
         if cat in text:
             queries.extend(random.sample(terms, min(2, len(terms))))
-            
-    # 2. Concept Mapping
-    if "idea" in text: queries.append("light bulb")
-    if "global" in text: queries.append("earth rotating")
-    if "speed" in text: queries.append("fast car")
-    if "love" in text: queries.append("couple holding hands")
-    if "ancient" in text: queries.append("ruins")
-    if "future" in text: queries.append("futuristic city")
     
-    # 3. Noun Extraction (Broad)
     words = [w for w in re.findall(r'\w+', text) if len(w) > 5]
     if words: 
         queries.append(random.choice(words) + " cinematic")
     
-    # 4. Fallback
     if not queries: 
         queries = random.sample(VISUAL_MAP["abstract"], 3)
     
     random.shuffle(queries)
-    return list(set(queries))[:4]
+    return list(set(queries))[:3]
 
 # ==========================================
 # 4. CORE FUNCTIONS
@@ -134,54 +93,37 @@ def download_voice_sample(url, path):
     return False
 
 def generate_script(topic, minutes):
-    # Precise Timing: 150 words per minute
     words = int(minutes * 150)
     print(f"Generating {words} word script for: {topic} ({minutes} mins)")
-    
     genai.configure(api_key=GEMINI_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
     
+    # For long videos, we ask for structure
     prompt = f"""
-    Write a YouTube video script about '{topic}'.
-    
-    STRICT CONSTRAINTS:
-    - Total Word Count: Approximately {words} words (CRITICAL for timing).
-    - Format: Plain spoken text ONLY. No [Scene Directions]. No (Timecodes). No *Asterisks*.
-    - Structure: Engaging Hook -> Intro -> detailed Body -> Conclusion.
-    - Style: Professional, storytelling, engaging.
+    Write a {words}-word YouTube script about '{topic}'.
+    Format: Plain spoken text ONLY. No headers. No *Asterisks*.
     """
     try:
         text = model.generate_content(prompt).text
-        # Clean specific artifacts
-        text = text.replace("*", "").replace("#", "").replace("[", "").replace("]", "").replace("(", "").replace(")", "")
+        text = text.replace("*", "").replace("#", "")
         return text.strip()
-    except: return f"Welcome to our video about {topic}. Please enjoy the visuals."
+    except: return f"Welcome to our video about {topic}."
 
-# --- AUDIO GENERATION ---
 def clone_voice_chunked(text, ref_audio_path, out_path):
     print("Cloning Voice...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Audio Device: {device}")
-    
     try:
         model = ChatterboxTTS.from_pretrained(device=device)
         sentences = re.split(r'(?<=[.!?])\s+', text)
         sentences = [s.strip() for s in sentences if len(s.strip()) > 1]
-        
         all_wavs = []
         for i, chunk in enumerate(sentences):
             chunk = chunk.replace('"', '').replace("'", "")
             try:
                 with torch.no_grad():
-                    wav = model.generate(
-                        text=chunk,
-                        audio_prompt_path=str(ref_audio_path),
-                        exaggeration=0.5,
-                        cfg_weight=0.5
-                    )
+                    wav = model.generate(text=chunk, audio_prompt_path=str(ref_audio_path), exaggeration=0.5, cfg_weight=0.5)
                     all_wavs.append(wav.cpu())
             except: pass
-
         if not all_wavs: return False
         final_wav = torch.cat(all_wavs, dim=1)
         torchaudio.save(out_path, final_wav, model.sr)
@@ -190,7 +132,6 @@ def clone_voice_chunked(text, ref_audio_path, out_path):
         print(f"TTS Error: {e}")
         return False
 
-# --- SUBTITLES ---
 def generate_styled_subtitles(audio_path):
     print("Generating Subtitles...")
     aai.settings.api_key = ASSEMBLY_KEY
@@ -198,14 +139,13 @@ def generate_styled_subtitles(audio_path):
     if t.status == aai.TranscriptStatus.error: return [], None
     
     ass_path = TEMP_DIR / "style.ass"
-    # Yellow, Bold, Shadow
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
 PlayResY: 1080
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,70,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,70,1
+Style: Default,Arial,65,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,60,1
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
@@ -226,46 +166,41 @@ def format_time_ass(ms):
     h, m = divmod(m, 60)
     return f"{h}:{m:02d}:{s:02d}.{ms//10:02d}"
 
-# --- OPTIMIZED VIDEO PROCESSING ---
+# --- VIDEO PROCESSING ---
 def sanitize_clip(input_path, output_path, duration):
-    # Preset: ultrafast for sanitization (we just need format match)
-    # This is much faster than 'slow' and safe for intermediate clips
     cmd = [
         "ffmpeg", "-y", "-i", str(input_path),
         "-t", str(duration),
         "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-        "-pix_fmt", "yuv420p", "-an",
-        str(output_path)
+        "-pix_fmt", "yuv420p", "-an", str(output_path)
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # AGGRESSIVE CLEANUP: Delete raw file immediately
+    if os.path.exists(input_path):
+        os.remove(input_path)
     return output_path
 
 def download_and_process_clip(data):
-    """Helper for parallel execution"""
     i, sent, used_ids = data
     duration = max(3.5, sent['end'] - sent['start'])
     queries = get_visual_queries(sent['text'])
     out_p = TEMP_DIR / f"seg_{i}.mp4"
     
     found_url = None
-    
-    # Try Pexels
+    # Pexels
     if PEXELS_KEYS:
         try:
             h = {"Authorization": random.choice(PEXELS_KEYS)}
             r = requests.get(f"https://api.pexels.com/videos/search?query={queries[0]}&orientation=landscape&size=medium", headers=h, timeout=5)
             videos = r.json().get('videos', [])
             for v in videos:
-                # Basic loop avoidance
                 if v['id'] not in used_ids:
-                    found_url = v['video_files'][0]['link']
-                    used_ids.add(v['id']) # Note: This isn't thread-safe strictly but good enough for randomness
-                    break
+                    found_url = v['video_files'][0]['link']; used_ids.add(v['id']); break
             if not found_url and videos: found_url = videos[0]['video_files'][0]['link']
         except: pass
         
-    # Try Pixabay
+    # Pixabay
     if not found_url and PIXABAY_KEYS:
         try:
             k = random.choice(PIXABAY_KEYS)
@@ -279,56 +214,82 @@ def download_and_process_clip(data):
         try:
             with open(raw_p, "wb") as f: f.write(requests.get(found_url).content)
             sanitize_clip(raw_p, out_p, duration)
-            print(f"  ✓ Clip {i} Ready ({queries[0]})")
+            print(f"  ✓ Clip {i} Ready")
             return str(out_p)
         except: pass
     
-    # Fallback Black Clip
     subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=1920x1080:d={duration}", "-t", str(duration), "-vf", "fps=30,pix_fmt=yuv420p", str(out_p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"  ⚠️ Clip {i} Fallback")
     return str(out_p)
 
-def search_and_download_clips_parallel(sentences):
-    print(f"Fetching {len(sentences)} clips in PARALLEL (4 Threads)...")
-    clips = [None] * len(sentences)
+# --- BATCH PROCESSOR ---
+def process_batches(sentences, audio_path, ass_file, final_output):
+    """Handles long videos by processing in 50-segment batches"""
+    BATCH_SIZE = 50
+    total_segments = len(sentences)
+    batch_files = []
+    
     used_ids = set()
     
-    # Prepare data for threads
-    tasks = []
-    for i, sent in enumerate(sentences):
-        tasks.append((i, sent, used_ids))
+    for start_idx in range(0, total_segments, BATCH_SIZE):
+        end_idx = min(start_idx + BATCH_SIZE, total_segments)
+        print(f"\n--- Processing Batch {start_idx}-{end_idx} / {total_segments} ---")
         
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        results = executor.map(download_and_process_clip, tasks)
+        batch_sentences = sentences[start_idx:end_idx]
         
-    return list(results)
-
-def render_video(clips, audio, ass_file, output):
-    print("Rendering Final Cinema-Quality Video...")
-    with open("list.txt", "w") as f:
-        for c in clips: f.write(f"file '{c}'\n")
+        # Parallel Download for this batch
+        tasks = []
+        for i, sent in enumerate(batch_sentences):
+            # Maintain global index for filenames
+            global_idx = start_idx + i
+            tasks.append((global_idx, sent, used_ids))
+            
+        processed_clips = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            processed_clips = list(executor.map(download_and_process_clip, tasks))
+            
+        # Concat this batch into a temp video part
+        batch_list = TEMP_DIR / f"batch_{start_idx}.txt"
+        batch_video = TEMP_DIR / f"video_part_{start_idx}.mp4"
+        
+        with open(batch_list, "w") as f:
+            for c in processed_clips: f.write(f"file '{c}'\n")
+            
+        subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(batch_list), "-c", "copy", str(batch_video)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # CLEANUP: Delete the small clips immediately
+        print("  🧹 Cleaning up batch clips...")
+        for c in processed_clips:
+            if os.path.exists(c): os.remove(c)
+            
+        batch_files.append(str(batch_video))
+        
+    # Final Merge of Batches
+    print("\n--- Merging All Batches ---")
+    final_list = TEMP_DIR / "final_list.txt"
+    visual_only = TEMP_DIR / "visual_full.mp4"
     
-    # Fast Concat
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "visual.mp4"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(final_list, "w") as f:
+        for b in batch_files: f.write(f"file '{b}'\n")
+        
+    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(final_list), "-c", "copy", str(visual_only)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
+    # Final Burn
     ass_abs = Path(ass_file).resolve()
     ass_str = str(ass_abs).replace("\\", "/").replace(":", "\\:")
     
-    # Preset: Medium (Best balance of Speed vs Quality for 1080p)
-    # Slow preset is diminishing returns for this use case
     cmd = [
-        "ffmpeg", "-y", "-i", "visual.mp4", "-i", str(audio),
+        "ffmpeg", "-y", "-i", str(visual_only), "-i", str(audio_path),
         "-vf", f"ass='{ass_str}'",
         "-c:v", "libx264", "-preset", "medium", "-b:v", "6000k",
         "-c:a", "aac", "-b:a", "192k",
-        "-shortest", str(output)
+        "-shortest", str(final_output)
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # ==========================================
 # 5. EXECUTION
 # ==========================================
-print("--- STARTING TURBO HIGH-FIDELITY PIPELINE ---")
+print("--- STARTING MARATHON VIDEO PIPELINE ---")
 ref_voice = TEMP_DIR / "ref_voice.mp3"
 
 if not download_voice_sample(VOICE_URL, ref_voice):
@@ -341,10 +302,12 @@ audio_out = TEMP_DIR / "tts_out.wav"
 if clone_voice_chunked(text, ref_voice, audio_out):
     sentences, ass_file = generate_styled_subtitles(audio_out)
     if sentences:
-        clips = search_and_download_clips_parallel(sentences)
         final_video_name = f"final_video_{JOB_ID}.mp4"
         final_path = OUTPUT_DIR / final_video_name
-        render_video(clips, audio_out, ass_file, final_path)
+        
+        # Use Batch Processor
+        process_batches(sentences, audio_out, ass_file, final_path)
+        
         print(f"--- DONE: {final_video_name} ---")
     else: print("Subtitles failed")
 else: print("Audio failed")
