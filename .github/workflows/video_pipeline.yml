@@ -24,11 +24,11 @@ jobs:
 
       - name: Build & Push to Kaggle
         env:
-          # --- FIX 1: Username is now available in this step ---
+          # AUTH
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
           
-          # Payload Data
+          # PAYLOAD
           USER_MODE: ${{ github.event.client_payload.mode }}
           USER_TOPIC: ${{ github.event.client_payload.topic }}
           USER_SCRIPT: ${{ github.event.client_payload.script }}
@@ -37,7 +37,7 @@ jobs:
           USER_LOGO_PATH: ${{ github.event.client_payload.logo_path }}
           USER_JOB_ID: ${{ github.event.client_payload.job_id }}
           
-          # Secrets
+          # API KEYS
           GH_PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }} 
           ASSEMBLY_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
@@ -46,12 +46,12 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         run: |
-          # 1. Authenticate Kaggle
+          # 1. Setup Kaggle Auth
           mkdir -p ~/.kaggle
           echo "{\"username\":\"$KAGGLE_USERNAME\",\"key\":\"$KAGGLE_KEY\"}" > ~/.kaggle/kaggle.json
           chmod 600 ~/.kaggle/kaggle.json
 
-          # 2. Generate Python Script (Builder)
+          # 2. Build Python Script
           cat <<EOF > builder.py
           import os
           with open('generator.py', 'r') as f: content = f.read()
@@ -71,7 +71,7 @@ jobs:
           EOF
           python builder.py
 
-          # 3. Inject Secrets Header
+          # 3. Create Secrets Header
           echo "import os" > config_header.py
           echo "os.environ['GH_PAT'] = '$GH_PAT'" >> config_header.py
           echo "os.environ['GEMINI_API_KEY'] = '$GEMINI_KEY'" >> config_header.py
@@ -83,11 +83,10 @@ jobs:
           
           cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
 
-          # 4. Generate Metadata (With Correct Username)
-          # Note: We create this manually to ensure 'enable_gpu' is true
+          # 4. Create NEW Metadata Name (Fresh Start)
           echo '{
-            "id": "'"$KAGGLE_USERNAME"'/video-factory-ultra",
-            "title": "Video Factory Ultra",
+            "id": "'"$KAGGLE_USERNAME"'/video-factory-titan",
+            "title": "Video Factory Titan",
             "code_file": "final_script.py",
             "language": "python",
             "kernel_type": "script",
@@ -99,14 +98,15 @@ jobs:
             "competition_sources": []
           }' > kernel-metadata.json
 
-          # 5. Push
+          # 5. Push to Kaggle
           kaggle kernels push -p .
 
       - name: Wait for Result (Long Polling)
         run: |
           echo "Polling Kaggle (Timeout: 6 Hours)..."
+          # Updated to check for the NEW kernel name
           for i in {1..360}; do
-            OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-ultra)
+            OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-titan)
             echo "$OUTPUT"
             
             if [[ "$OUTPUT" == *"complete"* ]]; then
@@ -124,9 +124,10 @@ jobs:
       - name: Download Output
         continue-on-error: true
         run: |
-          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-ultra -p ./output
+          # Updated to download from the NEW kernel name
+          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-titan -p ./output
           mkdir public_video
-          mv ./output/final_video_*.mp4 ./public_video/ || echo "Video likely uploaded to File.io only."
+          mv ./output/final_video_*.mp4 ./public_video/ || echo "Video uploaded to File.io only."
 
       - name: Backup to Repo
         uses: peaceiris/actions-gh-pages@v3
