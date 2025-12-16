@@ -877,7 +877,7 @@ def download_asset(path, local):
 # 7. SCRIPT & AUDIO
 # ==========================================
 def generate_script(topic, minutes):
-    words = int(minutes * 150)
+    words = int(minutes * 180)
     print(f"Generating Script (~{words} words)...")
     random.shuffle(GEMINI_KEYS)
     
