@@ -898,7 +898,7 @@ def call_gemini(prompt):
     for key in GEMINI_KEYS:
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.5-flash')
             return model.generate_content(prompt).text.replace("*","").replace("#","").strip()
         except: continue
     return "Script generation failed."
