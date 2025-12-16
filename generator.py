@@ -12,7 +12,7 @@ import gc
 from pathlib import Path
 
 # ==========================================
-# 1. AUTO-INSTALLER
+# 1. INSTALLATION
 # ==========================================
 print("--- 🔧 Installing Dependencies ---")
 try:
@@ -49,7 +49,7 @@ ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
 PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
 
-# Directories
+# Paths
 OUTPUT_DIR = Path("output")
 TEMP_DIR = Path("temp")
 if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
@@ -81,8 +81,6 @@ def update_status(progress, message, status="processing", file_url=None):
     except: pass
 
 def robust_upload(file_path):
-    """Dual-Engine Upload Strategy"""
-    
     # 1. Try File.io
     print("Attempting File.io...")
     try:
@@ -90,23 +88,16 @@ def robust_upload(file_path):
             r = requests.post('https://file.io', files={'file': f}, timeout=60)
         if r.status_code == 200:
             link = r.json().get('link')
-            print(f"File.io Success: {link}")
             return link
-        else:
-            print(f"File.io Failed: {r.text}")
     except Exception as e: print(f"File.io Error: {e}")
 
     # 2. Fallback to Transfer.sh (Very Reliable)
-    print("Attempting Transfer.sh (Fallback)...")
+    print("Attempting Transfer.sh Fallback...")
     try:
-        # Using curl via subprocess is often more stable for transfer.sh
         cmd = f"curl --upload-file '{file_path}' 'https://transfer.sh/{os.path.basename(file_path)}'"
         link = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
-        if "transfer.sh" in link:
-            print(f"Transfer.sh Success: {link}")
-            return link
+        if "transfer.sh" in link: return link
     except Exception as e: print(f"Transfer.sh Error: {e}")
-    
     return None
 
 def download_asset(path, local):
@@ -152,7 +143,7 @@ def call_gemini(prompt):
     return ""
 
 # ==========================================
-# 5. AUDIO
+# 5. AUDIO (FIXED NAMED ARGUMENTS)
 # ==========================================
 def clone_voice_robust(text, ref_audio, out_path):
     print("Synthesizing Audio...")
@@ -164,25 +155,37 @@ def clone_voice_robust(text, ref_audio, out_path):
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean) if len(s.strip()) > 2]
         
         all_wavs = []
+        print(f"Sentences to process: {len(sentences)}")
+        
         for i, chunk in enumerate(sentences):
             if i%10==0: update_status(20 + int((i/len(sentences))*30), f"Voice Gen {i}/{len(sentences)}")
             try:
+                # RE-ADDED NAMED ARGUMENT HERE TO FIX CRASH
                 with torch.no_grad():
-                    wav = model.generate(chunk.replace('"',''), str(ref_audio), exaggeration=0.5)
+                    wav = model.generate(
+                        text=chunk.replace('"',''), 
+                        audio_prompt_path=str(ref_audio), # <--- THIS IS THE FIX
+                        exaggeration=0.5
+                    )
                     all_wavs.append(wav.cpu())
-                if i%20==0 and device=="cuda": torch.cuda.empty_cache(); gc.collect()
-            except: pass
+                
+                if i%20==0 and device=="cuda": 
+                    torch.cuda.empty_cache(); gc.collect()
+            except Exception as e:
+                print(f"Skipping chunk {i}: {e}")
             
         if not all_wavs: return False
         torchaudio.save(out_path, torch.cat(all_wavs, dim=1), 24000)
         return True
-    except: return False
+    except Exception as e:
+        print(f"Critical Audio Fail: {e}")
+        return False
 
 # ==========================================
 # 6. SUBTITLES & VISUALS
 # ==========================================
 def get_subtitle_style():
-    # Using 'Sans' as fontname to ensure compatibility on Linux without external fonts
+    # 'Sans' font for compatibility
     styles = [
         "Fontname=Sans,Fontsize=24,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,Bold=1,Outline=1,Shadow=1,MarginV=35", # Standard
         "Fontname=Sans,Fontsize=26,PrimaryColour=&H0000FFFF,BackColour=&H80000000,Bold=1,Outline=2,Shadow=0,MarginV=45", # Yellow
@@ -198,7 +201,6 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
     def get_clip(args):
         i, sent = args
         dur = max(3.5, sent['end'] - sent['start'])
-        # Simple noun extraction
         words = [w for w in re.findall(r'\w+', sent['text'].lower()) if len(w)>5]
         query = (random.choice(words) + " cinematic") if words else "abstract background"
         out = TEMP_DIR / f"s_{i}.mp4"
@@ -207,7 +209,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         if PEXELS_KEYS:
             try:
                 h = {"Authorization": random.choice(PEXELS_KEYS)}
-                r = requests.get(f"https://api.pexels.com/videos/search?query={query}&size=medium", headers=h, timeout=5)
+                r = requests.get(f"https://api.pexels.com/videos/search?query={query}&size=medium&orientation=landscape", headers=h, timeout=5)
                 found = r.json()['videos'][0]['video_files'][0]['link']
             except: pass
             
@@ -231,8 +233,6 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
     subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual.mp4", shell=True)
 
     # 2. Final Render (Logo 230px + Relative Path Subs)
-    # Using relative path 'temp/style.ass' to avoid escaping issues
-    
     if os.path.exists(logo_path):
         filter = f"[1:v]scale=230:-1[logo];[0:v][logo]overlay=30:30[v1];[v1]ass=temp/style.ass[v2]"
         cmd = f"ffmpeg -y -i visual.mp4 -i {logo_path} -i {audio_path} -filter_complex \"{filter}\" -map [v2] -map 2:a -c:v libx264 -preset medium -b:v 5000k -c:a aac -shortest {final_out}"
@@ -271,17 +271,11 @@ if clone_voice_robust(text, ref_voice, audio_out):
         with open(ass_file, "w") as f:
             f.write(f"[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, BackColour, Bold, Italic, Outline, Shadow, MarginL, MarginR, MarginV, BorderStyle, Spacing\nStyle: Default,{style},0,0,10,10,0\n[Events]\nFormat: Layer, Start, End, Style, Text\n")
             for s in t.get_sentences():
-                # Convert ms to H:M:S.ms format
                 start_sec = s.start / 1000
                 end_sec = s.end / 1000
-                
                 def fmt(s):
-                    h = int(s // 3600)
-                    m = int((s % 3600) // 60)
-                    sec = int(s % 60)
-                    ms = int((s % 1) * 100)
+                    h = int(s // 3600); m = int((s % 3600) // 60); sec = int(s % 60); ms = int((s % 1) * 100)
                     return f"{h}:{m:02d}:{sec:02d}.{ms:02d}"
-
                 f.write(f"Dialogue: 0,{fmt(start_sec)},{fmt(end_sec)},Default,{s.text}\n")
         
         # Render
