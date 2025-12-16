@@ -57,7 +57,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ==========================================
-# 3. UTILS: STATUS & ROBUST UPLOAD
+# 3. UTILS
 # ==========================================
 def update_status(progress, message, status="processing", file_url=None):
     print(f"--- {progress}% | {message} ---")
@@ -81,6 +81,10 @@ def update_status(progress, message, status="processing", file_url=None):
     except: pass
 
 def robust_upload(file_path):
+    if not os.path.exists(file_path):
+        print(f"Error: File {file_path} not found!")
+        return None
+
     # 1. Try File.io
     print("Attempting File.io...")
     try:
@@ -91,11 +95,12 @@ def robust_upload(file_path):
             return link
     except Exception as e: print(f"File.io Error: {e}")
 
-    # 2. Fallback to Transfer.sh (Very Reliable)
+    # 2. Fallback to Transfer.sh
     print("Attempting Transfer.sh Fallback...")
     try:
-        cmd = f"curl --upload-file '{file_path}' 'https://transfer.sh/{os.path.basename(file_path)}'"
-        link = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
+        cmd = ["curl", "--upload-file", str(file_path), f"https://transfer.sh/{os.path.basename(file_path)}"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        link = result.stdout.strip()
         if "transfer.sh" in link: return link
     except Exception as e: print(f"Transfer.sh Error: {e}")
     return None
@@ -143,7 +148,7 @@ def call_gemini(prompt):
     return ""
 
 # ==========================================
-# 5. AUDIO (FIXED NAMED ARGUMENTS)
+# 5. AUDIO
 # ==========================================
 def clone_voice_robust(text, ref_audio, out_path):
     print("Synthesizing Audio...")
@@ -160,11 +165,10 @@ def clone_voice_robust(text, ref_audio, out_path):
         for i, chunk in enumerate(sentences):
             if i%10==0: update_status(20 + int((i/len(sentences))*30), f"Voice Gen {i}/{len(sentences)}")
             try:
-                # RE-ADDED NAMED ARGUMENT HERE TO FIX CRASH
                 with torch.no_grad():
                     wav = model.generate(
                         text=chunk.replace('"',''), 
-                        audio_prompt_path=str(ref_audio), # <--- THIS IS THE FIX
+                        audio_prompt_path=str(ref_audio),
                         exaggeration=0.5
                     )
                     all_wavs.append(wav.cpu())
@@ -182,7 +186,7 @@ def clone_voice_robust(text, ref_audio, out_path):
         return False
 
 # ==========================================
-# 6. SUBTITLES & VISUALS
+# 6. VISUALS (FIXED SHELL ERROR)
 # ==========================================
 def get_subtitle_style():
     # 'Sans' font for compatibility
@@ -217,11 +221,23 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
             try:
                 raw = TEMP_DIR / f"r_{i}.mp4"
                 with open(raw, "wb") as f: f.write(requests.get(found).content)
-                subprocess.run(f"ffmpeg -y -i {raw} -t {dur} -vf scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30 -c:v libx264 -preset ultrafast -an {out}", shell=True)
+                
+                # FIX: Use LIST for command to avoid Shell Syntax Error with Parentheses
+                cmd = [
+                    "ffmpeg", "-y", "-i", str(raw), "-t", str(dur),
+                    "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-an", str(out)
+                ]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return str(out)
             except: pass
         
-        subprocess.run(f"ffmpeg -y -f lavfi -i color=c=black:s=1920x1080:d={dur} -t {dur} -vf fps=30 {out}", shell=True)
+        # Fallback Black Clip (Also safe list)
+        cmd = [
+            "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=1920x1080:d={dur}",
+            "-t", str(dur), "-vf", "fps=30", str(out)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return str(out)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
@@ -230,18 +246,27 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
     with open("list.txt", "w") as f:
         for c in clips: f.write(f"file '{c}'\n")
     
-    subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual.mp4", shell=True)
+    # Concat
+    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "visual.mp4"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 2. Final Render (Logo 230px + Relative Path Subs)
+    # 2. Final Render
     if os.path.exists(logo_path):
-        filter = f"[1:v]scale=230:-1[logo];[0:v][logo]overlay=30:30[v1];[v1]ass=temp/style.ass[v2]"
-        cmd = f"ffmpeg -y -i visual.mp4 -i {logo_path} -i {audio_path} -filter_complex \"{filter}\" -map [v2] -map 2:a -c:v libx264 -preset medium -b:v 5000k -c:a aac -shortest {final_out}"
+        filter_complex = f"[1:v]scale=230:-1[logo];[0:v][logo]overlay=30:30[v1];[v1]ass=temp/style.ass[v2]"
+        cmd = [
+            "ffmpeg", "-y", "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
+            "-filter_complex", filter_complex, "-map", "[v2]", "-map", "2:a",
+            "-c:v", "libx264", "-preset", "medium", "-b:v", "5000k", "-c:a", "aac", "-shortest", str(final_out)
+        ]
     else:
-        filter = f"ass=temp/style.ass"
-        cmd = f"ffmpeg -y -i visual.mp4 -i {audio_path} -filter_complex \"{filter}\" -c:v libx264 -preset medium -b:v 5000k -c:a aac -shortest {final_out}"
+        filter_complex = "ass=temp/style.ass"
+        cmd = [
+            "ffmpeg", "-y", "-i", "visual.mp4", "-i", str(audio_path),
+            "-filter_complex", filter_complex,
+            "-c:v", "libx264", "-preset", "medium", "-b:v", "5000k", "-c:a", "aac", "-shortest", str(final_out)
+        ]
         
-    print(f"Running Render: {cmd}")
-    subprocess.run(cmd, shell=True)
+    print("Running Final Render...")
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # ==========================================
 # 7. EXECUTION
