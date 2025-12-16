@@ -178,89 +178,95 @@ def format_ass_time(seconds):
 # 4. ROBUST UPLOAD (MULTIPLE SERVICES)
 # ==========================================
 def robust_upload(file_path):
-    """Try multiple upload services with proper error handling"""
-    filename = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
-    print(f"Uploading {filename} ({file_size:.1f} MB)...")
-    
-    # Service 1: 0x0.st (Great for large files, 365 day retention)
-    print("→ Trying 0x0.st...")
-    try:
-        with open(file_path, 'rb') as f:
-            response = requests.post(
-                'https://0x0.st',
-                files={'file': (filename, f)},
-                timeout=300
-            )
-        if response.status_code == 200:
-            url = response.text.strip()
-            print(f"✓ Uploaded to 0x0.st: {url}")
-            return url
-    except Exception as e:
-        print(f"✗ 0x0.st failed: {e}")
-    
-    # Service 2: GoFile (No size limit, anonymous)
-    print("→ Trying GoFile...")
-    try:
-        # Get server
-        server_resp = requests.get('https://api.gofile.io/getServer', timeout=10)
-        if server_resp.status_code == 200:
-            server = server_resp.json()['data']['server']
-            # Upload
-            with open(file_path, 'rb') as f:
-                upload_resp = requests.post(
-                    f'https://{server}.gofile.io/uploadFile',
-                    files={'file': (filename, f)},
-                    timeout=300
-                )
-            if upload_resp.status_code == 200:
-                data = upload_resp.json()
-                if data['status'] == 'ok':
-                    url = data['data']['downloadPage']
-                    print(f"✓ Uploaded to GoFile: {url}")
-                    return url
-    except Exception as e:
-        print(f"✗ GoFile failed: {e}")
-    
-    # Service 3: File.io (1 download limit but reliable)
-    print("→ Trying File.io...")
-    try:
-        with open(file_path, 'rb') as f:
-            response = requests.post(
-                'https://file.io',
-                files={'file': (filename, f)},
-                timeout=300
-            )
-        if response.status_code == 200:
-            data = response.json()
-            if data['success']:
-                url = data['link']
-                print(f"✓ Uploaded to File.io: {url}")
-                return url
-    except Exception as e:
-        print(f"✗ File.io failed: {e}")
-    
-    # Service 4: Tmpfiles.org
-    print("→ Trying Tmpfiles.org...")
-    try:
-        with open(file_path, 'rb') as f:
-            response = requests.post(
-                'https://tmpfiles.org/api/v1/upload',
-                files={'file': (filename, f)},
-                timeout=300
-            )
-        if response.status_code == 200:
-            data = response.json()
-            if data['status'] == 'success':
-                url = data['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-                print(f"✓ Uploaded to Tmpfiles: {url}")
-                return url
-    except Exception as e:
-        print(f"✗ Tmpfiles failed: {e}")
-    
-    print("✗ All upload services failed!")
-    return None
+    """
+    Uploads a file to Transfer.sh with a fallback to Catbox.moe.
+    Includes aggressive timeouts and error handling to prevent hanging.
+    """
+    if not os.path.exists(file_path):
+        print(f"❌ Error: File not found: {file_path}")
+        return None
 
+    filename = os.path.basename(file_path)
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    print(f"🚀 Uploading {filename} ({file_size_mb:.2f} MB)...")
+
+    # --- OPTION 1: Transfer.sh (Best for CLI/Scripts) ---
+    print("👉 Attempting Transfer.sh...")
+    try:
+        # We use 'curl' via subprocess because it is often more robust than requests for this specific API
+        # The --upload-file flag is critical for transfer.sh
+        cmd = [
+            "curl", 
+            "--upload-file", str(file_path), 
+            f"https://transfer.sh/{filename}",
+            "--max-time", "120" # 2-minute hard timeout
+        ]
+        
+        # Run command and capture output
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            check=True
+        )
+        
+        link = result.stdout.strip()
+        
+        # Verify we got a valid URL back
+        if "transfer.sh" in link and link.startswith("http"):
+            print(f"✅ Success! Link: {link}")
+            return link
+        else:
+            print(f"⚠️ Transfer.sh returned invalid response: {link}")
+
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Transfer.sh failed (Exit Code {e.returncode})")
+    except Exception as e:
+        print(f"❌ Transfer.sh error: {str(e)}")
+
+    # --- OPTION 2: Catbox.moe (Reliable Fallback) ---
+    print("👉 Attempting Catbox.moe (Fallback)...")
+    try:
+        with open(file_path, 'rb') as f:
+            response = requests.post(
+                "https://catbox.moe/user/api.php",
+                data={"reqtype": "fileupload"},
+                files={"fileToUpload": f},
+                timeout=120  # 2-minute timeout
+            )
+        
+        if response.status_code == 200:
+            link = response.text.strip()
+            if link.startswith("http"):
+                print(f"✅ Success! Link: {link}")
+                return link
+            else:
+                print(f"⚠️ Catbox returned invalid response: {link}")
+        else:
+            print(f"❌ Catbox failed with status: {response.status_code}")
+
+    except Exception as e:
+        print(f"❌ Catbox error: {str(e)}")
+
+    # --- OPTION 3: File.io (Last Resort) ---
+    print("👉 Attempting File.io (Last Resort)...")
+    try:
+        with open(file_path, 'rb') as f:
+            response = requests.post(
+                "https://file.io", 
+                files={"file": f},
+                timeout=60
+            )
+        
+        if response.status_code == 200:
+            link = response.json().get("link")
+            print(f"✅ Success! Link: {link}")
+            return link
+    except Exception as e:
+        print(f"❌ File.io error: {str(e)}")
+
+    print("💀 All upload attempts failed.")
+    return None
 # ==========================================
 # 5. MASSIVE VISUAL DICTIONARY (500+ TOPICS)
 # ==========================================
