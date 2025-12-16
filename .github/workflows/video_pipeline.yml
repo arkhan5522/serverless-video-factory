@@ -59,7 +59,6 @@ jobs:
           }
           
           for key, val in replacements.items():
-              # Escape quotes and newlines for safety
               safe_val = str(val).replace('"', '\\"').replace('\\n', ' ')
               content = content.replace(key, safe_val)
           
@@ -69,24 +68,10 @@ jobs:
 
           python builder.py
 
-          # --- METADATA (GPU ENABLED) ---
-          # Note: 'enable_gpu': 'true' requests a GPU (usually T4 or P100 on Kaggle)
-          echo '{
-            "id": "'"$KAGGLE_USERNAME"'/video-factory-ultra",
-            "title": "Video Factory Ultra",
-            "code_file": "final_script.py",
-            "language": "python",
-            "kernel_type": "script",
-            "is_private": "true",
-            "enable_gpu": "true",
-            "enable_internet": "true",
-            "kernel_sources": [],
-            "competition_sources": [],
-            "dataset_sources": []
-          }' > kernel-metadata.json
-
       - name: Push to Kaggle (GPU Mode)
         env:
+           # ✅ FIXED: Added KAGGLE_USERNAME so the metadata ID is valid
+           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
            GH_PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
            GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }} 
            ASSEMBLY_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
@@ -108,10 +93,10 @@ jobs:
           # Merge Config + Script
           cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
           
-          # Initialize metadata explicitly if missing
+          # Initialize metadata
           kaggle kernels init -p .
           
-          # Force the metadata to be correct (Overwriting whatever init created)
+          # Force Correct Metadata (GPU Enabled)
           echo '{
             "id": "'"$KAGGLE_USERNAME"'/video-factory-ultra",
             "title": "Video Factory Ultra",
@@ -126,12 +111,12 @@ jobs:
             "competition_sources": []
           }' > kernel-metadata.json
 
-          # PUSH WITHOUT --gpu FLAG (Metadata handles it)
+          # Push without legacy flag
           kaggle kernels push -p .
+
       - name: Wait for Result (Long Polling)
         run: |
           echo "Polling Kaggle (Timeout: 6 Hours)..."
-          # Check status every minute for up to 6 hours
           for i in {1..360}; do
             OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-ultra)
             echo "$OUTPUT"
@@ -148,12 +133,10 @@ jobs:
             sleep 60
           done
 
-      # Optional: Backup to Branch (Video is also on File.io)
       - name: Download Output
         continue-on-error: true
         run: |
           kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-ultra -p ./output
-          
           mkdir public_video
           mv ./output/final_video_*.mp4 ./public_video/ || echo "Video likely uploaded to File.io only."
 
