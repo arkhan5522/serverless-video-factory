@@ -57,7 +57,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ==========================================
-# 3. UTILS
+# 3. UTILS: STATUS & UPLOAD
 # ==========================================
 def update_status(progress, message, status="processing", file_url=None):
     print(f"--- {progress}% | {message} ---")
@@ -81,28 +81,27 @@ def update_status(progress, message, status="processing", file_url=None):
     except: pass
 
 def robust_upload(file_path):
-    if not os.path.exists(file_path):
-        print(f"Error: File {file_path} not found!")
-        return None
+    filename = os.path.basename(file_path)
+    
+    # 1. Try Transfer.sh (Best for CLI)
+    print("Attempting Transfer.sh...")
+    try:
+        url = f"https://transfer.sh/{filename}"
+        with open(file_path, 'rb') as f:
+            r = requests.put(url, data=f)
+        if r.status_code == 200:
+            link = r.text.strip()
+            return link
+    except Exception as e: print(f"Transfer.sh Error: {e}")
 
-    # 1. Try File.io
+    # 2. Fallback File.io
     print("Attempting File.io...")
     try:
         with open(file_path, 'rb') as f:
-            r = requests.post('https://file.io', files={'file': f}, timeout=60)
-        if r.status_code == 200:
-            link = r.json().get('link')
-            return link
-    except Exception as e: print(f"File.io Error: {e}")
-
-    # 2. Fallback to Transfer.sh
-    print("Attempting Transfer.sh Fallback...")
-    try:
-        cmd = ["curl", "--upload-file", str(file_path), f"https://transfer.sh/{os.path.basename(file_path)}"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        link = result.stdout.strip()
-        if "transfer.sh" in link: return link
-    except Exception as e: print(f"Transfer.sh Error: {e}")
+            r = requests.post('https://file.io', files={'file': f})
+        if r.status_code == 200: return r.json().get('link')
+    except: pass
+    
     return None
 
 def download_asset(path, local):
@@ -119,7 +118,58 @@ def download_asset(path, local):
     return False
 
 # ==========================================
-# 4. SCRIPTING
+# 4. MASSIVE VISUAL DICTIONARY
+# ==========================================
+VISUAL_MAP = {
+    # TECH & FUTURE
+    "tech": ["server room", "circuit board", "hologram", "robot face", "coding screen"],
+    "ai": ["artificial intelligence", "neural network", "cyborg", "digital brain"],
+    "future": ["futuristic city", "flying car", "spaceship", "neon street"],
+    "crypto": ["bitcoin", "blockchain", "ethereum", "digital wallet", "stock graph"],
+    "hacker": ["hoodie hacker", "matrix code", "security lock", "glitch effect"],
+    
+    # BUSINESS & MONEY
+    "business": ["business meeting", "handshake", "office skyscrapers", "suit walking"],
+    "money": ["counting money", "gold bars", "falling coins", "luxury car", "mansion"],
+    "success": ["man on mountain", "cheering crowd", "trophy", "private jet"],
+    "growth": ["plant growing", "chart going up", "sunrise time lapse", "building construction"],
+    
+    # EMOTION & HUMAN
+    "happy": ["friends laughing", "party confetti", "smiling woman", "dancing crowd"],
+    "sad": ["rainy window", "lonely man", "crying eye", "dark tunnel"],
+    "fear": ["shadowy figure", "scary forest", "scream", "nightmare"],
+    "love": ["couple holding hands", "wedding", "heart shape", "sunset kiss"],
+    
+    # NATURE & WORLD
+    "nature": ["waterfall drone", "forest mist", "blooming flower", "ocean waves"],
+    "space": ["galaxy stars", "planet earth", "astronaut", "black hole"],
+    "city": ["nyc time lapse", "tokyo night", "traffic lights", "subway train"],
+    "travel": ["airplane wing", "passport", "beach palm trees", "eiffel tower"],
+    
+    # CONCEPTS
+    "time": ["clock ticking", "hourglass", "calendar", "time lapse clouds"],
+    "idea": ["light bulb", "brainstorming", "sketching", "spark"],
+    "network": ["mesh network", "fiber optic", "globe connections", "satellite"],
+    "war": ["tank", "explosion", "soldier", "military jet"],
+    "history": ["ancient ruins", "pyramids", "old map", "museum statue"],
+    "abstract": ["ink in water", "smoke swirls", "light leaks", "geometric loop"]
+}
+
+def get_visual_query(text):
+    text = text.lower()
+    # Check dictionary first
+    for cat, terms in VISUAL_MAP.items():
+        if cat in text: 
+            return random.choice(terms)
+    
+    # Fallback to noun extraction
+    words = [w for w in re.findall(r'\w+', text) if len(w) > 5]
+    if words: 
+        return random.choice(words) + " cinematic"
+    return "abstract background 4k"
+
+# ==========================================
+# 5. SCRIPT & AUDIO
 # ==========================================
 def generate_script(topic, minutes):
     words = int(minutes * 150)
@@ -131,7 +181,8 @@ def generate_script(topic, minutes):
         full_script = []
         for i in range(chunks):
             update_status(5+i, f"Writing Part {i+1}/{chunks}...")
-            prompt = f"Write Part {i+1}/{chunks} of a documentary about '{topic}'. Context: {full_script[-1][-200:] if full_script else 'Start'}. Length: 700 words. Spoken Text ONLY."
+            context = full_script[-1][-200:] if full_script else 'Start'
+            prompt = f"Write Part {i+1}/{chunks} of a documentary about '{topic}'. Context: {context}. Length: 700 words. Spoken Text ONLY."
             full_script.append(call_gemini(prompt))
         return " ".join(full_script)
     else:
@@ -145,11 +196,8 @@ def call_gemini(prompt):
             model = genai.GenerativeModel('gemini-1.5-flash')
             return model.generate_content(prompt).text.replace("*","").replace("#","").strip()
         except: continue
-    return ""
+    return "Script generation failed."
 
-# ==========================================
-# 5. AUDIO
-# ==========================================
 def clone_voice_robust(text, ref_audio, out_path):
     print("Synthesizing Audio...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -160,69 +208,61 @@ def clone_voice_robust(text, ref_audio, out_path):
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean) if len(s.strip()) > 2]
         
         all_wavs = []
-        print(f"Sentences to process: {len(sentences)}")
-        
         for i, chunk in enumerate(sentences):
             if i%10==0: update_status(20 + int((i/len(sentences))*30), f"Voice Gen {i}/{len(sentences)}")
             try:
                 with torch.no_grad():
                     wav = model.generate(
                         text=chunk.replace('"',''), 
-                        audio_prompt_path=str(ref_audio),
+                        audio_prompt_path=str(ref_audio), # Named Arg Fix
                         exaggeration=0.5
                     )
                     all_wavs.append(wav.cpu())
-                
-                if i%20==0 and device=="cuda": 
-                    torch.cuda.empty_cache(); gc.collect()
-            except Exception as e:
-                print(f"Skipping chunk {i}: {e}")
+                if i%20==0 and device=="cuda": torch.cuda.empty_cache(); gc.collect()
+            except: pass
             
         if not all_wavs: return False
         torchaudio.save(out_path, torch.cat(all_wavs, dim=1), 24000)
         return True
-    except Exception as e:
-        print(f"Critical Audio Fail: {e}")
-        return False
+    except: return False
 
 # ==========================================
-# 6. VISUALS (FIXED SHELL ERROR)
+# 6. VISUALS & RENDER
 # ==========================================
-def get_subtitle_style():
-    # 'Sans' font for compatibility
-    styles = [
-        "Fontname=Sans,Fontsize=24,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,Bold=1,Outline=1,Shadow=1,MarginV=35", # Standard
-        "Fontname=Sans,Fontsize=26,PrimaryColour=&H0000FFFF,BackColour=&H80000000,Bold=1,Outline=2,Shadow=0,MarginV=45", # Yellow
-        "Fontname=Sans,Fontsize=22,PrimaryColour=&H00FFFFFF,BackColour=&H60000000,Bold=1,BorderStyle=3,MarginV=40",      # Box
-        "Fontname=Sans,Fontsize=24,PrimaryColour=&H00FFFF00,BackColour=&H00000000,Bold=1,Outline=1,Shadow=2,MarginV=40"  # Neon
-    ]
-    return random.choice(styles)
-
 def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
     print("Visuals & Render...")
+    used_links = set() # Track used videos to prevent repetition
     
-    # 1. Download Visuals
     def get_clip(args):
         i, sent = args
         dur = max(3.5, sent['end'] - sent['start'])
-        words = [w for w in re.findall(r'\w+', sent['text'].lower()) if len(w)>5]
-        query = (random.choice(words) + " cinematic") if words else "abstract background"
+        query = get_visual_query(sent['text'])
         out = TEMP_DIR / f"s_{i}.mp4"
         
-        found = None
+        found_link = None
         if PEXELS_KEYS:
             try:
                 h = {"Authorization": random.choice(PEXELS_KEYS)}
-                r = requests.get(f"https://api.pexels.com/videos/search?query={query}&size=medium&orientation=landscape", headers=h, timeout=5)
-                found = r.json()['videos'][0]['video_files'][0]['link']
+                # Fetch 15 results to find a unique one
+                r = requests.get(f"https://api.pexels.com/videos/search?query={query}&size=medium&orientation=landscape&per_page=15", headers=h, timeout=5)
+                videos = r.json().get('videos', [])
+                random.shuffle(videos) # Shuffle results
+                
+                for v in videos:
+                    link = v['video_files'][0]['link']
+                    # Simple check to avoid duplicates in this run
+                    # Note: imperfect in threads but good enough for variety
+                    if link not in used_links:
+                        found_link = link
+                        used_links.add(link)
+                        break
             except: pass
             
-        if found:
+        if found_link:
             try:
                 raw = TEMP_DIR / f"r_{i}.mp4"
-                with open(raw, "wb") as f: f.write(requests.get(found).content)
-                
-                # FIX: Use LIST for command to avoid Shell Syntax Error with Parentheses
+                with open(raw, "wb") as f: f.write(requests.get(found_link).content)
+                # Use list command to avoid shell syntax errors
                 cmd = [
                     "ffmpeg", "-y", "-i", str(raw), "-t", str(dur),
                     "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
@@ -232,7 +272,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
                 return str(out)
             except: pass
         
-        # Fallback Black Clip (Also safe list)
+        # Fallback Black Clip
         cmd = [
             "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=1920x1080:d={dur}",
             "-t", str(dur), "-vf", "fps=30", str(out)
@@ -240,18 +280,35 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return str(out)
 
+    # Parallel Download
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
         clips = list(ex.map(get_clip, [(i, s) for i, s in enumerate(sentences)]))
 
     with open("list.txt", "w") as f:
         for c in clips: f.write(f"file '{c}'\n")
     
-    # Concat
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "visual.mp4"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual.mp4", shell=True)
 
-    # 2. Final Render
+    # Final Render with Subtitles & Logo
+    # Fontsize 30, BorderStyle=3 (Opaque Box) for max visibility
+    style = "Fontname=Sans,Fontsize=30,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,Bold=1,BorderStyle=3,MarginV=50"
+    
+    # Create valid ASS file
+    with open(ass_file, "w") as f:
+        f.write(f"[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, BackColour, Bold, BorderStyle, MarginV\nStyle: Default,Sans,30,&H00FFFFFF,&H60000000,-1,3,50\n[Events]\nFormat: Layer, Start, End, Style, Text\n")
+        for s in sentences:
+            start = s['start']; end = s['end']
+            def fmt(t):
+                h=int(t//3600); m=int((t%3600)//60); s=int(t%60); ms=int((t%1)*100)
+                return f"{h}:{m:02d}:{s:02d}.{ms:02d}"
+            f.write(f"Dialogue: 0,{fmt(start)},{fmt(end)},Default,{s['text']}\n")
+
+    # Construct Filter Complex
+    # [0:v] is video, [1:v] is logo
+    # Scale logo to 230px, overlay it
+    # Then burn subtitles using relative path "temp/style.ass"
     if os.path.exists(logo_path):
-        filter_complex = f"[1:v]scale=230:-1[logo];[0:v][logo]overlay=30:30[v1];[v1]ass=temp/style.ass[v2]"
+        filter_complex = "[1:v]scale=230:-1[logo];[0:v][logo]overlay=30:30[v1];[v1]ass=temp/style.ass[v2]"
         cmd = [
             "ffmpeg", "-y", "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
             "-filter_complex", filter_complex, "-map", "[v2]", "-map", "2:a",
@@ -290,26 +347,13 @@ if clone_voice_robust(text, ref_voice, audio_out):
     t = aai.Transcriber().transcribe(str(audio_out))
     
     if t.status != aai.TranscriptStatus.error:
-        # Generate ASS (Use Generic Font)
         ass_file = TEMP_DIR / "style.ass"
-        style = get_subtitle_style()
-        with open(ass_file, "w") as f:
-            f.write(f"[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, BackColour, Bold, Italic, Outline, Shadow, MarginL, MarginR, MarginV, BorderStyle, Spacing\nStyle: Default,{style},0,0,10,10,0\n[Events]\nFormat: Layer, Start, End, Style, Text\n")
-            for s in t.get_sentences():
-                start_sec = s.start / 1000
-                end_sec = s.end / 1000
-                def fmt(s):
-                    h = int(s // 3600); m = int((s % 3600) // 60); sec = int(s % 60); ms = int((s % 1) * 100)
-                    return f"{h}:{m:02d}:{sec:02d}.{ms:02d}"
-                f.write(f"Dialogue: 0,{fmt(start_sec)},{fmt(end_sec)},Default,{s.text}\n")
-        
-        # Render
         sents = [{"text": s.text, "start": s.start/1000, "end": s.end/1000} for s in t.get_sentences()]
+        
         update_status(60, "Visuals...")
         final = OUTPUT_DIR / f"final_{JOB_ID}.mp4"
         process_visuals(sents, audio_out, ass_file, ref_logo, final)
         
-        # Upload (Robust)
         update_status(99, "Uploading...")
         link = robust_upload(final)
         
