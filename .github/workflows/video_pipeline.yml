@@ -88,16 +88,14 @@ jobs:
       - name: Push to Kaggle (GPU Mode)
         env:
            GH_PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-           # Pass all keys (comma separated) as one string
            GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }} 
            ASSEMBLY_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
            PEXELS_KEYS: ${{ secrets.PEXELS_KEYS }}
            PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
-           # Pass Repo info for status updates
            GITHUB_REPOSITORY: ${{ github.repository }}
            GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         run: |
-          # Create Config Header with Environment Variables
+          # Create Config Header
           echo "import os" > config_header.py
           echo "os.environ['GH_PAT'] = '$GH_PAT'" >> config_header.py
           echo "os.environ['GEMINI_API_KEY'] = '$GEMINI_KEY'" >> config_header.py
@@ -110,9 +108,26 @@ jobs:
           # Merge Config + Script
           cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
           
-          # PUSH WITH GPU FLAG
-          kaggle kernels push -p .
+          # Initialize metadata explicitly if missing
+          kaggle kernels init -p .
+          
+          # Force the metadata to be correct (Overwriting whatever init created)
+          echo '{
+            "id": "'"$KAGGLE_USERNAME"'/video-factory-ultra",
+            "title": "Video Factory Ultra",
+            "code_file": "final_script.py",
+            "language": "python",
+            "kernel_type": "script",
+            "is_private": "true",
+            "enable_gpu": "true",
+            "enable_internet": "true",
+            "dataset_sources": [],
+            "kernel_sources": [],
+            "competition_sources": []
+          }' > kernel-metadata.json
 
+          # PUSH WITHOUT --gpu FLAG (Metadata handles it)
+          kaggle kernels push -p .
       - name: Wait for Result (Long Polling)
         run: |
           echo "Polling Kaggle (Timeout: 6 Hours)..."
