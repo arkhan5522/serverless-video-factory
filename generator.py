@@ -175,93 +175,6 @@ def format_ass_time(seconds):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 # ==========================================
-# 4. ROBUST UPLOAD (MULTIPLE SERVICES)
-# ==========================================
-def robust_upload(file_path):
-    """Try multiple upload services with proper error handling"""
-    filename = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
-    print(f"Uploading {filename} ({file_size:.1f} MB)...")
-    
-    # Service 1: 0x0.st (Great for large files, 365 day retention)
-    print("→ Trying 0x0.st...")
-    try:
-        with open(file_path, 'rb') as f:
-            response = requests.post(
-                'https://0x0.st',
-                files={'file': (filename, f)},
-                timeout=300
-            )
-        if response.status_code == 200:
-            url = response.text.strip()
-            print(f"✓ Uploaded to 0x0.st: {url}")
-            return url
-    except Exception as e:
-        print(f"✗ 0x0.st failed: {e}")
-    
-    # Service 2: GoFile (No size limit, anonymous)
-    print("→ Trying GoFile...")
-    try:
-        # Get server
-        server_resp = requests.get('https://api.gofile.io/getServer', timeout=10)
-        if server_resp.status_code == 200:
-            server = server_resp.json()['data']['server']
-            # Upload
-            with open(file_path, 'rb') as f:
-                upload_resp = requests.post(
-                    f'https://{server}.gofile.io/uploadFile',
-                    files={'file': (filename, f)},
-                    timeout=300
-                )
-            if upload_resp.status_code == 200:
-                data = upload_resp.json()
-                if data['status'] == 'ok':
-                    url = data['data']['downloadPage']
-                    print(f"✓ Uploaded to GoFile: {url}")
-                    return url
-    except Exception as e:
-        print(f"✗ GoFile failed: {e}")
-    
-    # Service 3: File.io (1 download limit but reliable)
-    print("→ Trying File.io...")
-    try:
-        with open(file_path, 'rb') as f:
-            response = requests.post(
-                'https://file.io',
-                files={'file': (filename, f)},
-                timeout=300
-            )
-        if response.status_code == 200:
-            data = response.json()
-            if data['success']:
-                url = data['link']
-                print(f"✓ Uploaded to File.io: {url}")
-                return url
-    except Exception as e:
-        print(f"✗ File.io failed: {e}")
-    
-    # Service 4: Tmpfiles.org
-    print("→ Trying Tmpfiles.org...")
-    try:
-        with open(file_path, 'rb') as f:
-            response = requests.post(
-                'https://tmpfiles.org/api/v1/upload',
-                files={'file': (filename, f)},
-                timeout=300
-            )
-        if response.status_code == 200:
-            data = response.json()
-            if data['status'] == 'success':
-                url = data['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-                print(f"✓ Uploaded to Tmpfiles: {url}")
-                return url
-    except Exception as e:
-        print(f"✗ Tmpfiles failed: {e}")
-    
-    print("✗ All upload services failed!")
-    return None
-
-# ==========================================
 # 5. MASSIVE VISUAL DICTIONARY (500+ TOPICS)
 # ==========================================
 VISUAL_MAP = {
@@ -1104,7 +1017,30 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         return False
 
 # ==========================================
-# 9. EXECUTION
+# ==========================================
+# 9. KAGGLE OUTPUT HANDLER
+# ==========================================
+def handle_kaggle_output(file_path):
+    """Handle file output in Kaggle environment"""
+    filename = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
+    
+    print(f"📊 File saved: {filename}")
+    print(f"📦 Size: {file_size:.1f} MB")
+    print("📍 Location: /kaggle/working/output/")
+    
+    # Provide download instructions
+    print("\n📥 How to download from Kaggle:")
+    print("1. Go to the Output tab (right sidebar)")
+    print("2. Click on the file to download")
+    print("3. Or use the Kaggle API:")
+    print(f"   kaggle kernels output {os.environ.get('KAGGLE_KERNEL_RUN_ID', 'your-kernel')}")
+    
+    # Create a markdown link for display
+    return f"file://{file_path}"
+
+# ==========================================
+# 10. EXECUTION (Updated for Kaggle)
 # ==========================================
 print("--- 🚀 START ---")
 update_status(1, "Initializing...")
@@ -1232,15 +1168,25 @@ if clone_voice_robust(text, ref_voice, audio_out):
             file_size = os.path.getsize(final_output) / (1024 * 1024)
             print(f"✅ Video created: {final_output} ({file_size:.1f} MB)")
             
-            update_status(99, "Uploading Final Video...")
-            link = robust_upload(final_output)
+            update_status(99, "Saving to Kaggle Output...")
             
-            if link:
-                update_status(100, "Success! Video Complete!", "completed", link)
-                print(f"🎉 Final video uploaded: {link}")
-            else:
-                update_status(100, "Upload Failed - Video Ready Locally", "completed")
-                print(f"📁 Video saved locally: {final_output}")
+            # In Kaggle, files in /kaggle/working are automatically available in Output tab
+            # We just need to ensure the file is in the right location
+            kaggle_output_path = Path("/kaggle/working") / f"final_{JOB_ID}.mp4"
+            
+            # Copy to kaggle working directory if not already there
+            if str(final_output) != str(kaggle_output_path):
+                shutil.copy2(final_output, kaggle_output_path)
+                print(f"📁 Copied to Kaggle working directory: {kaggle_output_path}")
+            
+            # Get the Kaggle download info
+            download_info = handle_kaggle_output(kaggle_output_path)
+            
+            # Update status with local file info
+            update_status(100, "Video Complete! Check Output tab.", "completed", download_info)
+            print("🎉 Video generation complete!")
+            print("📥 Download from: Kaggle Output tab (right sidebar)")
+            
         else:
             update_status(0, "Rendering Failed - No Output File", "failed")
             print("❌ Final video file was not created")
@@ -1252,21 +1198,20 @@ else:
     update_status(0, "Audio Synthesis Failed", "failed")
     print("❌ Audio synthesis failed")
 
-# Cleanup
-print("Cleaning up temporary files...")
-if TEMP_DIR.exists():
+# Cleanup (optional - keep files for download)
+keep_files = True  # Set to False to clean up
+if not keep_files and TEMP_DIR.exists():
     try:
         shutil.rmtree(TEMP_DIR)
         print("✅ Temporary files cleaned")
     except:
         print("⚠️ Could not clean all temporary files")
 
-# Clean up intermediate files
-for temp_file in ["visual.mp4", "list.txt"]:
-    if os.path.exists(temp_file):
-        try:
-            os.remove(temp_file)
-        except:
-            pass
-
 print("--- ✅ PROCESS COMPLETE ---")
+print("\n" + "="*50)
+print("📋 INSTRUCTIONS FOR DOWNLOADING:")
+print("="*50)
+print("1. Look for the file in the OUTPUT tab (right sidebar)")
+print("2. Click on 'final_{JOB_ID}.mp4' to download")
+print("3. Or find it at: /kaggle/working/output/")
+print("="*50)
