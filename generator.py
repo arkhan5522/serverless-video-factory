@@ -186,11 +186,18 @@ def clone_voice_robust(text, ref_audio, out_path):
             try:
                 # Generate
                 chunk = chunk.replace('"', '').replace("'", "")
-                with torch.no_grad():
-                    wav = model.generate(chunk, str(ref_audio), exaggeration=0.5)
-                    all_wavs.append(wav.cpu()) # Move to CPU immediately to save VRAM
                 
-                # Force Garbage Collection (Fixes the 90% crash)
+                # --- FIXED GENERATE CALL (NAMED ARGUMENTS) ---
+                with torch.no_grad():
+                    wav = model.generate(
+                        text=chunk,
+                        audio_prompt_path=str(ref_audio), # Named Argument Fix
+                        exaggeration=0.5,
+                        cfg_weight=0.5
+                    )
+                    all_wavs.append(wav.cpu()) # Move to CPU immediately
+                
+                # Force Garbage Collection
                 if i % 20 == 0:
                     if device == "cuda": torch.cuda.empty_cache()
                     gc.collect()
