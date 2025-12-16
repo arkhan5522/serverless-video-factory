@@ -111,7 +111,7 @@ jobs:
           cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
           
           # PUSH WITH GPU FLAG
-          kaggle kernels push --gpu -p .
+          kaggle kernels push -p .
 
       - name: Wait for Result (Long Polling)
         run: |
