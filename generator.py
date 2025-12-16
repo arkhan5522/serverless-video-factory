@@ -135,7 +135,7 @@ def generate_script(topic, minutes):
     for key in GEMINI_KEYS:
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-2.0-flash-exp') # Or 1.5-flash
+            model = genai.GenerativeModel('gemini-2.5-flash') # Or 1.5-flash
             text = model.generate_content(prompt).text
             return text.replace("*", "").replace("#", "").replace("[", "").replace("]", "").strip()
         except Exception as e:
