@@ -26,7 +26,7 @@ jobs:
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-          # MAPPING PAYLOAD DATA
+          # MAP ALL NEW PAYLOAD VARIABLES HERE
           USER_MODE: ${{ github.event.client_payload.mode }}
           USER_TOPIC: ${{ github.event.client_payload.topic }}
           USER_SCRIPT: ${{ github.event.client_payload.script }}
@@ -35,19 +35,18 @@ jobs:
           USER_LOGO_PATH: ${{ github.event.client_payload.logo_path }}
           USER_JOB_ID: ${{ github.event.client_payload.job_id }}
         run: |
+          # 1. Authenticate Kaggle
           mkdir -p ~/.kaggle
           echo "{\"username\":\"$KAGGLE_USERNAME\",\"key\":\"$KAGGLE_KEY\"}" > ~/.kaggle/kaggle.json
           chmod 600 ~/.kaggle/kaggle.json
 
-          # --- DYNAMIC SCRIPT BUILDER ---
+          # 2. Build Python Script with Placeholders
           cat <<EOF > builder.py
           import os
           
-          # Read the raw generator template
           with open('generator.py', 'r') as f:
               content = f.read()
           
-          # Inject User Data into Placeholders
           replacements = {
               '{{MODE_PLACEHOLDER}}': os.environ.get('USER_MODE', 'topic'),
               '{{TOPIC_PLACEHOLDER}}': os.environ.get('USER_TOPIC', ''),
@@ -68,35 +67,8 @@ jobs:
 
           python builder.py
 
-      - name: Push to Kaggle (GPU Mode)
-        env:
-           # ✅ FIXED: Added KAGGLE_USERNAME so the metadata ID is valid
-           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-           GH_PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }} 
-           ASSEMBLY_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
-           PEXELS_KEYS: ${{ secrets.PEXELS_KEYS }}
-           PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
-           GITHUB_REPOSITORY: ${{ github.repository }}
-           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-        run: |
-          # Create Config Header
-          echo "import os" > config_header.py
-          echo "os.environ['GH_PAT'] = '$GH_PAT'" >> config_header.py
-          echo "os.environ['GEMINI_API_KEY'] = '$GEMINI_KEY'" >> config_header.py
-          echo "os.environ['ASSEMBLYAI_API_KEY'] = '$ASSEMBLY_KEY'" >> config_header.py
-          echo "os.environ['PEXELS_KEYS'] = '$PEXELS_KEYS'" >> config_header.py
-          echo "os.environ['PIXABAY_KEYS'] = '$PIXABAY_KEYS'" >> config_header.py
-          echo "os.environ['GITHUB_REPOSITORY'] = '$GITHUB_REPOSITORY'" >> config_header.py
-          echo "os.environ['GITHUB_TOKEN'] = '$GITHUB_TOKEN'" >> config_header.py
-
-          # Merge Config + Script
-          cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
-          
-          # Initialize metadata
-          kaggle kernels init -p .
-          
-          # Force Correct Metadata (GPU Enabled)
+          # 3. Create Metadata HERE (This was the fix)
+          # We force 'enable_gpu' to true for P100/T4 usage
           echo '{
             "id": "'"$KAGGLE_USERNAME"'/video-factory-ultra",
             "title": "Video Factory Ultra",
@@ -111,7 +83,31 @@ jobs:
             "competition_sources": []
           }' > kernel-metadata.json
 
-          # Push without legacy flag
+      - name: Push to Kaggle
+        env:
+           # Pass all API Keys here
+           GH_PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }} 
+           ASSEMBLY_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
+           PEXELS_KEYS: ${{ secrets.PEXELS_KEYS }}
+           PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
+           GITHUB_REPOSITORY: ${{ github.repository }}
+           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          # 1. Create Config Header with Secrets
+          echo "import os" > config_header.py
+          echo "os.environ['GH_PAT'] = '$GH_PAT'" >> config_header.py
+          echo "os.environ['GEMINI_API_KEY'] = '$GEMINI_KEY'" >> config_header.py
+          echo "os.environ['ASSEMBLYAI_API_KEY'] = '$ASSEMBLY_KEY'" >> config_header.py
+          echo "os.environ['PEXELS_KEYS'] = '$PEXELS_KEYS'" >> config_header.py
+          echo "os.environ['PIXABAY_KEYS'] = '$PIXABAY_KEYS'" >> config_header.py
+          echo "os.environ['GITHUB_REPOSITORY'] = '$GITHUB_REPOSITORY'" >> config_header.py
+          echo "os.environ['GITHUB_TOKEN'] = '$GITHUB_TOKEN'" >> config_header.py
+
+          # 2. Merge Header + Script
+          cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
+          
+          # 3. Push (Metadata exists from previous step)
           kaggle kernels push -p .
 
       - name: Wait for Result (Long Polling)
