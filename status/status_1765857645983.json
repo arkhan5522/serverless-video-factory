@@ -1,1 +1,1 @@
-{"progress": 20, "message": "Synthesizing Voice (0/1)", "status": "processing", "job_id": "1765857645983", "timestamp": 1765857848.5212605}
+{"progress": 0, "message": "Audio Generation Failed", "status": "failed", "job_id": "1765857645983", "timestamp": 1765857849.3718987}
