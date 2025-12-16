@@ -147,7 +147,7 @@ def download_asset(repo_path, local_path):
 # ==========================================
 # 4. ROBUST SCRIPT GENERATION (ROTATING KEYS)
 # ==========================================
-def get_gemini_response(prompt, model_name='gemini-1.5-flash'):
+def get_gemini_response(prompt, model_name='gemini-2.5-flash-lite'):
     """Tries keys one by one until success"""
     # Shuffle keys to load balance
     random.shuffle(GEMINI_KEYS)
