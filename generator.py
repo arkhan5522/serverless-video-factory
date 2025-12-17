@@ -10,7 +10,13 @@ import concurrent.futures
 import requests
 import gc
 from pathlib import Path
+# 🛑 RUN THIS FIRST or the main script will fail!
+import subprocess
 
+print("--- 🔧 Installing GPU-Accelerated FFmpeg ---")
+# Install FFmpeg via Conda (contains NVIDIA headers)
+subprocess.run("conda install -y ffmpeg -c conda-forge", shell=True)
+print("✅ GPU Drivers Installed.")
 # ==========================================
 # 1. INSTALLATION
 # ==========================================
@@ -57,82 +63,82 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ==========================================
-# 3. SUBTITLE STYLES (5 PROFESSIONAL DESIGNS)
+# 3. PROFESSIONAL SUBTITLE STYLES
 # ==========================================
 SUBTITLE_STYLES = {
     "modern_bold": {
         "name": "Modern Bold",
         "fontname": "Arial",
-        "fontsize": 32,
-        "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&HD0000000",     # Black with transparency
-        "outline_colour": "&H00000000",  # Black outline
+        "fontsize": 48,
+        "primary_colour": "&H00FFFFFF",
+        "back_colour": "&HB0000000",
+        "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
-        "border_style": 3,  # Opaque box
+        "border_style": 3,
         "outline": 0,
-        "shadow": 0,
-        "margin_v": 40,
-        "alignment": 2  # Bottom center
+        "shadow": 2,
+        "margin_v": 60,
+        "alignment": 2
     },
     "neon_glow": {
         "name": "Neon Glow",
         "fontname": "Arial",
-        "fontsize": 34,
-        "primary_colour": "&H0000FFFF",  # Cyan/Yellow
-        "back_colour": "&H80000000",     # Semi-transparent black
-        "outline_colour": "&H00FFFF00",  # Cyan outline
+        "fontsize": 52,
+        "primary_colour": "&H0000FFFF",
+        "back_colour": "&H70000000",
+        "outline_colour": "&H00FFFF00",
         "bold": -1,
         "italic": 0,
-        "border_style": 1,  # Outline + shadow
-        "outline": 3,
-        "shadow": 2,
-        "margin_v": 45,
+        "border_style": 1,
+        "outline": 4,
+        "shadow": 3,
+        "margin_v": 70,
         "alignment": 2
     },
     "minimal_elegant": {
         "name": "Minimal Elegant",
         "fontname": "Arial",
-        "fontsize": 28,
-        "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&HA0000000",     # Darker transparent
+        "fontsize": 44,
+        "primary_colour": "&H00FFFFFF",
+        "back_colour": "&H90000000",
         "outline_colour": "&H00000000",
         "bold": 0,
         "italic": 0,
         "border_style": 3,
         "outline": 0,
-        "shadow": 0,
-        "margin_v": 35,
+        "shadow": 1,
+        "margin_v": 55,
         "alignment": 2
     },
     "youtube_pro": {
         "name": "YouTube Pro",
         "fontname": "Arial",
-        "fontsize": 30,
-        "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&HC0000000",     # Black box
+        "fontsize": 46,
+        "primary_colour": "&H00FFFFFF",
+        "back_colour": "&HA0000000",
         "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
         "border_style": 3,
-        "outline": 0,
-        "shadow": 1,
-        "margin_v": 50,
+        "outline": 1,
+        "shadow": 2,
+        "margin_v": 65,
         "alignment": 2
     },
     "cinematic": {
         "name": "Cinematic",
         "fontname": "Arial",
-        "fontsize": 36,
-        "primary_colour": "&H00F0F0F0",  # Off-white
-        "back_colour": "&HE0000000",     # Very opaque black
-        "outline_colour": "&H00404040",  # Dark gray outline
+        "fontsize": 50,
+        "primary_colour": "&H00F0F0F0",
+        "back_colour": "&HC0000000",
+        "outline_colour": "&H00303030",
         "bold": -1,
         "italic": 0,
         "border_style": 3,
-        "outline": 2,
-        "shadow": 3,
-        "margin_v": 55,
+        "outline": 3,
+        "shadow": 4,
+        "margin_v": 75,
         "alignment": 2
     }
 }
@@ -162,7 +168,6 @@ def create_ass_file(sentences, ass_file):
         for s in sentences:
             start_time = format_ass_time(s['start'])
             end_time = format_ass_time(s['end'])
-            # Clean and escape text
             text = s['text'].replace('\n', ' ').replace('\\', '\\\\')
             f.write(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{text}\n")
 
@@ -175,13 +180,10 @@ def format_ass_time(seconds):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 # ==========================================
-# 4. ROBUST UPLOAD (MULTIPLE SERVICES)
+# 4. ROBUST UPLOAD
 # ==========================================
 def robust_upload(file_path):
-    """
-    Uploads a file to Transfer.sh with a fallback to Catbox.moe.
-    Includes aggressive timeouts and error handling to prevent hanging.
-    """
+    """Upload with multiple service fallbacks"""
     if not os.path.exists(file_path):
         print(f"❌ Error: File not found: {file_path}")
         return None
@@ -190,49 +192,30 @@ def robust_upload(file_path):
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     print(f"🚀 Uploading {filename} ({file_size_mb:.2f} MB)...")
 
-    # --- OPTION 1: Transfer.sh (Best for CLI/Scripts) ---
+    # Transfer.sh
     print("👉 Attempting Transfer.sh...")
     try:
-        # We use 'curl' via subprocess because it is often more robust than requests for this specific API
-        # The --upload-file flag is critical for transfer.sh
-        cmd = [
-            "curl", 
-            "--upload-file", str(file_path), 
-            f"https://transfer.sh/{filename}",
-            "--max-time", "120" # 2-minute hard timeout
-        ]
-        
-        # Run command and capture output
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            check=True
-        )
-        
+        cmd = ["curl", "--upload-file", str(file_path), f"https://transfer.sh/{filename}", "--max-time", "120"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         link = result.stdout.strip()
         
-        # Verify we got a valid URL back
         if "transfer.sh" in link and link.startswith("http"):
             print(f"✅ Success! Link: {link}")
             return link
         else:
             print(f"⚠️ Transfer.sh returned invalid response: {link}")
-
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Transfer.sh failed (Exit Code {e.returncode})")
     except Exception as e:
-        print(f"❌ Transfer.sh error: {str(e)}")
+        print(f"❌ Transfer.sh failed: {str(e)}")
 
-    # --- OPTION 2: Catbox.moe (Reliable Fallback) ---
-    print("👉 Attempting Catbox.moe (Fallback)...")
+    # Catbox.moe
+    print("👉 Attempting Catbox.moe...")
     try:
         with open(file_path, 'rb') as f:
             response = requests.post(
                 "https://catbox.moe/user/api.php",
                 data={"reqtype": "fileupload"},
                 files={"fileToUpload": f},
-                timeout=120  # 2-minute timeout
+                timeout=120
             )
         
         if response.status_code == 200:
@@ -240,23 +223,14 @@ def robust_upload(file_path):
             if link.startswith("http"):
                 print(f"✅ Success! Link: {link}")
                 return link
-            else:
-                print(f"⚠️ Catbox returned invalid response: {link}")
-        else:
-            print(f"❌ Catbox failed with status: {response.status_code}")
-
     except Exception as e:
         print(f"❌ Catbox error: {str(e)}")
 
-    # --- OPTION 3: File.io (Last Resort) ---
-    print("👉 Attempting File.io (Last Resort)...")
+    # File.io
+    print("👉 Attempting File.io...")
     try:
         with open(file_path, 'rb') as f:
-            response = requests.post(
-                "https://file.io", 
-                files={"file": f},
-                timeout=60
-            )
+            response = requests.post("https://file.io", files={"file": f}, timeout=60)
         
         if response.status_code == 200:
             link = response.json().get("link")
@@ -267,8 +241,9 @@ def robust_upload(file_path):
 
     print("💀 All upload attempts failed.")
     return None
+
 # ==========================================
-# 5. MASSIVE VISUAL DICTIONARY (500+ TOPICS)
+# 5. EXPANDED VISUAL DICTIONARY (700+ TOPICS)
 # ==========================================
 VISUAL_MAP = {
     # TECH & AI
@@ -294,6 +269,11 @@ VISUAL_MAP = {
     "blockchain": ["distributed ledger", "smart contract", "crypto nodes", "decentralized network"],
     "bitcoin": ["bitcoin logo", "crypto mining rig", "bitcoin transaction", "BTC chart"],
     "nft": ["digital art", "NFT marketplace", "crypto art", "metaverse"],
+    "quantum": ["quantum computing", "quantum mechanics", "quantum physics", "subatomic particles"],
+    "algorithm": ["algorithm visualization", "code algorithm", "sorting algorithm", "AI algorithm"],
+    "server": ["server room", "data server", "server rack", "cloud server"],
+    "virtual": ["virtual reality", "VR headset", "virtual world", "VR gaming"],
+    "metaverse": ["metaverse concept", "digital universe", "virtual metaverse"],
     
     # SCIENCE & SPACE
     "science": ["laboratory", "scientist research", "microscope", "chemical reaction", "petri dish", "beaker", "scientific equipment"],
@@ -310,6 +290,19 @@ VISUAL_MAP = {
     "planet": ["earth rotation", "mars surface", "jupiter storm", "saturn rings"],
     "universe": ["cosmic web", "expanding universe", "multiverse concept", "big bang"],
     "satellite": ["satellite orbit", "GPS satellites", "communication satellite"],
+    "telescope": ["space telescope", "observatory telescope", "astronomical observation"],
+    "microscope": ["electron microscope", "lab microscope", "microscopy"],
+    "experiment": ["scientific experiment", "lab experiment", "research experiment"],
+    "laboratory": ["research lab", "science lab", "lab equipment", "laboratory research"],
+    "chemical": ["chemical reaction", "chemical formula", "chemistry lab"],
+    "molecule": ["molecular structure", "3D molecule", "molecular biology"],
+    "atom": ["atomic structure", "atom model", "atomic particles"],
+    "particle": ["particle collision", "subatomic particle", "particle physics"],
+    "gravity": ["gravity illustration", "gravitational force", "zero gravity"],
+    "magnetism": ["magnetic field", "magnet", "electromagnetic"],
+    "electricity": ["electrical current", "electric power", "lightning strike"],
+    "radiation": ["radiation waves", "electromagnetic radiation"],
+    "laser": ["laser beam", "laser light", "laser technology"],
     
     # BUSINESS & FINANCE
     "business": ["business meeting", "handshake deal", "office skyscrapers", "corporate presentation", "team collaboration"],
@@ -331,6 +324,33 @@ VISUAL_MAP = {
     "profit": ["profit margin", "revenue growth", "earnings report", "profit chart"],
     "wealth": ["luxury mansion", "private yacht", "expensive cars", "luxury lifestyle"],
     "luxury": ["luxury hotel", "first class", "designer brands", "champagne"],
+    "ceo": ["ceo portrait", "chief executive", "business leader"],
+    "manager": ["team manager", "project manager", "management"],
+    "executive": ["business executive", "corporate executive", "c-suite"],
+    "board": ["board meeting", "board of directors", "corporate board"],
+    "shareholder": ["shareholders meeting", "investor meeting"],
+    "dividend": ["dividend payment", "stock dividend"],
+    "merger": ["company merger", "business merger", "corporate merger"],
+    "acquisition": ["business acquisition", "company takeover"],
+    "ipo": ["initial public offering", "stock market ipo", "company going public"],
+    "bond": ["financial bond", "treasury bond", "bond market"],
+    "commodity": ["commodity trading", "raw materials", "commodities"],
+    "forex": ["foreign exchange", "currency trading", "forex market"],
+    "hedge": ["hedge fund", "hedging strategy", "risk management"],
+    "venture": ["venture capital", "vc funding", "startup investment"],
+    "angel": ["angel investor", "angel funding", "early stage investment"],
+    "crowdfund": ["crowdfunding campaign", "kickstarter", "crowdfund platform"],
+    "loan": ["bank loan", "mortgage", "lending"],
+    "credit": ["credit card", "credit score", "credit rating"],
+    "debt": ["debt burden", "financial debt", "debt management"],
+    "interest": ["interest rate", "compound interest", "interest payment"],
+    "inflation": ["inflation chart", "rising prices", "economic inflation"],
+    "deflation": ["deflation chart", "price decline"],
+    "recession": ["economic recession", "financial crisis", "downturn"],
+    "depression": ["great depression", "economic depression"],
+    "boom": ["economic boom", "growth period", "prosperity"],
+    "bubble": ["economic bubble", "market bubble", "speculative bubble"],
+    "crash": ["stock market crash", "financial crash", "market collapse"],
     
     # NATURE & ENVIRONMENT
     "nature": ["waterfall drone shot", "forest aerial", "mountain landscape", "natural wonder", "wilderness", "pristine nature"],
@@ -351,6 +371,33 @@ VISUAL_MAP = {
     "desert": ["sahara desert", "sand dunes", "desert sunset", "cactus"],
     "flower": ["blooming flower timelapse", "flower garden", "rose", "sunflower field"],
     "plant": ["plant growth", "indoor plants", "greenhouse", "botanical garden"],
+    "jungle": ["tropical jungle", "rainforest jungle", "dense jungle"],
+    "safari": ["african safari", "wildlife safari", "safari animals"],
+    "canyon": ["grand canyon", "canyon landscape", "desert canyon"],
+    "volcano": ["volcanic eruption", "active volcano", "lava flow"],
+    "earthquake": ["seismic activity", "earthquake damage", "tremor"],
+    "tsunami": ["ocean tsunami", "tidal wave", "tsunami wave"],
+    "hurricane": ["hurricane storm", "cyclone", "tropical storm"],
+    "tornado": ["tornado funnel", "twister", "tornado destruction"],
+    "avalanche": ["snow avalanche", "mountain avalanche"],
+    "glacier": ["ice glacier", "glacier melting", "arctic glacier"],
+    "iceberg": ["floating iceberg", "arctic iceberg", "ice formation"],
+    "coral": ["coral reef", "coral ecosystem", "underwater coral"],
+    "whale": ["humpback whale", "whale breach", "ocean whale"],
+    "dolphin": ["dolphins swimming", "dolphin pod", "jumping dolphin"],
+    "shark": ["great white shark", "shark swimming", "ocean predator"],
+    "eagle": ["bald eagle", "eagle flying", "bird of prey"],
+    "lion": ["lion pride", "male lion", "lion roar"],
+    "elephant": ["elephant herd", "african elephant", "elephant trunk"],
+    "tiger": ["bengal tiger", "tiger hunting", "wild tiger"],
+    "bear": ["grizzly bear", "polar bear", "bear fishing"],
+    "wolf": ["wolf pack", "gray wolf", "howling wolf"],
+    "deer": ["deer in forest", "white-tailed deer", "deer grazing"],
+    "monkey": ["monkey swinging", "primate", "monkey troop"],
+    "gorilla": ["mountain gorilla", "silverback gorilla"],
+    "butterfly": ["butterfly flying", "monarch butterfly", "butterfly wings"],
+    "bee": ["honey bee", "bee pollinating", "bee hive"],
+    "spider": ["spider web", "spider spinning", "arachnid"],
     
     # URBAN & CITY
     "city": ["city skyline", "urban aerial", "city lights night", "metropolitan", "downtown"],
@@ -365,6 +412,31 @@ VISUAL_MAP = {
     "train": ["bullet train", "subway", "freight train", "train station"],
     "airport": ["airport terminal", "airplane takeoff", "air traffic control"],
     "bridge": ["suspension bridge", "brooklyn bridge", "golden gate", "bridge construction"],
+    "automobile": ["car", "vehicle", "automobile manufacturing"],
+    "truck": ["semi truck", "pickup truck", "delivery truck"],
+    "bus": ["city bus", "school bus", "public bus"],
+    "bicycle": ["bike riding", "cycling", "mountain bike"],
+    "motorcycle": ["motorbike", "biker", "motorcycle riding"],
+    "scooter": ["electric scooter", "motor scooter", "mobility scooter"],
+    "helicopter": ["helicopter flying", "chopper", "helicopter rescue"],
+    "airplane": ["commercial airplane", "jet aircraft", "plane flying"],
+    "jet": ["fighter jet", "private jet", "jet plane"],
+    "drone": ["aerial drone", "drone flying", "quadcopter"],
+    "ship": ["cargo ship", "cruise ship", "naval ship"],
+    "boat": ["sailing boat", "speedboat", "fishing boat"],
+    "yacht": ["luxury yacht", "sailing yacht", "motor yacht"],
+    "submarine": ["underwater submarine", "military submarine"],
+    "ferry": ["passenger ferry", "car ferry", "ferry boat"],
+    "cruise": ["cruise ship", "ocean cruise", "cruise vacation"],
+    "cargo": ["cargo container", "freight", "cargo ship"],
+    "freight": ["freight train", "cargo freight", "shipping"],
+    "delivery": ["package delivery", "delivery truck", "courier"],
+    "logistics": ["logistics warehouse", "supply chain", "distribution"],
+    "warehouse": ["storage warehouse", "distribution center", "fulfillment"],
+    "container": ["shipping container", "cargo container", "containerization"],
+    "port": ["shipping port", "harbor", "container port"],
+    "harbor": ["harbor view", "marina", "port harbor"],
+    "dock": ["loading dock", "ship dock", "docking"],
     
     # PEOPLE & EMOTION
     "people": ["crowd", "diverse people", "community", "team", "human connection"],
@@ -412,6 +484,43 @@ VISUAL_MAP = {
     "camera": ["professional camera", "filming", "lens", "DSLR"],
     "paint": ["painting process", "artist painting", "paint strokes", "canvas"],
     "draw": ["drawing", "sketch", "illustration", "digital art"],
+    "theater": ["theater stage", "movie theater", "theatrical performance"],
+    "stage": ["concert stage", "theater stage", "performance stage"],
+    "concert": ["live concert", "music concert", "concert crowd"],
+    "performance": ["live performance", "stage performance", "artistic performance"],
+    "actor": ["actor performing", "movie actor", "theater actor"],
+    "actress": ["actress portrait", "female actor", "movie star"],
+    "director": ["film director", "movie director", "directing"],
+    "producer": ["film producer", "music producer", "production"],
+    "screenplay": ["script writing", "screenplay", "movie script"],
+    "cinema": ["movie theater", "cinema hall", "cinematography"],
+    "animation": ["animated movie", "animation studio", "cartoon animation"],
+    "cartoon": ["cartoon character", "animated cartoon", "animation"],
+    "comic": ["comic book", "comic art", "graphic novel"],
+    "manga": ["japanese manga", "manga art", "anime manga"],
+    "anime": ["anime art", "japanese animation", "anime character"],
+    "sculpture": ["stone sculpture", "art sculpture", "sculptor"],
+    "statue": ["bronze statue", "monument statue", "stone statue"],
+    "monument": ["historical monument", "memorial monument", "famous monument"],
+    "museum": ["art museum", "museum exhibit", "gallery"],
+    "gallery": ["art gallery", "photo gallery", "exhibition"],
+    "exhibition": ["art exhibition", "museum exhibition", "exhibit"],
+    "portrait": ["portrait painting", "portrait photography", "face portrait"],
+    "landscape": ["landscape painting", "scenic landscape", "landscape photo"],
+    "abstract": ["abstract art", "abstract painting", "modern art"],
+    "modern": ["modern art", "contemporary art", "modern design"],
+    "contemporary": ["contemporary art", "modern contemporary", "current art"],
+    "classic": ["classical art", "classic painting", "traditional art"],
+    "vintage": ["vintage style", "retro vintage", "antique vintage"],
+    "antique": ["antique furniture", "antique items", "vintage antique"],
+    "craft": ["handicraft", "artisan craft", "craftsmanship"],
+    "pottery": ["ceramic pottery", "clay pottery", "potter"],
+    "ceramic": ["ceramic art", "ceramic pottery", "ceramics"],
+    "textile": ["fabric textile", "textile art", "woven textile"],
+    "weaving": ["fabric weaving", "textile weaving", "loom weaving"],
+    "embroidery": ["embroidered fabric", "needlework", "embroidery art"],
+    "knitting": ["knitting needles", "knitted fabric", "yarn knitting"],
+    "sewing": ["sewing machine", "tailoring", "seamstress"],
     
     # FOOD & COOKING
     "food": ["delicious food", "gourmet meal", "food preparation", "culinary", "restaurant dish"],
@@ -422,6 +531,35 @@ VISUAL_MAP = {
     "drink": ["beverage", "cocktail", "coffee", "pouring drink"],
     "coffee": ["coffee brewing", "coffee shop", "espresso", "coffee beans"],
     "meal": ["family meal", "dinner", "lunch", "breakfast"],
+    "kitchen": ["modern kitchen", "restaurant kitchen", "home kitchen"],
+    "recipe": ["cooking recipe", "recipe book", "recipe card"],
+    "ingredient": ["fresh ingredients", "cooking ingredients", "raw ingredients"],
+    "spice": ["spices", "spice market", "spice rack"],
+    "herb": ["fresh herbs", "herb garden", "cooking herbs"],
+    "vegetable": ["fresh vegetables", "vegetable market", "organic vegetables"],
+    "fruit": ["fresh fruit", "fruit bowl", "tropical fruit"],
+    "meat": ["raw meat", "butcher", "meat preparation"],
+    "seafood": ["seafood platter", "ocean seafood", "shellfish"],
+    "bread": ["fresh bread", "bakery bread", "bread loaf"],
+    "bakery": ["bakery shop", "baked goods", "bakery display"],
+    "cake": ["birthday cake", "wedding cake", "cake decorating"],
+    "dessert": ["dessert plate", "sweet dessert", "dessert menu"],
+    "pastry": ["french pastry", "pastry shop", "sweet pastry"],
+    "chocolate": ["chocolate bar", "chocolate making", "cocoa chocolate"],
+    "ice": ["ice cream", "ice cubes", "frozen ice"],
+    "cream": ["whipped cream", "ice cream", "dairy cream"],
+    "cheese": ["cheese platter", "cheese making", "artisan cheese"],
+    "wine": ["wine bottle", "wine tasting", "vineyard wine"],
+    "beer": ["beer glass", "brewery", "craft beer"],
+    "cocktail": ["cocktail drink", "bartender", "mixed drink"],
+    "juice": ["fresh juice", "fruit juice", "juice making"],
+    "tea": ["tea ceremony", "tea cup", "tea plantation"],
+    "breakfast": ["breakfast table", "morning breakfast", "breakfast food"],
+    "lunch": ["lunch plate", "midday meal", "lunch break"],
+    "dinner": ["dinner table", "evening meal", "family dinner"],
+    "buffet": ["buffet table", "food buffet", "buffet restaurant"],
+    "feast": ["feast table", "banquet", "festive meal"],
+    "picnic": ["outdoor picnic", "picnic basket", "picnic setting"],
     
     # SPORTS & FITNESS
     "sport": ["sports action", "athletic competition", "stadium", "sports event"],
@@ -432,6 +570,88 @@ VISUAL_MAP = {
     "soccer": ["soccer match", "football game", "soccer stadium", "goal"],
     "basketball": ["basketball game", "NBA", "dunk", "basketball court"],
     "football": ["american football", "NFL", "touchdown", "football stadium"],
+    "athlete": ["professional athlete", "sports athlete", "athletic performance"],
+    "training": ["sports training", "athletic training", "workout training"],
+    "competition": ["sports competition", "athletic competition", "tournament"],
+    "championship": ["championship game", "title match", "championship trophy"],
+    "olympic": ["olympic games", "olympic sports", "olympic athlete"],
+    "medal": ["gold medal", "olympic medal", "award medal"],
+    "trophy": ["championship trophy", "sports trophy", "winner trophy"],
+    "stadium": ["sports stadium", "football stadium", "arena"],
+    "arena": ["sports arena", "basketball arena", "indoor arena"],
+    "field": ["sports field", "playing field", "athletic field"],
+    "court": ["tennis court", "basketball court", "sports court"],
+    "swimming": ["swimming pool", "swimmer", "competitive swimming"],
+    "diving": ["diving board", "scuba diving", "cliff diving"],
+    "tennis": ["tennis match", "tennis player", "tennis court"],
+    "golf": ["golf course", "golfer", "golf swing"],
+    "baseball": ["baseball game", "baseball diamond", "baseball player"],
+    "hockey": ["ice hockey", "hockey game", "hockey rink"],
+    "rugby": ["rugby match", "rugby player", "rugby tackle"],
+    "cricket": ["cricket match", "cricket bat", "cricket field"],
+    "volleyball": ["volleyball game", "beach volleyball", "volleyball court"],
+    "skiing": ["snow skiing", "ski resort", "downhill skiing"],
+    "snowboard": ["snowboarding", "snowboard trick", "snow sport"],
+    "skating": ["ice skating", "figure skating", "skate rink"],
+    "surfing": ["ocean surfing", "surfer", "surf wave"],
+    "boxing": ["boxing match", "boxer", "boxing ring"],
+    "wrestling": ["wrestling match", "wrestler", "wrestling ring"],
+    "martial": ["martial arts", "karate", "taekwondo"],
+    "yoga": ["yoga pose", "yoga class", "yoga practice"],
+    "meditation": ["meditation practice", "zen meditation", "mindfulness"],
+    "climbing": ["rock climbing", "mountain climbing", "climber"],
+    "hiking": ["mountain hiking", "trail hiking", "hiker"],
+    "camping": ["outdoor camping", "campsite", "camping tent"],
+    "cycling": ["road cycling", "cyclist", "bike race"],
+    
+    # MEDICAL & HEALTH
+    "surgery": ["surgical operation", "operating room", "surgery procedure"],
+    "operation": ["medical operation", "surgical procedure"],
+    "diagnosis": ["medical diagnosis", "diagnostic imaging", "patient diagnosis"],
+    "treatment": ["medical treatment", "therapy", "patient care"],
+    "therapy": ["physical therapy", "rehabilitation", "therapy session"],
+    "rehabilitation": ["rehab center", "recovery therapy", "physical rehabilitation"],
+    "emergency": ["emergency room", "medical emergency", "ambulance"],
+    "ambulance": ["ambulance vehicle", "emergency medical", "paramedic"],
+    "paramedic": ["emt", "emergency medical technician", "first responder"],
+    "pharmacy": ["drug store", "pharmacy counter", "pharmacist"],
+    "prescription": ["prescription medication", "rx", "medical prescription"],
+    "injection": ["medical injection", "vaccine shot", "syringe"],
+    "syringe": ["medical syringe", "needle", "injection device"],
+    "stethoscope": ["doctor stethoscope", "medical exam", "cardiac exam"],
+    "xray": ["x-ray image", "radiograph", "medical imaging"],
+    "mri": ["mri scan", "magnetic resonance imaging", "brain mri"],
+    "scan": ["ct scan", "body scan", "medical scan"],
+    "ultrasound": ["ultrasound imaging", "sonogram", "medical ultrasound"],
+    "cardiac": ["heart health", "cardiac care", "heart monitor"],
+    "cancer": ["cancer cells", "oncology", "cancer treatment"],
+    "tumor": ["brain tumor", "cancer tumor", "tumor cells"],
+    "organ": ["human organ", "organ transplant", "vital organs"],
+    "transplant": ["organ transplant", "transplant surgery"],
+    "donor": ["organ donor", "blood donor", "donation"],
+    "immune": ["immune system", "white blood cells", "immunity"],
+    "antibody": ["antibody response", "immune antibody"],
+    "infection": ["bacterial infection", "viral infection", "infectious disease"],
+    "epidemic": ["disease epidemic", "outbreak", "epidemic spread"],
+    "pandemic": ["global pandemic", "pandemic response", "worldwide outbreak"],
+    "hospital": ["hospital corridor", "medical facility", "emergency room", "patient care"],
+    "doctor": ["physician", "medical examination", "doctor consulting", "healthcare provider"],
+    "nurse": ["nursing", "patient care", "medical professional", "hospital staff"],
+    "patient": ["medical patient", "hospital bed", "treatment", "care"],
+    "disease": ["illness", "pathogen", "epidemic", "medical condition"],
+    "virus": ["viral infection", "microscopic virus", "pandemic", "contagion"],
+    "bacteria": ["microorganism", "bacterial culture", "microbe", "germ"],
+    "vaccine": ["vaccination", "syringe", "immunization", "medical injection"],
+    "drug": ["medication", "pills", "pharmaceuticals", "medicine"],
+    "pill": ["tablets", "capsules", "prescription", "medication"],
+    "pain": ["suffering", "injury", "ache", "discomfort"],
+    "blood": ["blood cells", "blood test", "circulation", "donation"],
+    "heart": ["heart beating", "cardiac", "heart health", "cardiovascular"],
+    "lung": ["respiratory", "breathing", "pulmonary", "airways"],
+    "muscle": ["muscular system", "muscle tissue", "bodybuilding", "strength"],
+    "bone": ["skeleton", "bone structure", "x-ray", "skeletal"],
+    "skin": ["skin texture", "dermatology", "skin care", "complexion"],
+    "tooth": ["teeth", "dental", "dentist", "smile"],
     
     # TIME & HISTORY
     "time": ["clock ticking", "hourglass", "time lapse", "calendar", "watch"],
@@ -450,8 +670,6 @@ VISUAL_MAP = {
     "conflict": ["war zone", "tension", "dispute", "crisis"],
     
     # ABSTRACT & CONCEPTS
-    "abstract": ["ink in water", "smoke swirls", "light leaks", "geometric patterns", "abstract art", "fluid motion"],
-    "concept": ["conceptual art", "idea visualization", "theoretical", "abstract concept"],
     "idea": ["light bulb moment", "brainstorming", "innovation", "creative thinking", "eureka"],
     "think": ["thinking person", "contemplation", "problem solving", "deep thought"],
     "brain": ["brain scan", "neuroscience", "mental activity", "cognitive"],
@@ -500,15 +718,6 @@ VISUAL_MAP = {
     "vote": ["voting booth", "election", "ballot", "democracy"],
     "election": ["election campaign", "polling", "voters", "electoral"],
     
-    # PROBLEM & SOLUTION
-    "problem": ["challenge", "obstacle", "difficulty", "issue"],
-    "solution": ["problem solving", "answer", "resolution", "fix"],
-    "challenge": ["challenging task", "difficult", "test", "hurdle"],
-    "crisis": ["emergency", "critical situation", "disaster response", "urgent"],
-    "risk": ["dangerous", "hazard", "threat", "risky situation"],
-    "danger": ["warning sign", "dangerous situation", "caution", "peril"],
-    "safe": ["safety", "secure", "protected", "safeguard"],
-    
     # MISC COMMON TERMS
     "new": ["brand new", "innovation", "fresh start", "latest"],
     "change": ["transformation", "evolution", "transition", "shifting"],
@@ -537,7 +746,6 @@ VISUAL_MAP = {
     "room": ["living room", "bedroom", "interior room", "empty room"],
     "fire": ["flames", "campfire", "wildfire", "fireplace"],
     "smoke": ["smoke rising", "smoky atmosphere", "fog", "mist"],
-    "ice": ["ice formation", "frozen", "icicles", "ice crystals"],
     "snow": ["snowfall", "snowy landscape", "winter snow", "snowflakes"],
     "wind": ["windy day", "wind turbine", "trees in wind", "air movement"],
     "sun": ["sunrise", "sunset", "sun rays", "solar", "sunshine"],
@@ -591,26 +799,6 @@ VISUAL_MAP = {
     "makeup": ["cosmetics", "makeup application", "beauty routine", "lipstick"],
     "hair": ["hairstyle", "hair salon", "flowing hair", "hair care"],
     "body": ["human body", "fitness body", "anatomy", "physique"],
-    "health": ["healthcare", "wellness", "healthy living", "medical checkup"],
-    "hospital": ["hospital corridor", "medical facility", "emergency room", "patient care"],
-    "doctor": ["physician", "medical examination", "doctor consulting", "healthcare provider"],
-    "nurse": ["nursing", "patient care", "medical professional", "hospital staff"],
-    "patient": ["medical patient", "hospital bed", "treatment", "care"],
-    "disease": ["illness", "pathogen", "epidemic", "medical condition"],
-    "virus": ["viral infection", "microscopic virus", "pandemic", "contagion"],
-    "bacteria": ["microorganism", "bacterial culture", "microbe", "germ"],
-    "vaccine": ["vaccination", "syringe", "immunization", "medical injection"],
-    "drug": ["medication", "pills", "pharmaceuticals", "medicine"],
-    "pill": ["tablets", "capsules", "prescription", "medication"],
-    "pain": ["suffering", "injury", "ache", "discomfort"],
-    "blood": ["blood cells", "blood test", "circulation", "donation"],
-    "heart": ["heart beating", "cardiac", "heart health", "cardiovascular"],
-    "lung": ["respiratory", "breathing", "pulmonary", "airways"],
-    "muscle": ["muscular system", "muscle tissue", "bodybuilding", "strength"],
-    "bone": ["skeleton", "bone structure", "x-ray", "skeletal"],
-    "skin": ["skin texture", "dermatology", "skin care", "complexion"],
-    "hair": ["hair follicles", "hairstyle", "hair growth", "scalp"],
-    "tooth": ["teeth", "dental", "dentist", "smile"],
     "smell": ["fragrance", "aroma", "scent", "perfume"],
     "taste": ["tasting food", "flavor", "taste buds", "culinary experience"],
     "touch": ["tactile", "feeling texture", "sense of touch", "contact"],
@@ -620,222 +808,77 @@ VISUAL_MAP = {
     "feel": ["feeling", "emotion", "sensation", "touch"],
     "sense": ["five senses", "sensory", "perception", "awareness"],
     "memory": ["memories", "remembering", "nostalgia", "brain memory"],
-    "forget": ["forgetfulness", "amnesia", "memory loss", "fading"],
-    "remember": ["remembrance", "recollection", "recall", "memory"],
-    "know": ["knowledge", "knowing", "information", "understanding"],
-    "understand": ["comprehension", "understanding", "clarity", "insight"],
-    "wisdom": ["wise", "sage", "enlightenment", "knowledge"],
-    "intelligence": ["IQ", "smart", "genius", "intellectual"],
-    "smart": ["intelligent person", "cleverness", "wit", "bright"],
-    "stupid": ["foolish", "mistake", "error", "blunder"],
-    "genius": ["brilliant mind", "exceptional talent", "prodigy", "mastermind"],
-    "talent": ["talented person", "gifted", "ability", "skill"],
-    "ability": ["capability", "competence", "aptitude", "capacity"],
-    "create": ["creation", "making", "building", "inventing"],
-    "make": ["manufacturing", "producing", "crafting", "making things"],
-    "build": ["construction", "building process", "development", "assembly"],
-    "destroy": ["destruction", "demolition", "breaking", "ruins"],
-    "break": ["breaking", "shatter", "fracture", "smash"],
-    "fix": ["repair", "fixing", "maintenance", "mending"],
-    "repair": ["repairing", "restoration", "fixing broken", "service"],
-    "improve": ["improvement", "enhancement", "upgrade", "better"],
-    "better": ["improvement", "superior", "excellence", "quality"],
-    "worse": ["deterioration", "decline", "degradation", "failing"],
-    "good": ["goodness", "positive", "excellence", "quality"],
-    "bad": ["negative", "poor quality", "defective", "wrong"],
-    "right": ["correct", "accuracy", "proper", "appropriate"],
-    "wrong": ["incorrect", "mistake", "error", "false"],
-    "true": ["truth", "reality", "fact", "genuine"],
-    "false": ["fake", "counterfeit", "lie", "deception"],
-    "real": ["reality", "authentic", "genuine", "actual"],
-    "fake": ["counterfeit", "imitation", "fraud", "forgery"],
-    "original": ["authentic", "first", "unique", "genuine"],
-    "copy": ["duplicate", "replica", "reproduction", "clone"],
-    "same": ["identical", "similar", "matching", "uniform"],
-    "different": ["diversity", "variety", "contrast", "unique"],
-    "similar": ["resemblance", "alike", "comparable", "analogous"],
-    "opposite": ["contrast", "reverse", "contrary", "antithesis"],
-    "equal": ["equality", "balance", "parity", "equivalence"],
-    "more": ["increase", "greater", "additional", "surplus"],
-    "less": ["decrease", "reduction", "fewer", "diminished"],
-    "high": ["height", "tall", "elevated", "peak"],
-    "low": ["lowland", "valley", "depression", "bottom"],
-    "up": ["upward", "ascending", "rise", "elevation"],
-    "down": ["downward", "descending", "fall", "decline"],
-    "top": ["summit", "peak", "apex", "highest point"],
-    "bottom": ["base", "foundation", "lowest point", "ground"],
-    "center": ["middle", "core", "central", "heart"],
-    "side": ["lateral", "edge", "flank", "periphery"],
-    "front": ["forward", "facade", "frontline", "forefront"],
-    "back": ["rear", "behind", "background", "posterior"],
-    "inside": ["interior", "within", "internal", "indoors"],
-    "outside": ["exterior", "outdoor", "external", "outdoors"],
-    "open": ["opening", "accessible", "unlocked", "revealed"],
-    "close": ["closing", "shut", "sealed", "locked"],
-    "start": ["beginning", "commencement", "launch", "initiation"],
-    "end": ["conclusion", "finish", "termination", "finale"],
-    "begin": ["starting point", "origin", "inception", "dawn"],
-    "finish": ["completion", "end result", "final", "done"],
-    "complete": ["completion", "finished product", "whole", "entire"],
-    "continue": ["ongoing", "persistence", "continuation", "proceed"],
-    "stop": ["halt", "pause", "cessation", "standstill"],
-    "pause": ["break", "intermission", "temporary stop", "rest"],
-    "wait": ["waiting", "queue", "patience", "anticipation"],
-    "move": ["movement", "motion", "mobility", "relocation"],
-    "stay": ["remaining", "stationary", "residence", "dwell"],
-    "go": ["going", "departure", "leaving", "travel"],
-    "come": ["arrival", "approaching", "incoming", "return"],
-    "arrive": ["arrival", "reaching destination", "coming", "landing"],
-    "leave": ["departure", "exit", "goodbye", "leaving"],
-    "enter": ["entrance", "entry", "coming in", "access"],
-    "exit": ["way out", "departure", "leaving", "egress"],
-    "push": ["pushing", "force", "pressing", "propulsion"],
-    "pull": ["pulling", "tug", "drag", "traction"],
-    "lift": ["lifting", "raising", "elevation", "hoist"],
-    "drop": ["dropping", "fall", "release", "descent"],
-    "throw": ["throwing", "toss", "hurl", "pitch"],
-    "catch": ["catching", "grab", "capture", "interception"],
-    "hold": ["holding", "grip", "grasp", "possession"],
-    "release": ["releasing", "let go", "free", "discharge"],
-    "give": ["giving", "donation", "present", "offering"],
-    "take": ["taking", "receiving", "acquisition", "grab"],
-    "send": ["sending", "dispatch", "delivery", "transmission"],
-    "receive": ["receiving", "acceptance", "acquisition", "getting"],
-    "buy": ["purchasing", "shopping", "acquisition", "buying"],
-    "sell": ["selling", "sale", "commerce", "vending"],
-    "pay": ["payment", "transaction", "paying", "purchase"],
-    "cost": ["price", "expense", "value", "charge"],
-    "price": ["pricing", "cost", "valuation", "rate"],
-    "value": ["worth", "importance", "significance", "merit"],
-    "cheap": ["affordable", "inexpensive", "budget", "economical"],
-    "expensive": ["costly", "premium", "luxury", "high-priced"],
-    "free": ["freedom", "complimentary", "no cost", "liberty"],
-    "trade": ["trading", "commerce", "exchange", "business deal"],
-    "exchange": ["swap", "trade", "barter", "currency exchange"],
-    "deal": ["business deal", "agreement", "transaction", "negotiation"],
-    "contract": ["legal contract", "agreement", "document", "signing"],
-    "agreement": ["accord", "deal", "treaty", "consensus"],
-    "promise": ["commitment", "pledge", "vow", "guarantee"],
-    "trust": ["confidence", "faith", "reliability", "belief"],
-    "lie": ["deception", "untruth", "falsehood", "dishonesty"],
-    "honest": ["honesty", "truth", "integrity", "sincere"],
-    "truth": ["reality", "fact", "veracity", "true nature"],
-    "secret": ["hidden", "mystery", "confidential", "covert"],
-    "hide": ["hiding", "concealment", "cover", "camouflage"],
-    "show": ["display", "exhibition", "reveal", "presentation"],
-    "reveal": ["revelation", "unveiling", "disclosure", "expose"],
-    "discover": ["discovery", "finding", "exploration", "uncover"],
-    "find": ["finding", "locating", "search success", "uncovering"],
-    "lose": ["loss", "losing", "misplaced", "defeat"],
-    "search": ["searching", "quest", "investigation", "looking"],
-    "look": ["looking", "gaze", "observation", "viewing"],
-    "watch": ["watching", "observing", "viewing", "monitoring"],
-    "observe": ["observation", "study", "examination", "surveillance"],
-    "examine": ["examination", "inspection", "analysis", "scrutiny"],
-    "test": ["testing", "trial", "experiment", "assessment"],
-    "try": ["attempt", "effort", "trial", "endeavor"],
-    "attempt": ["trying", "effort", "endeavor", "venture"],
-    "fail": ["failure", "unsuccessful", "defeat", "collapse"],
-    "failure": ["failed attempt", "breakdown", "fiasco", "flop"],
-    "win": ["victory", "winning", "triumph", "success"],
-    "victory": ["celebration", "triumph", "conquest", "win"],
-    "lose": ["defeat", "loss", "losing game", "failure"],
-    "defeat": ["beaten", "conquered", "overcome", "vanquished"],
-    "compete": ["competition", "rivalry", "contest", "race"],
-    "competition": ["competitive event", "contest", "rivalry", "tournament"],
-    "race": ["racing", "competition", "sprint", "marathon"],
-    "battle": ["fight", "combat", "conflict", "warfare"],
-    "protect": ["protection", "defense", "shield", "safeguard"],
-    "defend": ["defense", "protecting", "guard", "resistance"],
-    "attack": ["assault", "offensive", "strike", "aggression"],
-    "escape": ["fleeing", "getaway", "evasion", "breakout"],
-    "rescue": ["saving", "rescue operation", "liberation", "recovery"],
-    "save": ["saving", "preservation", "rescue", "conservation"],
-    "help": ["assistance", "helping hand", "aid", "support"],
-    "support": ["backing", "assistance", "reinforcement", "aid"],
-    "care": ["caring", "compassion", "attention", "nurture"],
-    "protect": ["guardian", "protection", "safety", "security"],
-    "share": ["sharing", "distribution", "divide", "common"],
-    "join": ["joining", "union", "connection", "merge"],
-    "separate": ["separation", "division", "split", "apart"],
-    "connect": ["connection", "link", "bond", "network"],
-    "disconnect": ["disconnection", "separation", "break", "detach"],
-    "unite": ["unity", "together", "unification", "alliance"],
-    "divide": ["division", "split", "partition", "separate"],
-    "mix": ["mixing", "blend", "combination", "merge"],
-    "combine": ["combination", "fusion", "merge", "integration"],
-    "split": ["splitting", "divide", "crack", "break apart"],
-    "whole": ["complete", "entire", "total", "full"],
-    "part": ["portion", "piece", "section", "component"],
-    "piece": ["fragment", "part", "section", "bit"],
-    "all": ["everything", "whole", "total", "complete"],
-    "none": ["nothing", "zero", "empty", "void"],
-    "some": ["portion", "several", "few", "certain"],
-    "many": ["numerous", "multiple", "abundance", "plenty"],
-    "few": ["small number", "scarce", "limited", "handful"],
-    "several": ["multiple", "various", "diverse", "some"],
-    "every": ["each", "all", "universal", "complete"],
-    "each": ["individual", "every one", "per", "single"],
-    "other": ["alternative", "another", "different", "else"],
-    "another": ["additional", "one more", "different one", "alternative"],
-    "one": ["single", "unity", "individual", "first"],
-    "two": ["pair", "duo", "couple", "double"],
-    "three": ["trio", "triple", "three items", "trinity"],
-    "multiple": ["many", "several", "numerous", "variety"],
-    "single": ["one", "sole", "individual", "alone"],
-    "double": ["twice", "dual", "pair", "twofold"],
-    "half": ["50 percent", "bisect", "partial", "semi"],
-    "quarter": ["one fourth", "25 percent", "fourth", "fraction"],
-    "full": ["complete", "filled", "maximum", "total"],
-    "empty": ["void", "vacant", "hollow", "blank"],
-    "fill": ["filling", "pouring", "loading", "saturate"],
-    "pour": ["pouring liquid", "flow", "stream", "cascade"],
-    "flow": ["flowing", "stream", "current", "movement"],
-    "stream": ["flowing water", "brook", "current", "live stream"],
-    "wave": ["ocean wave", "waving", "oscillation", "surge"],
-    "splash": ["water splash", "splashing", "spray", "droplets"],
-    "drop": ["water drop", "falling drop", "droplet", "drip"],
-    "bubble": ["soap bubbles", "air bubble", "fizz", "foam"],
-    "foam": ["sea foam", "bubbles", "froth", "lather"]
+    "smartphone": ["mobile phone", "iphone", "android phone", "smartphone screen"],
+    "laptop": ["macbook", "laptop computer", "portable computer"],
+    "tablet": ["ipad", "digital tablet", "tablet device"],
+    "keyboard": ["mechanical keyboard", "typing", "computer keyboard"],
+    "mouse": ["computer mouse", "wireless mouse", "gaming mouse"],
+    "monitor": ["computer monitor", "display screen", "4k monitor"],
+    "processor": ["CPU", "computer processor", "microprocessor"],
+    "circuit": ["circuit board", "electronic circuit", "printed circuit"],
+    "chip": ["computer chip", "silicon chip", "microchip"],
+    "semiconductor": ["semiconductor wafer", "chip manufacturing"],
+    "fiber": ["fiber optic cable", "fiber optic network", "fiber optics"],
+    "5g": ["5g tower", "5g network", "wireless 5g"],
+    "wifi": ["wifi signal", "wireless internet", "wifi router"],
+    "router": ["network router", "wifi router", "internet router"],
+    "modem": ["cable modem", "internet modem"],
+    "storage": ["data storage", "hard drive", "cloud storage"],
+    "backup": ["data backup", "backup server", "file backup"],
+    "recovery": ["data recovery", "disaster recovery", "system recovery"]
 }
 
 def get_visual_query(text):
-    """Enhanced visual query with fallback intelligence"""
+    """Intelligent visual query - extracts most relevant keywords from sentence"""
     text = text.lower()
     
-    # Priority 1: Check exact matches in dictionary
-    for category, terms in VISUAL_MAP.items():
-        if category in text:
-            return random.choice(terms)
+    # Remove common filler words
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
+                  'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'been', 'be',
+                  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+                  'should', 'may', 'might', 'must', 'can', 'this', 'that', 'these', 'those'}
     
-    # Priority 2: Check partial word matches
-    words = re.findall(r'\b\w{4,}\b', text)
+    # Extract meaningful words (4+ letters)
+    words = [w for w in re.findall(r'\b\w+\b', text) if len(w) >= 4 and w not in stop_words]
+    
+    # Priority 1: Check for exact category matches
+    for word in words:
+        for category, terms in VISUAL_MAP.items():
+            if word == category:
+                return random.choice(terms)
+    
+    # Priority 2: Check for partial matches in categories
     for word in words:
         for category, terms in VISUAL_MAP.items():
             if word in category or category in word:
                 return random.choice(terms)
     
-    # Priority 3: Extract meaningful nouns (6+ letters)
-    meaningful_words = [w for w in words if len(w) >= 6]
-    if meaningful_words:
-        return random.choice(meaningful_words) + " cinematic 4k"
+    # Priority 3: Use the most significant nouns (6+ letters, not common)
+    significant = [w for w in words if len(w) >= 6]
+    if significant:
+        main_word = significant[0]
+        
+        # Check if any category contains this word
+        for category, terms in VISUAL_MAP.items():
+            if main_word in category or any(main_word in term for term in terms):
+                return random.choice(terms)
+        
+        return f"{main_word} cinematic 4k"
     
-    # Priority 4: Extract any noun (4+ letters)
+    # Priority 4: Use any meaningful noun with visual enhancement
     if words:
-        return random.choice(words) + " abstract art"
+        return f"{words[0]} nature documentary"
     
     # Final fallback
     fallbacks = [
+        "nature documentary 4k",
         "abstract motion graphics",
-        "cinematic bokeh",
-        "light particles",
-        "geometric animation",
-        "smooth gradient",
-        "ink in water 4k",
-        "particle effects"
+        "cinematic landscape",
+        "time lapse clouds",
+        "ocean waves sunset",
+        "mountain vista aerial",
+        "forest canopy drone"
     ]
-    return random.choice(fallbacks)
-
 # ==========================================
 # 6. UTILS: STATUS & DOWNLOAD
 # ==========================================
@@ -881,18 +924,34 @@ def generate_script(topic, minutes):
     print(f"Generating Script (~{words} words)...")
     random.shuffle(GEMINI_KEYS)
     
+    base_instructions = """
+CRITICAL RULES:
+- Write ONLY spoken narration text
+- NO stage directions like [Music fades], [Intro], [Outro]
+- NO sound effects descriptions
+- NO [anything in brackets]
+- Start directly with the content
+- End directly with the conclusion
+- Pure voiceover script only
+"""
+    
     if minutes > 15:
         chunks = int(minutes / 5)
         full_script = []
         for i in range(chunks):
             update_status(5+i, f"Writing Part {i+1}/{chunks}...")
             context = full_script[-1][-200:] if full_script else 'Start'
-            prompt = f"Write Part {i+1}/{chunks} of a documentary about '{topic}'. Context: {context}. Length: 700 words. Spoken Text ONLY."
+            prompt = f"{base_instructions}\nWrite Part {i+1}/{chunks} of a documentary about '{topic}'. Context: {context}. Length: 700 words."
             full_script.append(call_gemini(prompt))
-        return " ".join(full_script)
+        script = " ".join(full_script)
     else:
-        prompt = f"Write a YouTube script about '{topic}'. {words} words. Spoken Text ONLY. No [Music] tags."
-        return call_gemini(prompt)
+        prompt = f"{base_instructions}\nWrite a YouTube documentary script about '{topic}'. {words} words."
+        script = call_gemini(prompt)
+    
+    # Clean any remaining bracketed content
+    script = re.sub(r'\[.*?\]', '', script)
+    script = re.sub(r'\(.*?music.*?\)', '', script, flags=re.IGNORECASE)
+    return script.strip()
 
 def call_gemini(prompt):
     for key in GEMINI_KEYS:
@@ -932,9 +991,9 @@ def clone_voice_robust(text, ref_audio, out_path):
     except: return False
 
 # ==========================================
-# 8. VISUALS & RENDER (NO DUPLICATES)
+# 8. VISUALS & RENDER (GPU ACCELERATED)
 # ==========================================
-USED_VIDEO_URLS = set()  # Global tracker for used videos
+USED_VIDEO_URLS = set()
 
 def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
     print("Visuals & Render...")
@@ -947,166 +1006,161 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         
         found_link = None
         attempt = 0
-        max_attempts = 3
+        max_attempts = 5
         
-        # Try multiple searches if needed to find unique video
+        # Alternate between services
+        services = ['pexels', 'pixabay'] if (i % 2 == 0) else ['pixabay', 'pexels']
+        
         while attempt < max_attempts and not found_link:
             attempt += 1
+            service = services[attempt % 2]
             
-            if PEXELS_KEYS:
+            # === PEXELS API ===
+            if service == 'pexels' and PEXELS_KEYS:
                 try:
                     h = {"Authorization": random.choice(PEXELS_KEYS)}
-                    # Fetch more results for variety
-                    page = random.randint(1, 3)
+                    page = random.randint(1, 5)
                     r = requests.get(
-                        f"https://api.pexels.com/videos/search?query={query}&size=medium&orientation=landscape&per_page=20&page={page}", 
+                        f"https://api.pexels.com/videos/search?query={query}&size=large&orientation=landscape&per_page=25&page={page}", 
                         headers=h, 
-                        timeout=5
+                        timeout=8
                     )
                     videos = r.json().get('videos', [])
                     random.shuffle(videos)
                     
                     for v in videos:
-                        link = v['video_files'][0]['link']
-                        # Check if we've used this exact URL before
-                        if link not in USED_VIDEO_URLS:
-                            found_link = link
-                            USED_VIDEO_URLS.add(link)
-                            print(f"  ✓ Clip {i}: {query[:30]}... (unique)")
-                            break
+                        video_files = sorted(v.get('video_files', []), key=lambda x: x.get('width', 0), reverse=True)
+                        if video_files:
+                            link = video_files[0]['link']
+                            if link not in USED_VIDEO_URLS:
+                                found_link = link
+                                USED_VIDEO_URLS.add(link)
+                                print(f"  ✓ Clip {i}: {query[:35]}... (Pexels HD)")
+                                break
                     
-                    # If no unique video found, try a different search query
                     if not found_link and attempt < max_attempts:
-                        query = get_visual_query(sent['text'] + " background")  # Modify query
+                        query = get_visual_query(sent['text'] + " cinematic")
                         
                 except Exception as e:
-                    print(f"  ✗ Clip {i} API error: {e}")
+                    print(f"  ✗ Pexels error clip {i}: {str(e)[:50]}")
             
-            if not found_link and PIXABAY_KEYS:
+            # === PIXABAY API ===
+            if service == 'pixabay' and not found_link and PIXABAY_KEYS:
                 try:
-                    # Try Pixabay as backup
                     key = random.choice(PIXABAY_KEYS)
+                    page = random.randint(1, 5)
                     r = requests.get(
-                        f"https://pixabay.com/api/videos/?key={key}&q={query}&per_page=20", 
-                        timeout=5
+                        f"https://pixabay.com/api/videos/?key={key}&q={query}&per_page=30&page={page}", 
+                        timeout=8
                     )
                     videos = r.json().get('hits', [])
                     random.shuffle(videos)
                     
                     for v in videos:
-                        link = v['videos']['medium']['url']
-                        if link not in USED_VIDEO_URLS:
+                        video_data = v.get('videos', {})
+                        link = video_data.get('large', {}).get('url') or \
+                               video_data.get('medium', {}).get('url') or \
+                               video_data.get('small', {}).get('url')
+                        
+                        if link and link not in USED_VIDEO_URLS:
                             found_link = link
                             USED_VIDEO_URLS.add(link)
-                            print(f"  ✓ Clip {i}: {query[:30]}... (Pixabay, unique)")
+                            print(f"  ✓ Clip {i}: {query[:35]}... (Pixabay HD)")
                             break
-                except: pass
+                    
+                    if not found_link and attempt < max_attempts:
+                        query = get_visual_query(sent['text'] + " stock footage")
+                        
+                except Exception as e:
+                    print(f"  ✗ Pixabay error clip {i}: {str(e)[:50]}")
         
-        # Download and process video
+        # Download and process with GPU
         if found_link:
             try:
                 raw = TEMP_DIR / f"r_{i}.mp4"
                 with open(raw, "wb") as f: 
-                    f.write(requests.get(found_link, timeout=30).content)
+                    f.write(requests.get(found_link, timeout=40).content)
                 
+                # GPU-accelerated processing
                 cmd = [
-                    "ffmpeg", "-y", "-i", str(raw), "-t", str(dur),
+                    "ffmpeg", "-y", "-hwaccel", "cuda", "-i", str(raw), 
+                    "-t", str(dur),
                     "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-an", str(out)
+                    "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M",
+                    "-an", str(out)
                 ]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
                 return str(out)
             except Exception as e:
-                print(f"  ✗ Download failed for clip {i}: {e}")
+                print(f"  ✗ Download/process failed clip {i}: {str(e)[:60]}")
         
-        # Fallback: Create colored background instead of black
-        print(f"  → Clip {i}: Using fallback background")
-        colors = ["0x1a1a2e", "0x16213e", "0x0f3460", "0x1e3a5f", "0x2a2d34"]
-        color = random.choice(colors)
+        # Fallback gradient
+        print(f"  → Clip {i}: Fallback gradient")
+        colors = ["0x1a1a2e:0x16213e", "0x0f3460:0x533483", "0x2a2d34:0x1e3a5f"]
+        gradient = random.choice(colors)
         cmd = [
             "ffmpeg", "-y", "-f", "lavfi", 
-            "-i", f"color=c={color}:s=1920x1080:d={dur}",
-            "-vf", f"geq=random(1)*255:128:128,fps=30",  # Add subtle noise
-            "-t", str(dur), str(out)
+            "-i", f"color=c={gradient.split(':')[0]}:s=1920x1080:d={dur}",
+            "-vf", f"fade=in:0:30,fade=out:st={dur-1}:d=1",
+            "-c:v", "h264_nvenc", "-preset", "p1", "-t", str(dur), str(out)
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return str(out)
 
-    # Parallel Download with limited workers to avoid rate limits
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+    # Parallel processing
+    print(f"Downloading {len(sentences)} video clips...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
         clips = list(ex.map(get_clip, [(i, s) for i, s in enumerate(sentences)]))
 
-    # Concatenate clips
+    # Fast concatenation
+    print("Concatenating video clips...")
     with open("list.txt", "w") as f:
-        for c in clips: f.write(f"file '{c}'\n")
+        for c in clips: 
+            if os.path.exists(c):
+                f.write(f"file '{c}'\n")
     
-    subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual.mp4", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        "ffmpeg -y -f concat -safe 0 -i list.txt -c:v h264_nvenc -preset p1 -b:v 10M visual.mp4", 
+        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
-    # Create ASS subtitle file with random style
-    create_ass_file(sentences, ass_file)
-
-        # Final Render with Subtitles & Logo
-    print("Rendering final video with subtitles...")
-    
-    # Escape ASS file path for FFmpeg
+    # Final render with GPU
+    print("Rendering final video with subtitles and audio...")
     ass_path = str(ass_file).replace('\\', '\\\\').replace(':', '\\:')
     
-    if os.path.exists(logo_path):
-        # With logo: scale video, add logo, then subtitles
-        filter_complex = f"""
-        [0:v]scale=1920:1080:force_original_aspect_ratio=decrease,
-              pad=1920:1080:(ow-iw)/2:(oh-ih)/2,
-              setsar=1[bg];
-        [1:v]scale=230:-1[logo];
-        [bg][logo]overlay=30:30[withlogo];
-        [withlogo]ass='{ass_path}'[v]
-        """
+    if logo_path and os.path.exists(logo_path):
+        filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[withlogo];[withlogo]ass='{ass_path}'[v]"
         cmd = [
-            "ffmpeg", "-y",
-            "-i", "visual.mp4",
-            "-i", str(logo_path),
-            "-i", str(audio_path),
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
             "-filter_complex", filter_complex,
-            "-map", "[v]",
-            "-map", "2:a",
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-shortest",
-            str(final_out)
+            "-map", "[v]", "-map", "2:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            "-shortest", str(final_out)
         ]
     else:
-        # Without logo: just scale video and add subtitles
-        filter_complex = f"""
-        [0:v]scale=1920:1080:force_original_aspect_ratio=decrease,
-              pad=1920:1080:(ow-iw)/2:(oh-ih)/2,
-              setsar=1[bg];
-        [bg]ass='{ass_path}'[v]
-        """
+        filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[bg]ass='{ass_path}'[v]"
         cmd = [
-            "ffmpeg", "-y",
-            "-i", "visual.mp4",
-            "-i", str(audio_path),
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
             "-filter_complex", filter_complex,
-            "-map", "[v]",
-            "-map", "1:a",
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-shortest",
-            str(final_out)
+            "-map", "[v]", "-map", "1:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            "-shortest", str(final_out)
         ]
     
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"✅ Final video rendered: {final_out}")
-        return True
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ Final video rendered: {final_out}")
+            return True
+        else:
+            print(f"❌ Rendering failed: {result.stderr[:200]}")
+            return False
     except Exception as e:
-        print(f"❌ Rendering failed: {e}")
+        print(f"❌ Rendering exception: {e}")
         return False
 
 # ==========================================
@@ -1156,7 +1210,7 @@ audio_out = TEMP_DIR / "out.wav"
 if clone_voice_robust(text, ref_voice, audio_out):
     update_status(50, "Creating Subtitles...")
     
-    # Create subtitles using AssemblyAI or fallback
+    # Create subtitles
     if ASSEMBLY_KEY:
         try:
             aai.settings.api_key = ASSEMBLY_KEY
@@ -1182,7 +1236,6 @@ if clone_voice_robust(text, ref_voice, audio_out):
                 
         except Exception as e:
             print(f"⚠️ AssemblyAI failed: {e}. Using fallback timing...")
-            # Fallback: Create approximate timing
             words = text.split()
             total_duration = DURATION_MINS * 60
             words_per_second = len(words) / total_duration
@@ -1204,7 +1257,6 @@ if clone_voice_robust(text, ref_voice, audio_out):
                 current_time += sentence_duration
     else:
         print("⚠️ No AssemblyAI key. Using fallback timing...")
-        # Fallback timing
         words = text.split()
         total_duration = DURATION_MINS * 60
         words_per_second = len(words) / total_duration
