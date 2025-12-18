@@ -10,13 +10,7 @@ import concurrent.futures
 import requests
 import gc
 from pathlib import Path
-# 🛑 RUN THIS FIRST or the main script will fail!
-import subprocess
 
-print("--- 🔧 Installing GPU-Accelerated FFmpeg ---")
-# Install FFmpeg via Conda (contains NVIDIA headers)
-subprocess.run("conda install -y ffmpeg -c conda-forge", shell=True)
-print("✅ GPU Drivers Installed.")
 # ==========================================
 # 1. INSTALLATION
 # ==========================================
@@ -63,113 +57,153 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ==========================================
-# 3. PROFESSIONAL SUBTITLE STYLES
+# 3. PROFESSIONAL SUBTITLE STYLES (YOUTUBE-QUALITY)
 # ==========================================
 SUBTITLE_STYLES = {
-    "modern_bold": {
-        "name": "Modern Bold",
+    "youtube_white_box": {
+        "name": "YouTube White Box",
         "fontname": "Arial",
-        "fontsize": 48,
-        "primary_colour": "&H00FFFFFF",
+        "fontsize": 42,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&HCC000000",     # Black box background
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 4,  # Box with soft edges
+        "outline": 0,
+        "shadow": 0,
+        "margin_v": 80,  # Distance from bottom
+        "alignment": 2,   # Bottom center
+        "spacing": 0
+    },
+    "modern_yellow": {
+        "name": "Modern Yellow",
+        "fontname": "Arial",
+        "fontsize": 44,
+        "primary_colour": "&H0000FFFF",  # Yellow text
+        "back_colour": "&HC0000000",     # Black background
+        "outline_colour": "&H00000000",  # Black outline
+        "bold": -1,
+        "italic": 0,
+        "border_style": 4,
+        "outline": 2,
+        "shadow": 0,
+        "margin_v": 85,
+        "alignment": 2,
+        "spacing": 0
+    },
+    "clean_white_outline": {
+        "name": "Clean White Outline",
+        "fontname": "Arial",
+        "fontsize": 46,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00000000",  # Black outline
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,  # Outline only
+        "outline": 3,
+        "shadow": 2,
+        "margin_v": 90,
+        "alignment": 2,
+        "spacing": 0
+    },
+    "netflix_style": {
+        "name": "Netflix Style",
+        "fontname": "Arial",
+        "fontsize": 40,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&HE6000000",     # Very dark box
+        "outline_colour": "&H00000000",
+        "bold": 0,
+        "italic": 0,
+        "border_style": 4,
+        "outline": 0,
+        "shadow": 0,
+        "margin_v": 75,
+        "alignment": 2,
+        "spacing": 0
+    },
+    "bold_cyan": {
+        "name": "Bold Cyan",
+        "fontname": "Arial",
+        "fontsize": 45,
+        "primary_colour": "&H00FFFF00",  # Cyan text
         "back_colour": "&HB0000000",
         "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
-        "border_style": 3,
-        "outline": 0,
-        "shadow": 2,
-        "margin_v": 60,
-        "alignment": 2
-    },
-    "neon_glow": {
-        "name": "Neon Glow",
-        "fontname": "Arial",
-        "fontsize": 52,
-        "primary_colour": "&H0000FFFF",
-        "back_colour": "&H70000000",
-        "outline_colour": "&H00FFFF00",
-        "bold": -1,
-        "italic": 0,
-        "border_style": 1,
-        "outline": 4,
-        "shadow": 3,
-        "margin_v": 70,
-        "alignment": 2
-    },
-    "minimal_elegant": {
-        "name": "Minimal Elegant",
-        "fontname": "Arial",
-        "fontsize": 44,
-        "primary_colour": "&H00FFFFFF",
-        "back_colour": "&H90000000",
-        "outline_colour": "&H00000000",
-        "bold": 0,
-        "italic": 0,
-        "border_style": 3,
-        "outline": 0,
+        "border_style": 4,
+        "outline": 2,
         "shadow": 1,
-        "margin_v": 55,
-        "alignment": 2
-    },
-    "youtube_pro": {
-        "name": "YouTube Pro",
-        "fontname": "Arial",
-        "fontsize": 46,
-        "primary_colour": "&H00FFFFFF",
-        "back_colour": "&HA0000000",
-        "outline_colour": "&H00000000",
-        "bold": -1,
-        "italic": 0,
-        "border_style": 3,
-        "outline": 1,
-        "shadow": 2,
-        "margin_v": 65,
-        "alignment": 2
-    },
-    "cinematic": {
-        "name": "Cinematic",
-        "fontname": "Arial",
-        "fontsize": 50,
-        "primary_colour": "&H00F0F0F0",
-        "back_colour": "&HC0000000",
-        "outline_colour": "&H00303030",
-        "bold": -1,
-        "italic": 0,
-        "border_style": 3,
-        "outline": 3,
-        "shadow": 4,
-        "margin_v": 75,
-        "alignment": 2
+        "margin_v": 82,
+        "alignment": 2,
+        "spacing": 0
     }
 }
 
 def create_ass_file(sentences, ass_file):
-    """Create ASS subtitle file with random professional style"""
+    """Create ASS subtitle file with professional YouTube-style formatting"""
     style_key = random.choice(list(SUBTITLE_STYLES.keys()))
     style = SUBTITLE_STYLES[style_key]
     
-    print(f"Using Subtitle Style: {style['name']}")
+    print(f"✨ Using Subtitle Style: {style['name']}")
     
     with open(ass_file, "w", encoding="utf-8") as f:
+        # Header
         f.write("[Script Info]\n")
         f.write("ScriptType: v4.00+\n")
         f.write("PlayResX: 1920\n")
         f.write("PlayResY: 1080\n")
-        f.write("WrapStyle: 2\n\n")
+        f.write("WrapStyle: 2\n")  # Smart wrapping
+        f.write("ScaledBorderAndShadow: yes\n\n")
         
+        # Style definition
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
         
-        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,0,0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},20,20,{style['margin_v']},1\n\n")
+        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},100,100,{style['margin_v']},1\n\n")
         
+        # Events
         f.write("[Events]\n")
         f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
         
         for s in sentences:
             start_time = format_ass_time(s['start'])
             end_time = format_ass_time(s['end'])
-            text = s['text'].replace('\n', ' ').replace('\\', '\\\\')
-            f.write(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{text}\n")
+            
+            # Clean and format text with proper line breaks
+            text = s['text'].strip()
+            text = text.replace('\\', '\\\\').replace('\n', ' ')
+            
+            # Smart line breaking for readability (max ~50 chars per line)
+            words = text.split()
+            lines = []
+            current_line = []
+            current_length = 0
+            
+            for word in words:
+                word_length = len(word) + 1  # +1 for space
+                if current_length + word_length > 50 and current_line:
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                    current_length = word_length
+                else:
+                    current_line.append(word)
+                    current_length += word_length
+            
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            # Join with line breaks (max 2 lines for readability)
+            if len(lines) > 2:
+                # Combine to fit in 2 lines
+                mid = len(lines) // 2
+                formatted_text = ' '.join(lines[:mid]) + '\\N' + ' '.join(lines[mid:])
+            else:
+                formatted_text = '\\N'.join(lines)
+            
+            f.write(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{formatted_text}\n")
 
 def format_ass_time(seconds):
     """Format seconds to ASS timestamp (H:MM:SS.CS)"""
@@ -963,32 +997,72 @@ def call_gemini(prompt):
     return "Script generation failed."
 
 def clone_voice_robust(text, ref_audio, out_path):
-    print("Synthesizing Audio...")
+    """Synthesize audio with padding to prevent cutoff"""
+    print("🎤 Synthesizing Audio...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
         from chatterbox.tts import ChatterboxTTS
         model = ChatterboxTTS.from_pretrained(device=device)
+        
+        # Clean text and split into sentences
         clean = re.sub(r'\[.*?\]', '', text)
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean) if len(s.strip()) > 2]
         
+        print(f"📝 Processing {len(sentences)} sentences...")
+        
         all_wavs = []
         for i, chunk in enumerate(sentences):
-            if i%10==0: update_status(20 + int((i/len(sentences))*30), f"Voice Gen {i}/{len(sentences)}")
+            if i % 10 == 0: 
+                update_status(20 + int((i/len(sentences))*30), f"Voice Gen {i}/{len(sentences)}")
+            
             try:
                 with torch.no_grad():
+                    # Clean quotes and special characters
+                    chunk_clean = chunk.replace('"', '').replace('"', '').replace('"', '')
+                    
+                    # Add pause at end of sentence for natural flow
+                    if chunk_clean.endswith('.'):
+                        chunk_clean = chunk_clean + ' '
+                    
                     wav = model.generate(
-                        text=chunk.replace('"',''), 
+                        text=chunk_clean, 
                         audio_prompt_path=str(ref_audio),
                         exaggeration=0.5
                     )
                     all_wavs.append(wav.cpu())
-                if i%20==0 and device=="cuda": torch.cuda.empty_cache(); gc.collect()
-            except: pass
-            
-        if not all_wavs: return False
-        torchaudio.save(out_path, torch.cat(all_wavs, dim=1), 24000)
+                    
+                # Memory management
+                if i % 20 == 0 and device == "cuda": 
+                    torch.cuda.empty_cache()
+                    gc.collect()
+            except Exception as e:
+                print(f"⚠️ Skipping sentence {i}: {str(e)[:50]}")
+                continue
+        
+        if not all_wavs:
+            print("❌ No audio generated")
+            return False
+        
+        # Concatenate all audio
+        full_audio = torch.cat(all_wavs, dim=1)
+        
+        # Add 2 seconds of silence at the end to prevent cutoff
+        silence_samples = int(2.0 * 24000)  # 2 seconds at 24kHz
+        silence = torch.zeros((full_audio.shape[0], silence_samples))
+        full_audio_padded = torch.cat([full_audio, silence], dim=1)
+        
+        # Save with padding
+        torchaudio.save(out_path, full_audio_padded, 24000)
+        
+        # Verify audio length
+        audio_duration = full_audio_padded.shape[1] / 24000
+        print(f"✅ Audio generated: {audio_duration:.1f} seconds")
+        
         return True
-    except: return False
+        
+    except Exception as e:
+        print(f"❌ Audio synthesis failed: {e}")
+        return False
 
 # ==========================================
 # 8. VISUALS & RENDER (GPU ACCELERATED)
@@ -1125,8 +1199,19 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
     )
 
     # Final render with GPU
-    print("Rendering final video with subtitles and audio...")
+    print("🎬 Rendering final video with subtitles and audio...")
     ass_path = str(ass_file).replace('\\', '\\\\').replace(':', '\\:')
+    
+    # Get audio duration to ensure video isn't cut short
+    import wave
+    try:
+        with wave.open(str(audio_path), 'rb') as wav_file:
+            frames = wav_file.getnframes()
+            rate = wav_file.getframerate()
+            audio_duration = frames / float(rate)
+        print(f"🎵 Audio duration: {audio_duration:.1f} seconds")
+    except:
+        audio_duration = None
     
     if logo_path and os.path.exists(logo_path):
         filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[withlogo];[withlogo]ass='{ass_path}'[v]"
@@ -1136,8 +1221,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "2:a",
             "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k",
-            "-shortest", str(final_out)
+            "-c:a", "aac", "-b:a", "256k"
         ]
     else:
         filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[bg]ass='{ass_path}'[v]"
@@ -1147,9 +1231,14 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "1:a",
             "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k",
-            "-shortest", str(final_out)
+            "-c:a", "aac", "-b:a", "256k"
         ]
+    
+    # Add audio duration parameter if available (don't use -shortest)
+    if audio_duration:
+        cmd.extend(["-t", str(audio_duration)])
+    
+    cmd.append(str(final_out))
     
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -1216,7 +1305,7 @@ if clone_voice_robust(text, ref_voice, audio_out):
             aai.settings.api_key = ASSEMBLY_KEY
             transcriber = aai.Transcriber()
             
-            print("Transcribing audio for subtitles...")
+            print("📝 Transcribing audio for subtitles...")
             transcript = transcriber.transcribe(str(audio_out))
             
             if transcript.status == aai.TranscriptStatus.completed:
@@ -1228,6 +1317,10 @@ if clone_voice_robust(text, ref_voice, audio_out):
                         "end": sentence.end / 1000
                     })
                 
+                # Extend last subtitle by 1 second to prevent cutoff
+                if sentences:
+                    sentences[-1]['end'] += 1.0
+                
                 print(f"✅ Transcription complete: {len(sentences)} sentences")
                 
             else:
@@ -1236,13 +1329,24 @@ if clone_voice_robust(text, ref_voice, audio_out):
                 
         except Exception as e:
             print(f"⚠️ AssemblyAI failed: {e}. Using fallback timing...")
+            # Fallback timing
             words = text.split()
-            total_duration = DURATION_MINS * 60
+            
+            # Get actual audio duration
+            import wave
+            try:
+                with wave.open(str(audio_out), 'rb') as wav_file:
+                    frames = wav_file.getnframes()
+                    rate = wav_file.getframerate()
+                    total_duration = frames / float(rate)
+            except:
+                total_duration = DURATION_MINS * 60
+            
             words_per_second = len(words) / total_duration
             
             sentences = []
             current_time = 0
-            words_per_sentence = 15
+            words_per_sentence = 12  # Shorter chunks for better readability
             
             for i in range(0, len(words), words_per_sentence):
                 chunk = words[i:i + words_per_sentence]
@@ -1255,15 +1359,29 @@ if clone_voice_robust(text, ref_voice, audio_out):
                     "end": current_time + sentence_duration
                 })
                 current_time += sentence_duration
+            
+            # Extend last subtitle by 1.5 seconds
+            if sentences:
+                sentences[-1]['end'] += 1.5
     else:
         print("⚠️ No AssemblyAI key. Using fallback timing...")
         words = text.split()
-        total_duration = DURATION_MINS * 60
+        
+        # Get actual audio duration
+        import wave
+        try:
+            with wave.open(str(audio_out), 'rb') as wav_file:
+                frames = wav_file.getnframes()
+                rate = wav_file.getframerate()
+                total_duration = frames / float(rate)
+        except:
+            total_duration = DURATION_MINS * 60
+        
         words_per_second = len(words) / total_duration
         
         sentences = []
         current_time = 0
-        words_per_sentence = 15
+        words_per_sentence = 12
         
         for i in range(0, len(words), words_per_sentence):
             chunk = words[i:i + words_per_sentence]
@@ -1276,6 +1394,10 @@ if clone_voice_robust(text, ref_voice, audio_out):
                 "end": current_time + sentence_duration
             })
             current_time += sentence_duration
+        
+        # Extend last subtitle
+        if sentences:
+            sentences[-1]['end'] += 1.5
     
     # Create ASS subtitle file
     ass_file = TEMP_DIR / "subtitles.ass"
