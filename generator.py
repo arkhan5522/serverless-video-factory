@@ -101,7 +101,7 @@ SUBTITLE_STYLES = {
     "mrbeast_yellow": {
         "name": "MrBeast Yellow (Punchy)",
         "fontname": "Arial Black",
-        "fontsize": 75,
+        "fontsize": 60,
         "primary_colour": "&H0000FFFF",  # Yellow (BGR)
         "back_colour": "&H00000000",
         "outline_colour": "&H00000000",  # Black Outline
@@ -117,7 +117,7 @@ SUBTITLE_STYLES = {
     "hormozi_green": {
         "name": "Hormozi Green (Crisp)",
         "fontname": "Arial Black",
-        "fontsize": 75,
+        "fontsize": 60,
         "primary_colour": "&H0000FF00",  # Green
         "back_colour": "&H80000000",
         "outline_colour": "&H00000000",
@@ -259,6 +259,9 @@ def format_ass_time(seconds):
 # ==========================================
 # 4. GOOGLE DRIVE UPLOAD
 # ==========================================
+# ==========================================
+# 4. GOOGLE DRIVE UPLOAD (ROBUST + SANITIZED)
+# ==========================================
 def upload_to_google_drive(file_path):
     """Upload file to Google Drive and return shareable link"""
     if not os.path.exists(file_path):
@@ -280,16 +283,33 @@ def upload_to_google_drive(file_path):
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
+        import json
         
-        # Get credentials from environment variable
         credentials_json = os.environ.get("GOOGLE_DRIVE_CREDENTIALS")
         if not credentials_json:
             print("❌ GOOGLE_DRIVE_CREDENTIALS environment variable not set")
             return None
         
-        # Parse credentials
-        import json
-        creds_dict = json.loads(credentials_json)
+        # --- ROBUST JSON PARSING ---
+        try:
+            # 1. Try standard load
+            creds_dict = json.loads(credentials_json)
+        except json.JSONDecodeError:
+            print("⚠️ Standard JSON parse failed. Attempting to sanitize input...")
+            try:
+                # 2. Fix: specific replacement for control characters often pasted from terminals
+                # Replace actual newlines with escaped \n
+                sanitized_json = credentials_json.replace('\n', '\\n').replace('\r', '')
+                # If the user pasted it as a python string literal by mistake, clean that up
+                if sanitized_json.startswith("'") and sanitized_json.endswith("'"):
+                    sanitized_json = sanitized_json[1:-1]
+                
+                # Attempt strict=False to allow control characters inside strings
+                creds_dict = json.loads(sanitized_json, strict=False)
+            except Exception as e:
+                print(f"❌ Critical JSON Error: Could not sanitize credentials. {e}")
+                return None
+        # ---------------------------
         
         # Create credentials
         SCOPES = ['https://www.googleapis.com/auth/drive.file']
@@ -350,10 +370,9 @@ def upload_to_google_drive(file_path):
         
     except Exception as e:
         print(f"❌ Google Drive upload failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        # import traceback
+        # traceback.print_exc()
         return None
-
 # ==========================================
 # 5. EXPANDED VISUAL DICTIONARY (700+ TOPICS)
 # ==========================================
