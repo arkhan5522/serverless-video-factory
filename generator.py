@@ -94,97 +94,107 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ==========================================
-# 3. PROFESSIONAL SUBTITLE STYLES (YOUTUBE-QUALITY)
+# 3. PROFESSIONAL SUBTITLE STYLES (LARGE & BOLD)
 # ==========================================
 SUBTITLE_STYLES = {
-    "youtube_white_box": {
-        "name": "YouTube White Box",
+    "youtube_bold_white": {
+        "name": "YouTube Bold White",
         "fontname": "Arial",
-        "fontsize": 42,
+        "fontsize": 56,
         "primary_colour": "&H00FFFFFF",  # White text
-        "back_colour": "&HCC000000",     # Black box background
+        "back_colour": "&HD0000000",     # Very opaque black box
         "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
         "border_style": 4,  # Box with soft edges
         "outline": 0,
         "shadow": 0,
-        "margin_v": 80,  # Distance from bottom
+        "margin_v": 100,  # Distance from bottom
         "alignment": 2,   # Bottom center
-        "spacing": 0
+        "spacing": 2,
+        "margin_l": 150,  # Left padding
+        "margin_r": 150   # Right padding
     },
-    "modern_yellow": {
-        "name": "Modern Yellow",
+    "bold_yellow_box": {
+        "name": "Bold Yellow Box",
         "fontname": "Arial",
-        "fontsize": 44,
-        "primary_colour": "&H0000FFFF",  # Yellow text
-        "back_colour": "&HC0000000",     # Black background
-        "outline_colour": "&H00000000",  # Black outline
+        "fontsize": 58,
+        "primary_colour": "&H0000FFFF",  # Bright yellow
+        "back_colour": "&HC8000000",     # Dark box
+        "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
         "border_style": 4,
-        "outline": 2,
-        "shadow": 0,
-        "margin_v": 85,
+        "outline": 0,
+        "shadow": 2,
+        "margin_v": 105,
         "alignment": 2,
-        "spacing": 0
+        "spacing": 2,
+        "margin_l": 150,
+        "margin_r": 150
     },
-    "clean_white_outline": {
-        "name": "Clean White Outline",
+    "white_thick_outline": {
+        "name": "White Thick Outline",
         "fontname": "Arial",
-        "fontsize": 46,
+        "fontsize": 60,
         "primary_colour": "&H00FFFFFF",  # White text
         "back_colour": "&H00000000",
-        "outline_colour": "&H00000000",  # Black outline
+        "outline_colour": "&H00000000",  # Thick black outline
         "bold": -1,
         "italic": 0,
         "border_style": 1,  # Outline only
-        "outline": 3,
-        "shadow": 2,
-        "margin_v": 90,
+        "outline": 5,  # Very thick outline
+        "shadow": 3,
+        "margin_v": 110,
         "alignment": 2,
-        "spacing": 0
+        "spacing": 2,
+        "margin_l": 150,
+        "margin_r": 150
     },
-    "netflix_style": {
-        "name": "Netflix Style",
+    "netflix_bold": {
+        "name": "Netflix Bold",
         "fontname": "Arial",
-        "fontsize": 40,
+        "fontsize": 54,
         "primary_colour": "&H00FFFFFF",  # White text
-        "back_colour": "&HE6000000",     # Very dark box
+        "back_colour": "&HE0000000",     # Very dark box
         "outline_colour": "&H00000000",
-        "bold": 0,
+        "bold": -1,
         "italic": 0,
         "border_style": 4,
         "outline": 0,
         "shadow": 0,
-        "margin_v": 75,
+        "margin_v": 95,
         "alignment": 2,
-        "spacing": 0
+        "spacing": 3,
+        "margin_l": 160,
+        "margin_r": 160
     },
-    "bold_cyan": {
-        "name": "Bold Cyan",
+    "cyan_bold_glow": {
+        "name": "Cyan Bold Glow",
         "fontname": "Arial",
-        "fontsize": 45,
-        "primary_colour": "&H00FFFF00",  # Cyan text
-        "back_colour": "&HB0000000",
+        "fontsize": 57,
+        "primary_colour": "&H00FFFF00",  # Bright cyan
+        "back_colour": "&HBE000000",
         "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
         "border_style": 4,
-        "outline": 2,
-        "shadow": 1,
-        "margin_v": 82,
+        "outline": 3,
+        "shadow": 2,
+        "margin_v": 102,
         "alignment": 2,
-        "spacing": 0
+        "spacing": 2,
+        "margin_l": 150,
+        "margin_r": 150
     }
 }
 
 def create_ass_file(sentences, ass_file):
-    """Create ASS subtitle file with professional YouTube-style formatting"""
+    """Create ASS subtitle file with large, bold, well-spaced formatting"""
     style_key = random.choice(list(SUBTITLE_STYLES.keys()))
     style = SUBTITLE_STYLES[style_key]
     
-    print(f"✨ Using Subtitle Style: {style['name']}")
+    print(f"✨ Using Subtitle Style: {style['name']} (Size: {style['fontsize']}px)")
     
     with open(ass_file, "w", encoding="utf-8") as f:
         # Header
@@ -195,11 +205,11 @@ def create_ass_file(sentences, ass_file):
         f.write("WrapStyle: 2\n")  # Smart wrapping
         f.write("ScaledBorderAndShadow: yes\n\n")
         
-        # Style definition
+        # Style definition with custom margins
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
         
-        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},100,100,{style['margin_v']},1\n\n")
+        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},{style['margin_l']},{style['margin_r']},{style['margin_v']},1\n\n")
         
         # Events
         f.write("[Events]\n")
@@ -209,11 +219,12 @@ def create_ass_file(sentences, ass_file):
             start_time = format_ass_time(s['start'])
             end_time = format_ass_time(s['end'])
             
-            # Clean and format text with proper line breaks
+            # Clean and format text
             text = s['text'].strip()
             text = text.replace('\\', '\\\\').replace('\n', ' ')
             
-            # Smart line breaking for readability (max ~50 chars per line)
+            # Smart line breaking for optimal readability
+            # Aim for 40-45 chars per line for larger fonts
             words = text.split()
             lines = []
             current_line = []
@@ -221,7 +232,8 @@ def create_ass_file(sentences, ass_file):
             
             for word in words:
                 word_length = len(word) + 1  # +1 for space
-                if current_length + word_length > 50 and current_line:
+                # Break at 42 chars for better visibility with large fonts
+                if current_length + word_length > 42 and current_line:
                     lines.append(' '.join(current_line))
                     current_line = [word]
                     current_length = word_length
@@ -232,11 +244,19 @@ def create_ass_file(sentences, ass_file):
             if current_line:
                 lines.append(' '.join(current_line))
             
-            # Join with line breaks (max 2 lines for readability)
+            # Join with line breaks (max 2 lines)
             if len(lines) > 2:
-                # Combine to fit in 2 lines
+                # Redistribute to fit in 2 lines
                 mid = len(lines) // 2
-                formatted_text = ' '.join(lines[:mid]) + '\\N' + ' '.join(lines[mid:])
+                line1_words = ' '.join(lines[:mid]).split()
+                line2_words = ' '.join(lines[mid:]).split()
+                
+                # Balance the lines
+                total_words = len(line1_words) + len(line2_words)
+                half = total_words // 2
+                
+                all_words = line1_words + line2_words
+                formatted_text = ' '.join(all_words[:half]) + '\\N' + ' '.join(all_words[half:])
             else:
                 formatted_text = '\\N'.join(lines)
             
