@@ -101,7 +101,7 @@ SUBTITLE_STYLES = {
     "mrbeast_yellow": {
         "name": "MrBeast Yellow (Punchy)",
         "fontname": "Arial Black",
-        "fontsize": 87,
+        "fontsize": 75,
         "primary_colour": "&H0000FFFF",  # Yellow (BGR)
         "back_colour": "&H00000000",
         "outline_colour": "&H00000000",  # Black Outline
@@ -149,7 +149,7 @@ SUBTITLE_STYLES = {
     "netflix_box": {
         "name": "Netflix Clean",
         "fontname": "Roboto",
-        "fontsize": 65,
+        "fontsize": 80,
         "primary_colour": "&H00FFFFFF",  # White
         "back_colour": "&H60000000",     # Semi-transparent box
         "outline_colour": "&H00000000",
