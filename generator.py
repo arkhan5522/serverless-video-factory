@@ -96,99 +96,89 @@ TEMP_DIR.mkdir(exist_ok=True)
 # ==========================================
 # 3. PROFESSIONAL SUBTITLE STYLES (MASSIVE & BOLD)
 # ==========================================
+# ==========================================
 SUBTITLE_STYLES = {
-    "youtube_massive_white": {
-        "name": "YouTube Massive White",
-        "fontname": "Arial",
-        "fontsize": 90,
-        "primary_colour": "&H00FFFFFF",  # White text
-        "back_colour": "&HE0000000",     # Very opaque black box
-        "outline_colour": "&H00000000",
-        "bold": -1,
-        "italic": 0,
-        "border_style": 4,  # Box with soft edges
-        "outline": 0,
-        "shadow": 0,
-        "margin_v": 140,  # Distance from bottom
-        "alignment": 2,   # Bottom center
-        "spacing": 3,
-        "margin_l": 100,  # Left padding
-        "margin_r": 100   # Right padding
-    },
-    "bold_yellow_huge": {
-        "name": "Bold Yellow Huge",
-        "fontname": "Arial",
-        "fontsize": 95,
-        "primary_colour": "&H0000FFFF",  # Bright yellow
-        "back_colour": "&HD8000000",     # Very dark box
-        "outline_colour": "&H00000000",
-        "bold": -1,
-        "italic": 0,
-        "border_style": 4,
-        "outline": 0,
-        "shadow": 3,
-        "margin_v": 150,
-        "alignment": 2,
-        "spacing": 4,
-        "margin_l": 100,
-        "margin_r": 100
-    },
-    "white_ultra_thick": {
-        "name": "White Ultra Thick Outline",
-        "fontname": "Arial",
-        "fontsize": 100,
-        "primary_colour": "&H00FFFFFF",  # White text
+    "mrbeast_yellow": {
+        "name": "MrBeast Yellow (Punchy)",
+        "fontname": "Arial Black",
+        "fontsize": 87,
+        "primary_colour": "&H0000FFFF",  # Yellow (BGR)
         "back_colour": "&H00000000",
-        "outline_colour": "&H00000000",  # Ultra thick black outline
+        "outline_colour": "&H00000000",  # Black Outline
         "bold": -1,
         "italic": 0,
-        "border_style": 1,  # Outline only
-        "outline": 8,  # Ultra thick outline
-        "shadow": 4,
-        "margin_v": 160,
+        "border_style": 1,     # Outline
+        "outline": 5,          # Thick
+        "shadow": 0,
+        "margin_v": 45,
         "alignment": 2,
-        "spacing": 4,
-        "margin_l": 80,
-        "margin_r": 80
+        "spacing": 1
     },
-    "netflix_huge_bold": {
-        "name": "Netflix Huge Bold",
-        "fontname": "Arial",
-        "fontsize": 88,
-        "primary_colour": "&H00FFFFFF",  # White text
-        "back_colour": "&HE8000000",     # Almost opaque box
+    "hormozi_green": {
+        "name": "Hormozi Green (Crisp)",
+        "fontname": "Arial Black",
+        "fontsize": 75,
+        "primary_colour": "&H0000FF00",  # Green
+        "back_colour": "&H80000000",
         "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
-        "border_style": 4,
+        "border_style": 1,
+        "outline": 4,
+        "shadow": 2,           # Sharp shadow
+        "margin_v": 55,
+        "alignment": 2,
+        "spacing": 0
+    },
+    "finance_blue": {
+        "name": "Finance Blue (Electric)",
+        "fontname": "Arial",
+        "fontsize": 80,
+        "primary_colour": "&H00FFFFFF",  # White Text
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00FF8C2D",  # Electric Blue (BGR)
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
+        "outline": 3,
+        "shadow": 2,
+        "margin_v": 50,
+        "alignment": 2,
+        "spacing": 1
+    },
+    "netflix_box": {
+        "name": "Netflix Clean",
+        "fontname": "Roboto",
+        "fontsize": 65,
+        "primary_colour": "&H00FFFFFF",  # White
+        "back_colour": "&H60000000",     # Semi-transparent box
+        "outline_colour": "&H00000000",
+        "bold": 0,
+        "italic": 0,
+        "border_style": 3,     # Opaque Box
         "outline": 0,
         "shadow": 0,
-        "margin_v": 135,
+        "margin_v": 40,
         "alignment": 2,
-        "spacing": 4,
-        "margin_l": 110,
-        "margin_r": 110
+        "spacing": 0
     },
-    "cyan_massive_glow": {
-        "name": "Cyan Massive Glow",
-        "fontname": "Arial",
-        "fontsize": 110,
-        "primary_colour": "&H00FFFF00",  # Bright cyan
-        "back_colour": "&HCC000000",
-        "outline_colour": "&H00000000",
-        "bold": -1,
+    "tiktok_white": {
+        "name": "TikTok White (Safe Zone)",
+        "fontname": "Arial",   # Proxima Nova usually isn't installed on Linux servers, Arial is safer
+        "fontsize": 75,
+        "primary_colour": "&H00FFFFFF",  # White
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00000000",  # Black Outline
+        "bold": -1,            # Bold
         "italic": 0,
-        "border_style": 4,
-        "outline": 5,
-        "shadow": 3,
-        "margin_v": 170,
+        "border_style": 1,     # Outline
+        "outline": 3,
+        "shadow": 4,           # Soft Shadow
+        "margin_v": 150,       # <-- High margin to avoid TikTok UI
         "alignment": 2,
-        "spacing": 5,
-        "margin_l": 90,
-        "margin_r": 90
+        "spacing": 0
     }
 }
-
 def create_ass_file(sentences, ass_file):
     """Create ASS subtitle file with MASSIVE, bold, highly engaging formatting"""
     style_key = random.choice(list(SUBTITLE_STYLES.keys()))
