@@ -45,6 +45,7 @@ jobs:
           PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
         run: |
           # 1. Setup Kaggle Auth
           mkdir -p ~/.kaggle
