@@ -174,7 +174,7 @@ SUBTITLE_STYLES = {
         "border_style": 1,     # Outline
         "outline": 3,
         "shadow": 4,           # Soft Shadow
-        "margin_v": 150,       # <-- High margin to avoid TikTok UI
+        "margin_v": 40,       # <-- High margin to avoid TikTok UI
         "alignment": 2,
         "spacing": 0
     }
