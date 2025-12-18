@@ -199,7 +199,8 @@ def create_ass_file(sentences, ass_file):
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
         
-        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},{style['margin_l']},{style['margin_r']},{style['margin_v']},1\n\n")
+        # FIX IS HERE: Hardcoded 30,30 for MarginL and MarginR to avoid KeyError
+        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},30,30,{style['margin_v']},1\n\n")
         
         # Events
         f.write("[Events]\n")
@@ -213,16 +214,18 @@ def create_ass_file(sentences, ass_file):
             text = s['text'].strip()
             text = text.replace('\\', '\\\\').replace('\n', ' ')
             
+            # Force Uppercase for Viral Styles
+            if "mrbeast" in style_key or "hormozi" in style_key:
+                text = text.upper()
+
             # Smart line breaking optimized for MASSIVE fonts
-            # Aim for 25-30 chars per line for huge fonts (85-110px)
             words = text.split()
             lines = []
             current_line = []
             current_length = 0
             
             for word in words:
-                word_length = len(word) + 1  # +1 for space
-                # Break at 28 chars for massive fonts - ensures readability
+                word_length = len(word) + 1 
                 if current_length + word_length > 28 and current_line:
                     lines.append(' '.join(current_line))
                     current_line = [word]
@@ -236,17 +239,10 @@ def create_ass_file(sentences, ass_file):
             
             # Join with line breaks (max 2 lines for massive text)
             if len(lines) > 2:
-                # Redistribute to fit in 2 lines
                 mid = len(lines) // 2
-                line1_words = ' '.join(lines[:mid]).split()
-                line2_words = ' '.join(lines[mid:]).split()
-                
-                # Balance the lines
-                total_words = len(line1_words) + len(line2_words)
-                half = total_words // 2
-                
-                all_words = line1_words + line2_words
-                formatted_text = ' '.join(all_words[:half]) + '\\N' + ' '.join(all_words[half:])
+                line1 = ' '.join(lines[:mid])
+                line2 = ' '.join(lines[mid:])
+                formatted_text = line1 + '\\N' + line2
             else:
                 formatted_text = '\\N'.join(lines)
             
