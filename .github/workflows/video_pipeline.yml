@@ -45,14 +45,16 @@ jobs:
           PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          # CRITICAL: This injects the secret into the runner env so we can write it to the file below
           GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+
         run: |
           # 1. Setup Kaggle Auth
           mkdir -p ~/.kaggle
           echo "{\"username\":\"$KAGGLE_USERNAME\",\"key\":\"$KAGGLE_KEY\"}" > ~/.kaggle/kaggle.json
           chmod 600 ~/.kaggle/kaggle.json
 
-          # 2. Build Python Script
+          # 2. Build Python Script (Parameter Replacement)
           cat <<EOF > builder.py
           import os
           with open('generator.py', 'r') as f: content = f.read()
@@ -72,19 +74,25 @@ jobs:
           EOF
           python builder.py
 
-          # 3. Create Secrets Header
-          echo "import os" > config_header.py
-          echo "os.environ['GH_PAT'] = '$GH_PAT'" >> config_header.py
-          echo "os.environ['GEMINI_API_KEY'] = '$GEMINI_KEY'" >> config_header.py
-          echo "os.environ['ASSEMBLYAI_API_KEY'] = '$ASSEMBLY_KEY'" >> config_header.py
-          echo "os.environ['PEXELS_KEYS'] = '$PEXELS_KEYS'" >> config_header.py
-          echo "os.environ['PIXABAY_KEYS'] = '$PIXABAY_KEYS'" >> config_header.py
-          echo "os.environ['GITHUB_REPOSITORY'] = '$GITHUB_REPOSITORY'" >> config_header.py
-          echo "os.environ['GITHUB_TOKEN'] = '$GITHUB_TOKEN'" >> config_header.py
+          # 3. Create Secrets Header (FIXED)
+          # We use cat <<EOF to write the python file directly.
+          # We use triple quotes (''') for Google Creds to handle the JSON structure safely.
+          cat <<EOF > config_header.py
+          import os
+          os.environ['GH_PAT'] = '$GH_PAT'
+          os.environ['GEMINI_API_KEY'] = '$GEMINI_KEY'
+          os.environ['ASSEMBLYAI_API_KEY'] = '$ASSEMBLY_KEY'
+          os.environ['PEXELS_KEYS'] = '$PEXELS_KEYS'
+          os.environ['PIXABAY_KEYS'] = '$PIXABAY_KEYS'
+          os.environ['GITHUB_REPOSITORY'] = '$GITHUB_REPOSITORY'
+          os.environ['GITHUB_TOKEN'] = '$GITHUB_TOKEN'
+          os.environ['GOOGLE_DRIVE_CREDENTIALS'] = '''$GOOGLE_DRIVE_CREDENTIALS'''
+          EOF
           
+          # Combine the header (secrets) with the main script
           cat config_header.py final_script.py > temp.py && mv temp.py final_script.py
 
-          # 4. Create NEW Metadata Name (Fresh Start)
+          # 4. Create Kaggle Metadata
           echo '{
             "id": "'"$KAGGLE_USERNAME"'/video-factory-titan",
             "title": "Video Factory Titan",
@@ -105,7 +113,6 @@ jobs:
       - name: Wait for Result (Long Polling)
         run: |
           echo "Polling Kaggle (Timeout: 6 Hours)..."
-          # Updated to check for the NEW kernel name
           for i in {1..360}; do
             OUTPUT=$(kaggle kernels status ${{ secrets.KAGGLE_USERNAME }}/video-factory-titan)
             echo "$OUTPUT"
@@ -125,10 +132,9 @@ jobs:
       - name: Download Output
         continue-on-error: true
         run: |
-          # Updated to download from the NEW kernel name
           kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-titan -p ./output
           mkdir public_video
-          mv ./output/final_video_*.mp4 ./public_video/ || echo "Video uploaded to File.io only."
+          mv ./output/final_video_*.mp4 ./public_video/ || echo "Video likely uploaded to Google Drive directly."
 
       - name: Backup to Repo
         uses: peaceiris/actions-gh-pages@v3
