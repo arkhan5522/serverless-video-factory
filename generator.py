@@ -1,3 +1,40 @@
+"""
+AI VIDEO GENERATOR WITH GOOGLE DRIVE UPLOAD
+============================================
+
+REQUIRED ENVIRONMENT VARIABLES:
+-------------------------------
+1. GEMINI_API_KEY - Comma-separated Gemini API keys for script generation
+2. ASSEMBLYAI_API_KEY - AssemblyAI key for subtitle transcription (optional, has fallback)
+3. PEXELS_KEYS - Comma-separated Pexels API keys for video clips
+4. PIXABAY_KEYS - Comma-separated Pixabay API keys for video clips
+5. GOOGLE_DRIVE_CREDENTIALS - JSON string of Google Service Account credentials
+6. GOOGLE_DRIVE_FOLDER_ID - (Optional) Folder ID to upload videos to specific folder
+
+GOOGLE DRIVE SETUP:
+-------------------
+1. Go to Google Cloud Console (console.cloud.google.com)
+2. Create a new project or select existing one
+3. Enable Google Drive API for the project
+4. Create a Service Account:
+   - Go to IAM & Admin > Service Accounts
+   - Click "Create Service Account"
+   - Give it a name (e.g., "video-uploader")
+   - Click "Create and Continue"
+5. Create and download JSON key:
+   - Click on the created service account
+   - Go to "Keys" tab
+   - Click "Add Key" > "Create new key" > "JSON"
+   - Download the JSON file
+6. Set environment variable:
+   - Copy the entire JSON file content
+   - Set as GOOGLE_DRIVE_CREDENTIALS environment variable
+   - Example: export GOOGLE_DRIVE_CREDENTIALS='{"type":"service_account","project_id":"..."...}'
+7. (Optional) Share a specific folder with the service account email for organized uploads
+
+The uploaded videos will be publicly accessible via shareable link.
+"""
+
 import os
 import subprocess
 import sys
@@ -214,67 +251,102 @@ def format_ass_time(seconds):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 # ==========================================
-# 4. ROBUST UPLOAD
+# 4. GOOGLE DRIVE UPLOAD
 # ==========================================
-def robust_upload(file_path):
-    """Upload with multiple service fallbacks"""
+def upload_to_google_drive(file_path):
+    """Upload file to Google Drive and return shareable link"""
     if not os.path.exists(file_path):
         print(f"❌ Error: File not found: {file_path}")
         return None
 
     filename = os.path.basename(file_path)
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"🚀 Uploading {filename} ({file_size_mb:.2f} MB)...")
+    print(f"☁️ Uploading {filename} ({file_size_mb:.2f} MB) to Google Drive...")
 
-    # Transfer.sh
-    print("👉 Attempting Transfer.sh...")
     try:
-        cmd = ["curl", "--upload-file", str(file_path), f"https://transfer.sh/{filename}", "--max-time", "120"]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        link = result.stdout.strip()
+        # Install Google Drive dependencies
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            "google-auth", "google-auth-oauthlib", "google-auth-httplib2", 
+            "google-api-python-client", "--quiet"
+        ])
         
-        if "transfer.sh" in link and link.startswith("http"):
-            print(f"✅ Success! Link: {link}")
-            return link
-        else:
-            print(f"⚠️ Transfer.sh returned invalid response: {link}")
-    except Exception as e:
-        print(f"❌ Transfer.sh failed: {str(e)}")
-
-    # Catbox.moe
-    print("👉 Attempting Catbox.moe...")
-    try:
-        with open(file_path, 'rb') as f:
-            response = requests.post(
-                "https://catbox.moe/user/api.php",
-                data={"reqtype": "fileupload"},
-                files={"fileToUpload": f},
-                timeout=120
-            )
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
         
-        if response.status_code == 200:
-            link = response.text.strip()
-            if link.startswith("http"):
-                print(f"✅ Success! Link: {link}")
-                return link
-    except Exception as e:
-        print(f"❌ Catbox error: {str(e)}")
-
-    # File.io
-    print("👉 Attempting File.io...")
-    try:
-        with open(file_path, 'rb') as f:
-            response = requests.post("https://file.io", files={"file": f}, timeout=60)
+        # Get credentials from environment variable
+        credentials_json = os.environ.get("GOOGLE_DRIVE_CREDENTIALS")
+        if not credentials_json:
+            print("❌ GOOGLE_DRIVE_CREDENTIALS environment variable not set")
+            return None
         
-        if response.status_code == 200:
-            link = response.json().get("link")
-            print(f"✅ Success! Link: {link}")
-            return link
+        # Parse credentials
+        import json
+        creds_dict = json.loads(credentials_json)
+        
+        # Create credentials
+        SCOPES = ['https://www.googleapis.com/auth/drive.file']
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=SCOPES
+        )
+        
+        # Build Drive service
+        service = build('drive', 'v3', credentials=credentials)
+        
+        # File metadata
+        file_metadata = {
+            'name': filename,
+            'mimeType': 'video/mp4'
+        }
+        
+        # Optional: Upload to specific folder
+        folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+        if folder_id:
+            file_metadata['parents'] = [folder_id]
+        
+        # Upload file
+        media = MediaFileUpload(
+            file_path, 
+            mimetype='video/mp4',
+            resumable=True,
+            chunksize=10 * 1024 * 1024  # 10MB chunks
+        )
+        
+        print("📤 Uploading to Google Drive...")
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink, webContentLink'
+        ).execute()
+        
+        file_id = file.get('id')
+        
+        # Make file publicly accessible (anyone with link can view)
+        permission = {
+            'type': 'anyone',
+            'role': 'reader'
+        }
+        service.permissions().create(
+            fileId=file_id,
+            body=permission
+        ).execute()
+        
+        # Get shareable link
+        view_link = file.get('webViewLink')
+        download_link = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        print(f"✅ Upload successful!")
+        print(f"📺 View Link: {view_link}")
+        print(f"⬇️ Download Link: {download_link}")
+        
+        return view_link
+        
     except Exception as e:
-        print(f"❌ File.io error: {str(e)}")
-
-    print("💀 All upload attempts failed.")
-    return None
+        print(f"❌ Google Drive upload failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # ==========================================
 # 5. EXPANDED VISUAL DICTIONARY (700+ TOPICS)
@@ -1412,12 +1484,12 @@ if clone_voice_robust(text, ref_voice, audio_out):
             file_size = os.path.getsize(final_output) / (1024 * 1024)
             print(f"✅ Video created: {final_output} ({file_size:.1f} MB)")
             
-            update_status(99, "Uploading Final Video...")
-            link = robust_upload(final_output)
+            update_status(99, "Uploading to Google Drive...")
+            drive_link = upload_to_google_drive(final_output)
             
-            if link:
-                update_status(100, "Success! Video Complete!", "completed", link)
-                print(f"🎉 Final video uploaded: {link}")
+            if drive_link:
+                update_status(100, "Success! Video Uploaded to Google Drive!", "completed", drive_link)
+                print(f"🎉 Google Drive Link: {drive_link}")
             else:
                 update_status(100, "Upload Failed - Video Ready Locally", "completed")
                 print(f"📁 Video saved locally: {final_output}")
