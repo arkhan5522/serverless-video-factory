@@ -1056,7 +1056,7 @@ def get_ai_visual_query(text, current_gemini_key_index=0):
         # Use Gemini API
         key = GEMINI_KEYS[current_gemini_key_index % len(GEMINI_KEYS)]
         genai.configure(api_key=key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content(prompt)
         query = response.text.strip().strip('"').strip("'")
         
