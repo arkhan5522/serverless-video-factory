@@ -96,89 +96,99 @@ TEMP_DIR.mkdir(exist_ok=True)
 # ==========================================
 # 3. PROFESSIONAL SUBTITLE STYLES (MASSIVE & BOLD)
 # ==========================================
-# ==========================================
 SUBTITLE_STYLES = {
-    "mrbeast_yellow": {
-        "name": "MrBeast Yellow (Punchy)",
-        "fontname": "Arial Black",
-        "fontsize": 60,
-        "primary_colour": "&H0000FFFF",  # Yellow (BGR)
-        "back_colour": "&H00000000",
-        "outline_colour": "&H00000000",  # Black Outline
-        "bold": -1,
-        "italic": 0,
-        "border_style": 1,     # Outline
-        "outline": 5,          # Thick
-        "shadow": 0,
-        "margin_v": 45,
-        "alignment": 2,
-        "spacing": 1
-    },
-    "hormozi_green": {
-        "name": "Hormozi Green (Crisp)",
-        "fontname": "Arial Black",
-        "fontsize": 60,
-        "primary_colour": "&H0000FF00",  # Green
-        "back_colour": "&H80000000",
-        "outline_colour": "&H00000000",
-        "bold": -1,
-        "italic": 0,
-        "border_style": 1,
-        "outline": 4,
-        "shadow": 2,           # Sharp shadow
-        "margin_v": 55,
-        "alignment": 2,
-        "spacing": 0
-    },
-    "finance_blue": {
-        "name": "Finance Blue (Electric)",
+    "youtube_massive_white": {
+        "name": "YouTube Massive White",
         "fontname": "Arial",
-        "fontsize": 80,
-        "primary_colour": "&H00FFFFFF",  # White Text
-        "back_colour": "&H00000000",
-        "outline_colour": "&H00FF8C2D",  # Electric Blue (BGR)
+        "fontsize": 90,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&HE0000000",     # Very opaque black box
+        "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
-        "border_style": 1,
-        "outline": 3,
-        "shadow": 2,
-        "margin_v": 50,
-        "alignment": 2,
-        "spacing": 1
-    },
-    "netflix_box": {
-        "name": "Netflix Clean",
-        "fontname": "Roboto",
-        "fontsize": 80,
-        "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&H60000000",     # Semi-transparent box
-        "outline_colour": "&H00000000",
-        "bold": 0,
-        "italic": 0,
-        "border_style": 3,     # Opaque Box
+        "border_style": 4,  # Box with soft edges
         "outline": 0,
         "shadow": 0,
-        "margin_v": 40,
-        "alignment": 2,
-        "spacing": 0
+        "margin_v": 140,  # Distance from bottom
+        "alignment": 2,   # Bottom center
+        "spacing": 3,
+        "margin_l": 100,  # Left padding
+        "margin_r": 100   # Right padding
     },
-    "tiktok_white": {
-        "name": "TikTok White (Safe Zone)",
-        "fontname": "Arial",   # Proxima Nova usually isn't installed on Linux servers, Arial is safer
-        "fontsize": 75,
-        "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&H00000000",
-        "outline_colour": "&H00000000",  # Black Outline
-        "bold": -1,            # Bold
+    "bold_yellow_huge": {
+        "name": "Bold Yellow Huge",
+        "fontname": "Arial",
+        "fontsize": 95,
+        "primary_colour": "&H0000FFFF",  # Bright yellow
+        "back_colour": "&HD8000000",     # Very dark box
+        "outline_colour": "&H00000000",
+        "bold": -1,
         "italic": 0,
-        "border_style": 1,     # Outline
-        "outline": 3,
-        "shadow": 4,           # Soft Shadow
-        "margin_v": 40,       # <-- High margin to avoid TikTok UI
+        "border_style": 4,
+        "outline": 0,
+        "shadow": 3,
+        "margin_v": 150,
         "alignment": 2,
-        "spacing": 0
+        "spacing": 4,
+        "margin_l": 100,
+        "margin_r": 100
+    },
+    "white_ultra_thick": {
+        "name": "White Ultra Thick Outline",
+        "fontname": "Arial",
+        "fontsize": 100,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00000000",  # Ultra thick black outline
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,  # Outline only
+        "outline": 8,  # Ultra thick outline
+        "shadow": 4,
+        "margin_v": 160,
+        "alignment": 2,
+        "spacing": 4,
+        "margin_l": 80,
+        "margin_r": 80
+    },
+    "netflix_huge_bold": {
+        "name": "Netflix Huge Bold",
+        "fontname": "Arial",
+        "fontsize": 88,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&HE8000000",     # Almost opaque box
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 4,
+        "outline": 0,
+        "shadow": 0,
+        "margin_v": 135,
+        "alignment": 2,
+        "spacing": 4,
+        "margin_l": 110,
+        "margin_r": 110
+    },
+    "cyan_massive_glow": {
+        "name": "Cyan Massive Glow",
+        "fontname": "Arial",
+        "fontsize": 110,
+        "primary_colour": "&H00FFFF00",  # Bright cyan
+        "back_colour": "&HCC000000",
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 4,
+        "outline": 5,
+        "shadow": 3,
+        "margin_v": 170,
+        "alignment": 2,
+        "spacing": 5,
+        "margin_l": 90,
+        "margin_r": 90
     }
 }
+
 def create_ass_file(sentences, ass_file):
     """Create ASS subtitle file with MASSIVE, bold, highly engaging formatting"""
     style_key = random.choice(list(SUBTITLE_STYLES.keys()))
@@ -199,8 +209,7 @@ def create_ass_file(sentences, ass_file):
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
         
-        # FIX IS HERE: Hardcoded 30,30 for MarginL and MarginR to avoid KeyError
-        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},30,30,{style['margin_v']},1\n\n")
+        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},{style['margin_l']},{style['margin_r']},{style['margin_v']},1\n\n")
         
         # Events
         f.write("[Events]\n")
@@ -214,18 +223,16 @@ def create_ass_file(sentences, ass_file):
             text = s['text'].strip()
             text = text.replace('\\', '\\\\').replace('\n', ' ')
             
-            # Force Uppercase for Viral Styles
-            if "mrbeast" in style_key or "hormozi" in style_key:
-                text = text.upper()
-
             # Smart line breaking optimized for MASSIVE fonts
+            # Aim for 25-30 chars per line for huge fonts (85-110px)
             words = text.split()
             lines = []
             current_line = []
             current_length = 0
             
             for word in words:
-                word_length = len(word) + 1 
+                word_length = len(word) + 1  # +1 for space
+                # Break at 28 chars for massive fonts - ensures readability
                 if current_length + word_length > 28 and current_line:
                     lines.append(' '.join(current_line))
                     current_line = [word]
@@ -239,10 +246,17 @@ def create_ass_file(sentences, ass_file):
             
             # Join with line breaks (max 2 lines for massive text)
             if len(lines) > 2:
+                # Redistribute to fit in 2 lines
                 mid = len(lines) // 2
-                line1 = ' '.join(lines[:mid])
-                line2 = ' '.join(lines[mid:])
-                formatted_text = line1 + '\\N' + line2
+                line1_words = ' '.join(lines[:mid]).split()
+                line2_words = ' '.join(lines[mid:]).split()
+                
+                # Balance the lines
+                total_words = len(line1_words) + len(line2_words)
+                half = total_words // 2
+                
+                all_words = line1_words + line2_words
+                formatted_text = ' '.join(all_words[:half]) + '\\N' + ' '.join(all_words[half:])
             else:
                 formatted_text = '\\N'.join(lines)
             
@@ -258,9 +272,6 @@ def format_ass_time(seconds):
 
 # ==========================================
 # 4. GOOGLE DRIVE UPLOAD
-# ==========================================
-# ==========================================
-# 4. GOOGLE DRIVE UPLOAD (ROBUST + SANITIZED)
 # ==========================================
 def upload_to_google_drive(file_path):
     """Upload file to Google Drive and return shareable link"""
@@ -283,33 +294,16 @@ def upload_to_google_drive(file_path):
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
-        import json
         
+        # Get credentials from environment variable
         credentials_json = os.environ.get("GOOGLE_DRIVE_CREDENTIALS")
         if not credentials_json:
             print("❌ GOOGLE_DRIVE_CREDENTIALS environment variable not set")
             return None
         
-        # --- ROBUST JSON PARSING ---
-        try:
-            # 1. Try standard load
-            creds_dict = json.loads(credentials_json)
-        except json.JSONDecodeError:
-            print("⚠️ Standard JSON parse failed. Attempting to sanitize input...")
-            try:
-                # 2. Fix: specific replacement for control characters often pasted from terminals
-                # Replace actual newlines with escaped \n
-                sanitized_json = credentials_json.replace('\n', '\\n').replace('\r', '')
-                # If the user pasted it as a python string literal by mistake, clean that up
-                if sanitized_json.startswith("'") and sanitized_json.endswith("'"):
-                    sanitized_json = sanitized_json[1:-1]
-                
-                # Attempt strict=False to allow control characters inside strings
-                creds_dict = json.loads(sanitized_json, strict=False)
-            except Exception as e:
-                print(f"❌ Critical JSON Error: Could not sanitize credentials. {e}")
-                return None
-        # ---------------------------
+        # Parse credentials
+        import json
+        creds_dict = json.loads(credentials_json)
         
         # Create credentials
         SCOPES = ['https://www.googleapis.com/auth/drive.file']
@@ -370,9 +364,10 @@ def upload_to_google_drive(file_path):
         
     except Exception as e:
         print(f"❌ Google Drive upload failed: {str(e)}")
-        # import traceback
-        # traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         return None
+
 # ==========================================
 # 5. EXPANDED VISUAL DICTIONARY (700+ TOPICS)
 # ==========================================
