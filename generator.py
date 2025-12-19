@@ -1162,90 +1162,82 @@ def clone_voice_robust(text, ref_audio, out_path):
 USED_VIDEO_URLS = set()
 
 def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
-    print("Visuals & Render...")
+    print("🎬 Intelligent Visual Processing...")
     
     def get_clip(args):
         i, sent = args
         dur = max(3.5, sent['end'] - sent['start'])
+        
+        # Get intelligent query based on sentence analysis
         query = get_visual_query(sent['text'])
         out = TEMP_DIR / f"s_{i}.mp4"
         
+        print(f"  🔍 Clip {i}: Searching for '{query}'...")
+        
+        # Search multiple services with intelligent ranking
+        all_results = []
+        services_to_try = []
+        
+        # Add available services
+        if PEXELS_KEYS and PEXELS_KEYS[0]:
+            services_to_try.append(('pexels', PEXELS_KEYS))
+        if PIXABAY_KEYS and PIXABAY_KEYS[0]:
+            services_to_try.append(('pixabay', PIXABAY_KEYS))
+        # Add Videvo and Coverr (free APIs)
+        services_to_try.extend([('videvo', []), ('coverr', [])])
+        
+        # Search each service
+        for service, keys in services_to_try[:3]:  # Try up to 3 services
+            page = random.randint(1, 3)
+            results = intelligent_video_search(query, service, keys, page)
+            
+            # Score each result
+            for video in results:
+                if video['url'] not in USED_VIDEO_URLS:
+                    relevance = calculate_relevance_score(video, query, sent['text'])
+                    video['relevance_score'] = relevance
+                    all_results.append(video)
+        
+        # Sort by relevance score (highest first)
+        all_results.sort(key=lambda x: x['relevance_score'], reverse=True)
+        
+        # Try top 3 most relevant videos
         found_link = None
-        attempt = 0
-        max_attempts = 5
+        for video in all_results[:3]:
+            if video['url'] not in USED_VIDEO_URLS:
+                found_link = video['url']
+                USED_VIDEO_URLS.add(found_link)
+                print(f"  ✓ Clip {i}: Found {video['service']} video (score: {video['relevance_score']})")
+                break
         
-        # Alternate between services
-        services = ['pexels', 'pixabay'] if (i % 2 == 0) else ['pixabay', 'pexels']
+        # If no good match found, try alternative queries
+        if not found_link and all_results:
+            # Try any available video
+            for video in all_results:
+                if video['url'] not in USED_VIDEO_URLS:
+                    found_link = video['url']
+                    USED_VIDEO_URLS.add(found_link)
+                    print(f"  ⚠️ Clip {i}: Using backup video from {video['service']}")
+                    break
         
-        while attempt < max_attempts and not found_link:
-            attempt += 1
-            service = services[attempt % 2]
-            
-            # === PEXELS API ===
-            if service == 'pexels' and PEXELS_KEYS:
-                try:
-                    h = {"Authorization": random.choice(PEXELS_KEYS)}
-                    page = random.randint(1, 5)
-                    r = requests.get(
-                        f"https://api.pexels.com/videos/search?query={query}&size=large&orientation=landscape&per_page=25&page={page}", 
-                        headers=h, 
-                        timeout=8
-                    )
-                    videos = r.json().get('videos', [])
-                    random.shuffle(videos)
-                    
-                    for v in videos:
-                        video_files = sorted(v.get('video_files', []), key=lambda x: x.get('width', 0), reverse=True)
-                        if video_files:
-                            link = video_files[0]['link']
-                            if link not in USED_VIDEO_URLS:
-                                found_link = link
-                                USED_VIDEO_URLS.add(link)
-                                print(f"  ✓ Clip {i}: {query[:35]}... (Pexels HD)")
-                                break
-                    
-                    if not found_link and attempt < max_attempts:
-                        query = get_visual_query(sent['text'] + " cinematic")
-                        
-                except Exception as e:
-                    print(f"  ✗ Pexels error clip {i}: {str(e)[:50]}")
-            
-            # === PIXABAY API ===
-            if service == 'pixabay' and not found_link and PIXABAY_KEYS:
-                try:
-                    key = random.choice(PIXABAY_KEYS)
-                    page = random.randint(1, 5)
-                    r = requests.get(
-                        f"https://pixabay.com/api/videos/?key={key}&q={query}&per_page=30&page={page}", 
-                        timeout=8
-                    )
-                    videos = r.json().get('hits', [])
-                    random.shuffle(videos)
-                    
-                    for v in videos:
-                        video_data = v.get('videos', {})
-                        link = video_data.get('large', {}).get('url') or \
-                               video_data.get('medium', {}).get('url') or \
-                               video_data.get('small', {}).get('url')
-                        
-                        if link and link not in USED_VIDEO_URLS:
-                            found_link = link
-                            USED_VIDEO_URLS.add(link)
-                            print(f"  ✓ Clip {i}: {query[:35]}... (Pixabay HD)")
-                            break
-                    
-                    if not found_link and attempt < max_attempts:
-                        query = get_visual_query(sent['text'] + " stock footage")
-                        
-                except Exception as e:
-                    print(f"  ✗ Pixabay error clip {i}: {str(e)[:50]}")
-        
-        # Download and process with GPU
+        # Download and process video with GPU
         if found_link:
             try:
                 raw = TEMP_DIR / f"r_{i}.mp4"
-                with open(raw, "wb") as f: 
-                    f.write(requests.get(found_link, timeout=40).content)
+                
+                # Download with progress indication
+                response = requests.get(found_link, timeout=40, stream=True)
+                total_size = int(response.headers.get('content-length', 0))
+                
+                with open(raw, "wb") as f:
+                    if total_size > 0:
+                        downloaded = 0
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                    else:
+                        f.write(response.content)
                 
                 # GPU-accelerated processing
                 cmd = [
@@ -1257,11 +1249,12 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
                 ]
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
                 return str(out)
+                
             except Exception as e:
                 print(f"  ✗ Download/process failed clip {i}: {str(e)[:60]}")
         
-        # Fallback gradient
-        print(f"  → Clip {i}: Fallback gradient")
+        # Fallback: Create gradient background
+        print(f"  → Clip {i}: Using gradient fallback")
         colors = ["0x1a1a2e:0x16213e", "0x0f3460:0x533483", "0x2a2d34:0x1e3a5f"]
         gradient = random.choice(colors)
         cmd = [
@@ -1273,13 +1266,13 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return str(out)
 
-    # Parallel processing
-    print(f"Downloading {len(sentences)} video clips...")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+    # Parallel processing with progress tracking
+    print(f"📥 Downloading {len(sentences)} video clips with intelligent matching...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:  # Reduced to 4 for better quality checks
         clips = list(ex.map(get_clip, [(i, s) for i, s in enumerate(sentences)]))
 
     # Fast concatenation
-    print("Concatenating video clips...")
+    print("🔗 Concatenating video clips...")
     with open("list.txt", "w") as f:
         for c in clips: 
             if os.path.exists(c):
