@@ -2,11 +2,11 @@
 AI VIDEO GENERATOR WITH GOOGLE DRIVE UPLOAD
 ============================================
 
-COMPLETE VERSION WITH ENHANCED INTELLIGENCE & QUALITY FILTERING
-1. Local Intelligent Query System
+ENHANCED VERSION USING ONLY PIXABAY & PEXELS WITH VISUAL MAP
+1. Local Intelligent Query System with VISUAL_MAP dictionary
 2. Strict 70+ Score Requirement with Retry Logic
 3. Landscape-Only Video Filtering
-4. ALL Original Dictionaries and Functions Restored
+4. Pixabay & Pexels Only with Intelligent Keyword Matching
 """
 
 import os
@@ -52,14 +52,13 @@ VOICE_PATH = """{{VOICE_PATH_PLACEHOLDER}}"""
 LOGO_PATH = """{{LOGO_PATH_PLACEHOLDER}}"""
 JOB_ID = """{{JOB_ID_PLACEHOLDER}}"""
 
-# Keys
+# Keys - Only Pexels & Pixabay needed
 raw_gemini = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_KEYS = [k.strip() for k in raw_gemini.split(",") if k.strip()]
 
 ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
 PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
-FREEPIK_API_KEY = os.environ.get("FREEPIK_API_KEY", "")
 
 # Paths
 OUTPUT_DIR = Path("output")
@@ -335,8 +334,9 @@ def upload_to_google_drive(file_path):
     else:
         print(f"❌ Upload Failed: {upload_resp.text}")
         return None
+
 # ==========================================
-# 5. COMPLETE VISUAL DICTIONARY (700+ TOPICS)
+# 5. COMPLETE VISUAL DICTIONARY (700+ TOPICS) - RESTORED
 # ==========================================
 VISUAL_MAP = {
     # TECH & AI
@@ -925,7 +925,7 @@ VISUAL_MAP = {
 # 6. ENHANCED LOCAL VISUAL QUERY INTELLIGENCE
 # ==========================================
 def get_visual_query(text):
-    """Intelligent visual query - extracts most relevant keywords from sentence"""
+    """Intelligent visual query - extracts most relevant keywords from sentence using VISUAL_MAP"""
     text = text.lower()
     
     # Remove common filler words
@@ -937,17 +937,19 @@ def get_visual_query(text):
     # Extract meaningful words (4+ letters)
     words = [w for w in re.findall(r'\b\w+\b', text) if len(w) >= 4 and w not in stop_words]
     
-    # Priority 1: Check for exact category matches
+    # Priority 1: Check for exact category matches in VISUAL_MAP
     for word in words:
         for category, terms in VISUAL_MAP.items():
             if word == category:
-                return random.choice(terms)
+                selected_term = random.choice(terms)
+                return f"{selected_term} landscape 4k"
     
     # Priority 2: Check for partial matches in categories
     for word in words:
         for category, terms in VISUAL_MAP.items():
             if word in category or category in word:
-                return random.choice(terms)
+                selected_term = random.choice(terms)
+                return f"{selected_term} landscape 4k"
     
     # Priority 3: Use the most significant nouns (6+ letters, not common)
     significant = [w for w in words if len(w) >= 6]
@@ -957,23 +959,23 @@ def get_visual_query(text):
         # Check if any category contains this word
         for category, terms in VISUAL_MAP.items():
             if main_word in category or any(main_word in term for term in terms):
-                return random.choice(terms)
+                selected_term = random.choice(terms)
+                return f"{selected_term} landscape 4k"
         
-        return f"{main_word} cinematic 4k"
+        return f"{main_word} landscape 4k"
     
     # Priority 4: Use any meaningful noun with visual enhancement
     if words:
-        return f"{words[0]} nature documentary"
+        return f"{words[0]} landscape 4k"
     
     # Final fallback
     fallbacks = [
-        "nature documentary 4k",
-        "abstract motion graphics",
+        "nature landscape 4k",
         "cinematic landscape",
-        "time lapse clouds",
-        "ocean waves sunset",
-        "mountain vista aerial",
-        "forest canopy drone"
+        "time lapse landscape",
+        "mountain landscape",
+        "forest landscape",
+        "ocean waves landscape"
     ]
     return random.choice(fallbacks)
 
@@ -1001,8 +1003,10 @@ def calculate_relevance_score(video, query, sentence_text):
     # Video quality indicators
     quality = video.get('quality', '').lower()
     if '4k' in quality or 'uhd' in quality:
+        score += 20
+    elif 'hd' in quality or 'high' in quality or 'large' in quality:
         score += 15
-    elif 'hd' in quality or 'high' in quality:
+    elif 'medium' in quality:
         score += 10
     elif 'sd' in quality or 'standard' in quality:
         score += 5
@@ -1016,16 +1020,12 @@ def calculate_relevance_score(video, query, sentence_text):
     elif duration >= 5:
         score += 4
     
-    # Platform quality bias
+    # Platform quality bias (Pexels slightly better quality)
     service = video.get('service', '')
-    if service == 'freepik':
+    if service == 'pexels':
         score += 8
-    elif service == 'pexels':
-        score += 6
     elif service == 'pixabay':
-        score += 5
-    elif service == 'coverr':
-        score += 4
+        score += 6
     
     # STRICT LANDSCAPE DETECTION - Critical for your requirement
     metadata = (video.get('title', '') + ' ' + video.get('description', '')).lower()
@@ -1034,105 +1034,63 @@ def calculate_relevance_score(video, query, sentence_text):
     
     # Bonus for landscape, penalty for portrait
     if any(indicator in metadata for indicator in landscape_indicators):
-        score += 20  # Major bonus for confirmed landscape
+        score += 25  # Major bonus for confirmed landscape
     elif any(indicator in metadata for indicator in portrait_indicators):
-        score -= 25  # Major penalty for portrait
+        score -= 30  # Major penalty for portrait
+    
+    # For Pexels, check orientation parameter was used
+    if service == 'pexels' and 'orientation=landscape' in str(video.get('url', '')):
+        score += 15
     
     # Random factor for variety
     score += random.randint(0, 5)
     
     # Cap at 100
-    return min(100, max(0, score))  # Ensure score is between 0-100
+    return min(100, max(0, score))
 
 # ==========================================
-# 8. COMPLETE VIDEO SEARCH WITH ALL 4 SERVICES
+# 8. PIXABAY & PEXELS VIDEO SEARCH ONLY
 # ==========================================
+USED_VIDEO_URLS = set()
+
 def intelligent_video_search(query, service, keys, page=1):
-    """Search for videos across ALL 4 services with strict landscape filtering"""
+    """Search for videos using ONLY Pexels or Pixabay"""
     all_results = []
     
-    if service == 'freepik' and FREEPIK_API_KEY:
-        try:
-            print(f"    Searching Freepik: {query}")
-            url = "https://api.freepik.com/v1/resources"
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "X-Freepik-API-Key": FREEPIK_API_KEY
-            }
-            
-            params = {
-                "page": page,
-                "limit": 15,
-                "filters[content_type]": "video",
-                "filters[license]": "free",
-                "order": "relevant",
-                "locale": "en-US",
-                "query": query + " landscape"  # Force landscape in query
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                for item in data.get('data', []):
-                    preview_url = None
-                    
-                    if 'video_previews' in item.get('attributes', {}):
-                        video_previews = item['attributes']['video_previews']
-                        for quality in ['hd', 'high', 'medium', 'low']:
-                            if quality in video_previews:
-                                preview_url = video_previews[quality]
-                                break
-                    
-                    if not preview_url and 'previews' in item.get('attributes', {}):
-                        previews = item['attributes']['previews']
-                        for size in ['extra_large', 'large', 'medium']:
-                            if size in previews:
-                                preview_url = previews[size]
-                                break
-                    
-                    if preview_url:
-                        all_results.append({
-                            'url': preview_url,
-                            'title': item.get('attributes', {}).get('title', query),
-                            'description': item.get('attributes', {}).get('description', ''),
-                            'duration': item.get('attributes', {}).get('duration', 0),
-                            'service': 'freepik',
-                            'quality': 'hd',
-                            'license': 'free'
-                        })
-                        
-        except Exception as e:
-            print(f"    Freepik error: {str(e)[:50]}")
-    
-    elif service == 'pexels' and keys:
+    if service == 'pexels' and keys:
         try:
             key = random.choice([k for k in keys if k])
             print(f"    Searching Pexels: {query}")
             url = f"https://api.pexels.com/videos/search"
             headers = {"Authorization": key}
+            
+            # CRITICAL: Always force landscape orientation
             params = {
                 "query": query,
-                "per_page": 15,
+                "per_page": 20,  # Get more results to find good ones
                 "page": page,
-                "orientation": "landscape",  # CRITICAL: Landscape only
-                "size": "medium"
+                "orientation": "landscape",  # Force landscape
+                "size": "medium_large"  # Better quality
             }
             
-            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response = requests.get(url, headers=headers, params=params, timeout=15)
             if response.status_code == 200:
                 data = response.json()
                 for video in data.get('videos', []):
                     video_files = video.get('video_files', [])
                     if video_files:
-                        hd_files = [f for f in video_files if f.get('quality') == 'hd']
-                        sd_files = [f for f in video_files if f.get('quality') == 'sd']
+                        # Prioritize HD quality
+                        hd_files = [f for f in video_files if f.get('quality') == 'hd' and f.get('width', 0) >= 1280]
+                        large_files = [f for f in video_files if f.get('quality') == 'large']
+                        medium_files = [f for f in video_files if f.get('quality') == 'medium']
                         
                         best_file = None
                         if hd_files:
                             best_file = random.choice(hd_files)
-                        elif sd_files:
-                            best_file = random.choice(sd_files)
+                        elif large_files:
+                            best_file = random.choice(large_files)
+                        elif medium_files:
+                            best_file = random.choice(medium_files)
                         
                         if best_file:
                             all_results.append({
@@ -1141,7 +1099,9 @@ def intelligent_video_search(query, service, keys, page=1):
                                 'description': f"Pexels video by {video.get('user', {}).get('name', '')}",
                                 'duration': video.get('duration', 0),
                                 'service': 'pexels',
-                                'quality': best_file.get('quality', 'sd'),
+                                'quality': best_file.get('quality', 'medium'),
+                                'width': best_file.get('width', 0),
+                                'height': best_file.get('height', 0),
                                 'license': 'free'
                             })
                             
@@ -1153,23 +1113,36 @@ def intelligent_video_search(query, service, keys, page=1):
             key = random.choice([k for k in keys if k])
             print(f"    Searching Pixabay: {query}")
             url = f"https://pixabay.com/api/videos/"
+            
+            # CRITICAL: Always force horizontal orientation
             params = {
                 "key": key,
                 "q": query,
-                "per_page": 15,
+                "per_page": 20,  # Get more results
                 "page": page,
-                "orientation": "horizontal",  # CRITICAL: Horizontal only
+                "orientation": "horizontal",  # Force horizontal
                 "video_type": "film",
-                "min_width": 1280
+                "min_width": 1280,  # Minimum HD
+                "editors_choice": "true"  # Higher quality
             }
             
-            response = requests.get(url, params=params, timeout=10)
+            response = requests.get(url, params=params, timeout=15)
             if response.status_code == 200:
                 data = response.json()
                 for video in data.get('hits', []):
                     videos_dict = video.get('videos', {})
+                    
+                    # Check if video is landscape
+                    width = video.get('videos', {}).get('large', {}).get('width', 0)
+                    height = video.get('videos', {}).get('large', {}).get('height', 0)
+                    
+                    # Skip if portrait (height > width)
+                    if height > width:
+                        continue
+                    
                     best_quality = None
                     
+                    # Prioritize larger sizes
                     for quality in ['large', 'medium', 'small']:
                         if quality in videos_dict:
                             best_quality = videos_dict[quality]
@@ -1182,41 +1155,14 @@ def intelligent_video_search(query, service, keys, page=1):
                             'description': f"Pixabay video ID: {video.get('id', '')}",
                             'duration': video.get('duration', 0),
                             'service': 'pixabay',
-                            'quality': 'large' if 'large' in videos_dict else 'medium',
+                            'quality': quality,
+                            'width': best_quality.get('width', 0),
+                            'height': best_quality.get('height', 0),
                             'license': 'free'
                         })
                         
         except Exception as e:
             print(f"    Pixabay error: {str(e)[:50]}")
-    
-    elif service == 'coverr':
-        try:
-            print(f"    Searching Coverr: {query}")
-            url = f"https://api.coverr.co/videos"
-            params = {
-                "query": query,
-                "page": page,
-                "per_page": 10
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                for video in data.get('videos', []):
-                    hd_url = video.get('urls', {}).get('sd')
-                    if hd_url:
-                        all_results.append({
-                            'url': hd_url,
-                            'title': video.get('title', query),
-                            'description': video.get('description', ''),
-                            'duration': video.get('duration', 0),
-                            'service': 'coverr',
-                            'quality': 'hd',
-                            'license': 'free'
-                        })
-                        
-        except Exception as e:
-            print(f"    Coverr error: {str(e)[:50]}")
     
     return all_results
 
@@ -1362,13 +1308,11 @@ def clone_voice_robust(text, ref_audio, out_path):
 # ==========================================
 # 11. VISUALS & RENDER WITH ENHANCED RETRY LOGIC
 # ==========================================
-USED_VIDEO_URLS = set()
-
 def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
-    print("🎬 Intelligent Visual Processing with Retry Logic...")
+    print("🎬 Visual Processing (Pexels & Pixabay Only with VISUAL_MAP)...")
     
     def get_clip_with_retry(i, sent, max_retries=3):
-        """Enhanced function with retry logic for 70+ scores"""
+        """Enhanced function with retry logic for 70+ scores using Pexels & Pixabay only"""
         dur = max(3.5, sent['end'] - sent['start'])
         original_query = get_visual_query(sent['text'])
         
@@ -1380,43 +1324,54 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
             if attempt == 0:
                 query = original_query
             elif attempt == 1:
-                # Try broader query
+                # Try broader query using VISUAL_MAP
                 query_words = original_query.split()
                 if len(query_words) > 2:
-                    query = ' '.join(query_words[:2]) + " landscape 4k"
+                    # Get main keyword and find related terms
+                    main_word = query_words[0]
+                    for category, terms in VISUAL_MAP.items():
+                        if main_word in category or any(main_word in term for term in terms):
+                            selected_term = random.choice(terms)
+                            query = f"{selected_term} landscape"
+                            break
+                    else:
+                        query = ' '.join(query_words[:2]) + " landscape"
                 else:
                     query = original_query + " landscape"
             else:
-                # Try completely different approach
-                fallback_queries = [
-                    "nature landscape 4k",
-                    "cinematic footage landscape",
-                    "abstract motion graphics landscape",
-                    "city timelapse landscape"
-                ]
-                query = random.choice(fallback_queries)
+                # Try completely different approach using VISUAL_MAP
+                fallback_categories = ["nature", "landscape", "city", "technology", "science"]
+                fallback_category = random.choice(fallback_categories)
+                if fallback_category in VISUAL_MAP:
+                    selected_term = random.choice(VISUAL_MAP[fallback_category])
+                    query = f"{selected_term} landscape"
+                else:
+                    query = "nature landscape 4k"
             
             print(f"  🔍 Clip {i}, Attempt {attempt+1}: '{query}'")
             
-            # Search ALL 4 services
+            # Search BOTH services: Pexels and Pixabay
             all_results = []
-            services_to_try = []
             
-            if FREEPIK_API_KEY:
-                services_to_try.append(('freepik', []))
+            # Try Pexels first
             if PEXELS_KEYS and PEXELS_KEYS[0]:
-                services_to_try.append(('pexels', PEXELS_KEYS))
-            if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-                services_to_try.append(('pixabay', PIXABAY_KEYS))
-            services_to_try.append(('coverr', []))  # Always try Coverr
-            
-            # Search each service
-            for service, keys in services_to_try:
-                page = random.randint(1, 2)
-                results = intelligent_video_search(query, service, keys, page)
+                page = random.randint(1, 3)  # Try different pages
+                pexels_results = intelligent_video_search(query, 'pexels', PEXELS_KEYS, page)
                 
-                # Score results
-                for video in results:
+                # Score Pexels results
+                for video in pexels_results:
+                    if video['url'] not in USED_VIDEO_URLS:
+                        relevance = calculate_relevance_score(video, query, sent['text'])
+                        video['relevance_score'] = relevance
+                        all_results.append(video)
+            
+            # Try Pixabay
+            if PIXABAY_KEYS and PIXABAY_KEYS[0]:
+                page = random.randint(1, 3)  # Try different pages
+                pixabay_results = intelligent_video_search(query, 'pixabay', PIXABAY_KEYS, page)
+                
+                # Score Pixabay results
+                for video in pixabay_results:
                     if video['url'] not in USED_VIDEO_URLS:
                         relevance = calculate_relevance_score(video, query, sent['text'])
                         video['relevance_score'] = relevance
@@ -1484,11 +1439,11 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
                         else:
                             f.write(response.content)
                     
-                    # Process with GPU - ensure landscape
+                    # Process with GPU - ensure landscape and proper scaling
                     cmd = [
                         "ffmpeg", "-y", "-hwaccel", "cuda", "-i", str(raw), 
                         "-t", str(dur),
-                        "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+                        "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30",
                         "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M",
                         "-an", str(out)
                     ]
@@ -1502,7 +1457,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
             # If this attempt failed, try next one
             print(f"  ⚠️ Clip {i}, Attempt {attempt+1} failed, retrying...")
         
-        # If all attempts failed, use original fallback logic
+        # If all attempts failed, use fallback
         print(f"  → Clip {i}: All attempts failed, using fallback")
         colors = ["0x1a1a2e:0x16213e", "0x0f3460:0x533483", "0x2a2d34:0x1e3a5f"]
         gradient = random.choice(colors)
@@ -1517,7 +1472,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         return str(out)
     
     # Process all clips with enhanced retry logic
-    print(f"📥 Downloading {len(sentences)} video clips with retry logic...")
+    print(f"📥 Downloading {len(sentences)} video clips from Pexels & Pixabay...")
     clips = []
     for i, sent in enumerate(sentences):
         update_status(60 + int((i/len(sentences))*30), f"Processing clip {i+1}/{len(sentences)}...")
@@ -1591,7 +1546,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
 # ==========================================
 # 12. EXECUTION
 # ==========================================
-print("--- 🚀 START (Complete System with Enhanced Logic) ---")
+print("--- 🚀 START (Pexels & Pixabay Only System with VISUAL_MAP) ---")
 update_status(1, "Initializing...")
 
 # Download assets
@@ -1725,8 +1680,8 @@ if clone_voice_robust(text, ref_voice, audio_out):
     ass_file = TEMP_DIR / "subtitles.ass"
     create_ass_file(sentences, ass_file)
     
-    # Process visuals with enhanced retry logic
-    update_status(60, "Gathering Visuals (70+ Score Priority)...")
+    # Process visuals with Pexels & Pixabay only
+    update_status(60, "Gathering Visuals (Pexels & Pixabay Only)...")
     final_output = OUTPUT_DIR / f"final_{JOB_ID}.mp4"
     
     if process_visuals(sentences, audio_out, ass_file, ref_logo, final_output):
@@ -1770,4 +1725,4 @@ for temp_file in ["visual.mp4", "list.txt"]:
         except:
             pass
 
-print("--- ✅ PROCESS COMPLETE (Full Enhanced System) ---")
+print("--- ✅ PROCESS COMPLETE (Pexels & Pixabay Only System with VISUAL_MAP) ---")
