@@ -274,117 +274,112 @@ def format_ass_time(seconds):
 # 4. GOOGLE DRIVE UPLOAD
 # ==========================================
 def upload_to_google_drive(file_path):
-    """Upload file to Google Drive and return shareable link"""
+    """
+    Uploads a file to Google Drive using the Resumable Upload method.
+    This is required for large video files and avoids timeouts.
+    """
     if not os.path.exists(file_path):
         print(f"❌ Error: File not found: {file_path}")
         return None
 
     filename = os.path.basename(file_path)
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"☁️ Uploading {filename} ({file_size_mb:.2f} MB) to Google Drive...")
+    file_size_bytes = os.path.getsize(file_path)
+    print(f"☁️ Uploading {filename} ({file_size_bytes / (1024 * 1024):.2f} MB) to Google Drive...")
 
     try:
-        # Install Google Drive dependencies
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", 
-            "google-auth", "google-auth-oauthlib", "google-auth-httplib2", 
-            "google-api-python-client", "--quiet"
-        ])
-        
+        # 1. Authenticate
         from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
+        from google.auth.transport.requests import Request
         import json
         
         credentials_json = os.environ.get("GOOGLE_DRIVE_CREDENTIALS")
+        folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+
         if not credentials_json:
-            print("❌ GOOGLE_DRIVE_CREDENTIALS environment variable not set")
+            print("❌ GOOGLE_DRIVE_CREDENTIALS not set.")
             return None
         
-        # --- ROBUST JSON PARSING ---
+        # Robust JSON parsing (fixes your previous "Invalid control character" error)
         try:
-            # 1. Try standard load
-            creds_dict = json.loads(credentials_json)
+            creds_dict = json.loads(credentials_json, strict=False)
         except json.JSONDecodeError:
-            print("⚠️ Standard JSON parse failed. Attempting to sanitize input...")
-            try:
-                # 2. Fix: specific replacement for control characters often pasted from terminals
-                # Replace actual newlines with escaped \n
-                sanitized_json = credentials_json.replace('\n', '\\n').replace('\r', '')
-                # If the user pasted it as a python string literal by mistake, clean that up
-                if sanitized_json.startswith("'") and sanitized_json.endswith("'"):
-                    sanitized_json = sanitized_json[1:-1]
-                
-                # Attempt strict=False to allow control characters inside strings
-                creds_dict = json.loads(sanitized_json, strict=False)
-            except Exception as e:
-                print(f"❌ Critical JSON Error: Could not sanitize credentials. {e}")
-                return None
-        # ---------------------------
-        
-        # Create credentials
-        SCOPES = ['https://www.googleapis.com/auth/drive.file']
-        credentials = service_account.Credentials.from_service_account_info(
-            creds_dict, scopes=SCOPES
+            clean_json = " ".join(credentials_json.split())
+            creds_dict = json.loads(clean_json, strict=False)
+
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=['https://www.googleapis.com/auth/drive.file']
         )
+        # Refresh token to get a valid access token
+        creds.refresh(Request())
+        access_token = creds.token
+
+        # 2. Initiate Resumable Upload Session
+        # We send metadata (filename, parent folder) to get a session URL.
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json; charset=UTF-8',
+            'X-Upload-Content-Type': 'video/mp4',
+            'X-Upload-Content-Length': str(file_size_bytes)
+        }
         
-        # Build Drive service
-        service = build('drive', 'v3', credentials=credentials)
-        
-        # File metadata
-        file_metadata = {
+        metadata = {
             'name': filename,
             'mimeType': 'video/mp4'
         }
         
-        # Optional: Upload to specific folder
-        folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+        # IMPORTANT: This puts the file in YOUR folder, using YOUR quota.
         if folder_id:
-            file_metadata['parents'] = [folder_id]
-        
-        # Upload file
-        media = MediaFileUpload(
-            file_path, 
-            mimetype='video/mp4',
-            resumable=True,
-            chunksize=10 * 1024 * 1024  # 10MB chunks
+            metadata['parents'] = [folder_id]
+            print(f"📂 Target Folder: {folder_id}")
+
+        response = requests.post(
+            'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable',
+            headers=headers,
+            json=metadata
         )
-        
-        print("📤 Uploading to Google Drive...")
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webViewLink, webContentLink'
-        ).execute()
-        
-        file_id = file.get('id')
-        
-        # Make file publicly accessible (anyone with link can view)
-        permission = {
-            'type': 'anyone',
-            'role': 'reader'
-        }
-        service.permissions().create(
-            fileId=file_id,
-            body=permission
-        ).execute()
-        
-        # Get shareable link
-        view_link = file.get('webViewLink')
+
+        if response.status_code != 200:
+            print(f"❌ Failed to initiate upload: {response.text}")
+            return None
+
+        # The session URL is in the 'Location' header
+        upload_url = response.headers.get('Location')
+
+        # 3. Upload the File Content
+        # We upload the actual video bytes to the session URL.
+        print("🚀 Sending file data...")
+        with open(file_path, 'rb') as f:
+            upload_response = requests.put(
+                upload_url,
+                headers={'Content-Length': str(file_size_bytes)},
+                data=f
+            )
+
+        if upload_response.status_code not in [200, 201]:
+            print(f"❌ Upload failed mid-stream: {upload_response.text}")
+            return None
+
+        file_id = upload_response.json().get('id')
+        print(f"✅ Upload Complete! File ID: {file_id}")
+
+        # 4. Make Public (Optional but recommended for your use case)
+        permission_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
+        requests.post(
+            permission_url,
+            headers={'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'},
+            json={'role': 'reader', 'type': 'anyone'}
+        )
+
+        # 5. Generate Links
+        view_link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
         download_link = f"https://drive.google.com/uc?export=download&id={file_id}"
         
-        print(f"✅ Upload successful!")
         print(f"📺 View Link: {view_link}")
-        print(f"⬇️ Download Link: {download_link}")
-        
         return view_link
-        
-    except Exception as e:
-        print(f"❌ Google Drive upload failed: {str(e)}")
-        # import traceback
-        # traceback.print_exc()
-        return None
 
+    except Exception as e:
+        print(f"❌ Upload Exception: {str(e)}")
+        return None
 # ==========================================
 # 5. EXPANDED VISUAL DICTIONARY (700+ TOPICS)
 # ==========================================
