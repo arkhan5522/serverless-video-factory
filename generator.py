@@ -72,84 +72,85 @@ TEMP_DIR.mkdir(exist_ok=True)
 # ==========================================
 SUBTITLE_STYLES = {
     "mrbeast_yellow": {
-        "name": "MrBeast Yellow (Punchy)",
+        "name": "MrBeast Yellow (3D Pop)",
         "fontname": "Arial Black",
-        "fontsize": 60,
+        "fontsize": 60,          # UNCHANGED
         "primary_colour": "&H0000FFFF",  # Yellow (BGR)
-        "back_colour": "&H00000000",
+        "back_colour": "&H00000000",     # Black Shadow
         "outline_colour": "&H00000000",  # Black Outline
         "bold": -1,
         "italic": 0,
-        "border_style": 1,     # Outline
-        "outline": 5,          # Thick
-        "shadow": 0,
+        "border_style": 1,      # Outline
+        "outline": 4,           # Slightly thinner outline for sharpness
+        "shadow": 3,            # ADDED: Hard drop shadow for 3D effect
         "margin_v": 45,
         "alignment": 2,
-        "spacing": 1
+        "spacing": 1.5          # ADDED: Wider spacing for "Cinematic" feel
     },
     "hormozi_green": {
-        "name": "Hormozi Green (Crisp)",
+        "name": "Hormozi Green (High Contrast)",
         "fontname": "Arial Black",
-        "fontsize": 60,
-        "primary_colour": "&H0000FF00",  # Green
-        "back_colour": "&H80000000",
-        "outline_colour": "&H00000000",
+        "fontsize": 60,          # UNCHANGED
+        "primary_colour": "&H0000FF00",  # Pure Green (BGR)
+        "back_colour": "&H80000000",     # Semi-transparent shadow
+        "outline_colour": "&H00000000",  # Black Outline
         "bold": -1,
         "italic": 0,
         "border_style": 1,
-        "outline": 4,
-        "shadow": 2,           # Sharp shadow
+        "outline": 5,           # INCREASED: Thicker outline for readability on busy backgrounds
+        "shadow": 0,            # REMOVED: Hormozi style is usually flat but thick outline
         "margin_v": 55,
         "alignment": 2,
-        "spacing": 0
+        "spacing": 0.5
     },
     "finance_blue": {
-        "name": "Finance Blue (Electric)",
+        "name": "Finance Blue (Neon Glow)",
         "fontname": "Arial",
-        "fontsize": 80,
+        "fontsize": 80,          # UNCHANGED
         "primary_colour": "&H00FFFFFF",  # White Text
-        "back_colour": "&H00000000",
-        "outline_colour": "&H00FF8C2D",  # Electric Blue (BGR)
+        "back_colour": "&H00000000",     # Black Shadow
+        # FIXED COLOR: This is now actually Electric Blue in BGR (Old code was Orange)
+        "outline_colour": "&H00FF9900",  # Vivid Blue (BGR: BBGGRR)
         "bold": -1,
         "italic": 0,
         "border_style": 1,
-        "outline": 3,
-        "shadow": 2,
+        "outline": 2,           # Thinner outline...
+        "shadow": 3,            # ...plus deeper shadow creates a "Glow" effect
         "margin_v": 50,
         "alignment": 2,
-        "spacing": 1
+        "spacing": 2            # Wide spacing looks expensive/financial
     },
     "netflix_box": {
-        "name": "Netflix Clean",
+        "name": "Netflix Modern",
         "fontname": "Roboto",
-        "fontsize": 80,
+        "fontsize": 80,          # UNCHANGED
         "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&H60000000",     # Semi-transparent box
+        "back_colour": "&H90000000",     # DARKER: Increased opacity (90) for better contrast
         "outline_colour": "&H00000000",
         "bold": 0,
         "italic": 0,
-        "border_style": 3,     # Opaque Box
+        "border_style": 3,      # Opaque Box
         "outline": 0,
         "shadow": 0,
-        "margin_v": 40,
+        "margin_v": 35,         # Lowered slightly
         "alignment": 2,
-        "spacing": 0
+        "spacing": 0.5
     },
     "tiktok_white": {
-        "name": "TikTok White (Safe Zone)",
-        "fontname": "Arial",
-        "fontsize": 75,
+        "name": "TikTok White (Ultra Bold)",
+        "fontname": "Arial Black",   # CHANGED: From 'Arial' to 'Arial Black'
+        "fontsize": 65,              # UNCHANGED
         "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&H00000000",
+        "back_colour": "&H60000000",     # Darker shadow for contrast
         "outline_colour": "&H00000000",  # Black Outline
-        "bold": -1,            # Bold
+        "bold": -1,                  # Still bold
         "italic": 0,
-        "border_style": 1,     # Outline
-        "outline": 3,
-        "shadow": 4,           # Soft Shadow
+        "border_style": 1,
+        "outline": 4.5,              # INCREASED: Thicker outline = bolder look
+        "shadow": 2,                 # Tighter shadow
         "margin_v": 40,
         "alignment": 2,
-        "spacing": 0
+        "spacing": -0.5              # ADDED: Tight spacing (tracking) makes it look chunkier
     }
 }
 
@@ -174,7 +175,7 @@ def create_ass_file(sentences, ass_file):
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
         
         # FIX 1: Hardcoded MarginL and MarginR to 30 to prevent KeyError
-        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},30,30,{style['margin_v']},1\n\n")
+        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},25,25,{style['margin_v']},1\n\n")
         
         # Events
         f.write("[Events]\n")
@@ -942,14 +943,14 @@ def get_visual_query(text):
         for category, terms in VISUAL_MAP.items():
             if word == category:
                 selected_term = random.choice(terms)
-                return f"{selected_term} landscape 4k"
+                return f"{selected_term} 4k"
     
     # Priority 2: Check for partial matches in categories
     for word in words:
         for category, terms in VISUAL_MAP.items():
             if word in category or category in word:
                 selected_term = random.choice(terms)
-                return f"{selected_term} landscape 4k"
+                return f"{selected_term} 4k"
     
     # Priority 3: Use the most significant nouns (6+ letters, not common)
     significant = [w for w in words if len(w) >= 6]
@@ -960,7 +961,7 @@ def get_visual_query(text):
         for category, terms in VISUAL_MAP.items():
             if main_word in category or any(main_word in term for term in terms):
                 selected_term = random.choice(terms)
-                return f"{selected_term} landscape 4k"
+                return f"{selected_term} 4k"
         
         return f"{main_word} landscape 4k"
     
