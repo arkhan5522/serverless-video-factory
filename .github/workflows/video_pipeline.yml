@@ -45,8 +45,10 @@ jobs:
           PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          # CRITICAL: This injects the secret into the runner env so we can write it to the file below
+          
+          # --- GOOGLE DRIVE FIX PART 1: LOAD SECRET ---
           GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
 
         run: |
           # 1. Setup Kaggle Auth
@@ -75,8 +77,6 @@ jobs:
           python builder.py
 
           # 3. Create Secrets Header (FIXED)
-          # We use cat <<EOF to write the python file directly.
-          # We use triple quotes (''') for Google Creds to handle the JSON structure safely.
           cat <<EOF > config_header.py
           import os
           os.environ['GH_PAT'] = '$GH_PAT'
@@ -87,6 +87,9 @@ jobs:
           os.environ['GITHUB_REPOSITORY'] = '$GITHUB_REPOSITORY'
           os.environ['GITHUB_TOKEN'] = '$GITHUB_TOKEN'
           os.environ['GOOGLE_DRIVE_CREDENTIALS'] = '''$GOOGLE_DRIVE_CREDENTIALS'''
+          
+          # --- GOOGLE DRIVE FIX PART 2: INJECT FOLDER ID ---
+          os.environ['GOOGLE_DRIVE_FOLDER_ID'] = '$GOOGLE_DRIVE_FOLDER_ID'
           EOF
           
           # Combine the header (secrets) with the main script
