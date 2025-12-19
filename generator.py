@@ -237,7 +237,7 @@ def create_ass_file(sentences, ass_file):
             # FIX 3: Tighter wrapping to prevent off-screen text
             # Massive fonts need fewer chars per line. 
             # Reduced from 28 to 18 chars to fit 1920px width.
-            MAX_CHARS = 18 
+            MAX_CHARS = 28
             
             words = text.split()
             lines = []
@@ -1056,7 +1056,7 @@ def get_ai_visual_query(text, current_gemini_key_index=0):
         # Use Gemini API
         key = GEMINI_KEYS[current_gemini_key_index % len(GEMINI_KEYS)]
         genai.configure(api_key=key)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
         response = model.generate_content(prompt)
         query = response.text.strip().strip('"').strip("'")
         
