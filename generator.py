@@ -200,7 +200,7 @@ def create_ass_file(sentences, ass_file):
                 text = text.upper()
 
             # FIX 3: Tighter wrapping to prevent off-screen text
-            MAX_CHARS = 28
+            MAX_CHARS = 30
             
             words = text.split()
             lines = []
@@ -236,91 +236,105 @@ def format_ass_time(seconds):
 # 4. GOOGLE DRIVE UPLOAD
 # ==========================================
 def upload_to_google_drive(file_path):
-    """Upload file to Google Drive using Resumable Upload method"""
+    """
+    Uploads using OAuth 2.0 Refresh Token (Direct User Upload).
+    This uses YOUR 2TB storage directly.
+    """
+    import os
+    import requests
+    import json
+
     if not os.path.exists(file_path):
         print(f"❌ Error: File not found: {file_path}")
         return None
 
-    filename = os.path.basename(file_path)
-    file_size_bytes = os.path.getsize(file_path)
-    print(f"☁️ Uploading {filename} ({file_size_bytes / (1024 * 1024):.2f} MB) to Google Drive...")
+    print("🔑 Authenticating via OAuth (Refresh Token)...")
+    
+    # 1. Get Secrets
+    client_id = os.environ.get("OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
+    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
 
-    try:
-        from google.oauth2 import service_account
-        from google.auth.transport.requests import Request
-        import json
-        
-        credentials_json = os.environ.get("GOOGLE_DRIVE_CREDENTIALS")
-        folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
-
-        if not credentials_json:
-            print("❌ GOOGLE_DRIVE_CREDENTIALS not set.")
-            return None
-        
-        try:
-            creds_dict = json.loads(credentials_json, strict=False)
-        except json.JSONDecodeError:
-            clean_json = " ".join(credentials_json.split())
-            creds_dict = json.loads(clean_json, strict=False)
-
-        creds = service_account.Credentials.from_service_account_info(
-            creds_dict, scopes=['https://www.googleapis.com/auth/drive.file']
-        )
-        creds.refresh(Request())
-        access_token = creds.token
-
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json; charset=UTF-8',
-            'X-Upload-Content-Type': 'video/mp4',
-            'X-Upload-Content-Length': str(file_size_bytes)
-        }
-        
-        metadata = {'name': filename, 'mimeType': 'video/mp4'}
-        if folder_id: metadata['parents'] = [folder_id]
-
-        response = requests.post(
-            'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable',
-            headers=headers,
-            json=metadata
-        )
-
-        if response.status_code != 200:
-            print(f"❌ Failed to initiate upload: {response.text}")
-            return None
-
-        upload_url = response.headers.get('Location')
-        print("🚀 Sending file data...")
-        
-        with open(file_path, 'rb') as f:
-            upload_response = requests.put(
-                upload_url,
-                headers={'Content-Length': str(file_size_bytes)},
-                data=f
-            )
-
-        if upload_response.status_code not in [200, 201]:
-            print(f"❌ Upload failed mid-stream: {upload_response.text}")
-            return None
-
-        file_id = upload_response.json().get('id')
-        print(f"✅ Upload Complete! File ID: {file_id}")
-
-        permission_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
-        requests.post(
-            permission_url,
-            headers={'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'},
-            json={'role': 'reader', 'type': 'anyone'}
-        )
-
-        view_link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
-        print(f"📺 View Link: {view_link}")
-        return view_link
-
-    except Exception as e:
-        print(f"❌ Upload Exception: {str(e)}")
+    if not all([client_id, client_secret, refresh_token]):
+        print("❌ Error: Missing OAuth Secrets (CLIENT_ID, CLIENT_SECRET, or REFRESH_TOKEN).")
         return None
 
+    # 2. Swap Refresh Token for Access Token
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token"
+    }
+    
+    try:
+        r = requests.post(token_url, data=data)
+        r.raise_for_status()
+        access_token = r.json()['access_token']
+        print("✅ Access Token refreshed successfully.")
+    except Exception as e:
+        print(f"❌ Failed to refresh token: {e}")
+        print(f"Response: {r.text}")
+        return None
+
+    # 3. Resumable Upload Logic
+    filename = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    
+    upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
+    
+    metadata = {
+        "name": filename,
+        "mimeType": "video/mp4"
+    }
+    if folder_id:
+        metadata["parents"] = [folder_id]
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": "video/mp4",
+        "X-Upload-Content-Length": str(file_size)
+    }
+
+    # Step A: Initiate Session
+    response = requests.post(upload_url, headers=headers, json=metadata)
+    
+    if response.status_code != 200:
+        print(f"❌ Init failed: {response.text}")
+        return None
+        
+    session_uri = response.headers.get("Location")
+
+    # Step B: Upload File
+    print(f"☁️ Uploading {filename} ({file_size / (1024*1024):.1f} MB)...")
+    
+    with open(file_path, "rb") as f:
+        # Standard put request for the binary data
+        upload_headers = {"Content-Length": str(file_size)}
+        upload_resp = requests.put(session_uri, headers=upload_headers, data=f)
+
+    if upload_resp.status_code in [200, 201]:
+        file_data = upload_resp.json()
+        file_id = file_data.get('id')
+        print(f"✅ Upload Success! File ID: {file_id}")
+        
+        # Make Public Link
+        perm_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
+        requests.post(
+            perm_url,
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={'role': 'reader', 'type': 'anyone'}
+        )
+        
+        link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+        print(f"🔗 Link: {link}")
+        return link
+    else:
+        print(f"❌ Upload Failed: {upload_resp.text}")
+        return None
 # ==========================================
 # 5. COMPLETE VISUAL DICTIONARY (700+ TOPICS)
 # ==========================================
