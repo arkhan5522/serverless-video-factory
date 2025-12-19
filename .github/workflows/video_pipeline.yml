@@ -46,8 +46,10 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           
-          # --- GOOGLE DRIVE FIX PART 1: LOAD SECRET ---
-          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          # --- GOOGLE DRIVE OAUTH FIX (UPDATED) ---
+          OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
+          OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
+          OAUTH_REFRESH_TOKEN: ${{ secrets.OAUTH_REFRESH_TOKEN }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
 
         run: |
@@ -76,7 +78,7 @@ jobs:
           EOF
           python builder.py
 
-          # 3. Create Secrets Header (FIXED)
+          # 3. Create Secrets Header (UPDATED FOR OAUTH)
           cat <<EOF > config_header.py
           import os
           os.environ['GH_PAT'] = '$GH_PAT'
@@ -86,9 +88,11 @@ jobs:
           os.environ['PIXABAY_KEYS'] = '$PIXABAY_KEYS'
           os.environ['GITHUB_REPOSITORY'] = '$GITHUB_REPOSITORY'
           os.environ['GITHUB_TOKEN'] = '$GITHUB_TOKEN'
-          os.environ['GOOGLE_DRIVE_CREDENTIALS'] = '''$GOOGLE_DRIVE_CREDENTIALS'''
           
-          # --- GOOGLE DRIVE FIX PART 2: INJECT FOLDER ID ---
+          # Inject OAuth Secrets
+          os.environ['OAUTH_CLIENT_ID'] = '$OAUTH_CLIENT_ID'
+          os.environ['OAUTH_CLIENT_SECRET'] = '$OAUTH_CLIENT_SECRET'
+          os.environ['OAUTH_REFRESH_TOKEN'] = '$OAUTH_REFRESH_TOKEN'
           os.environ['GOOGLE_DRIVE_FOLDER_ID'] = '$GOOGLE_DRIVE_FOLDER_ID'
           EOF
           
