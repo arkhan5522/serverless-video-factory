@@ -8,8 +8,9 @@ REQUIRED ENVIRONMENT VARIABLES:
 2. ASSEMBLYAI_API_KEY - AssemblyAI key for subtitle transcription (optional, has fallback)
 3. PEXELS_KEYS - Comma-separated Pexels API keys for video clips
 4. PIXABAY_KEYS - Comma-separated Pixabay API keys for video clips
-5. GOOGLE_DRIVE_CREDENTIALS - JSON string of Google Service Account credentials
-6. GOOGLE_DRIVE_FOLDER_ID - (Optional) Folder ID to upload videos to specific folder
+5. FREEPIK_API_KEY - Freepik API key for FREE video clips
+6. GOOGLE_DRIVE_CREDENTIALS - JSON string of Google Service Account credentials
+7. GOOGLE_DRIVE_FOLDER_ID - (Optional) Folder ID to upload videos to specific folder
 
 GOOGLE DRIVE SETUP:
 -------------------
@@ -33,6 +34,14 @@ GOOGLE DRIVE SETUP:
 7. (Optional) Share a specific folder with the service account email for organized uploads
 
 The uploaded videos will be publicly accessible via shareable link.
+
+FREEPIK API SETUP (FREE VIDEOS):
+----------------------------------
+1. Go to https://www.freepik.com/api
+2. Sign up or log in to your Freepik account
+3. Navigate to API settings and generate an API key
+4. Set as FREEPIK_API_KEY environment variable
+5. The system will automatically filter for FREE videos only using filters[license]=free
 """
 
 import os
@@ -85,6 +94,7 @@ GEMINI_KEYS = [k.strip() for k in raw_gemini.split(",") if k.strip()]
 ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
 PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
+FREEPIK_API_KEY = os.environ.get("FREEPIK_API_KEY", "")
 
 # Paths
 OUTPUT_DIR = Path("output")
@@ -97,85 +107,95 @@ TEMP_DIR.mkdir(exist_ok=True)
 # 3. PROFESSIONAL SUBTITLE STYLES (MASSIVE & BOLD)
 # ==========================================
 SUBTITLE_STYLES = {
-    "mrbeast_yellow": {
-        "name": "MrBeast Yellow (Punchy)",
-        "fontname": "Arial Black",
-        "fontsize": 60,
-        "primary_colour": "&H0000FFFF",  # Yellow (BGR)
-        "back_colour": "&H00000000",
-        "outline_colour": "&H00000000",  # Black Outline
-        "bold": -1,
-        "italic": 0,
-        "border_style": 1,     # Outline
-        "outline": 5,          # Thick
-        "shadow": 0,
-        "margin_v": 45,
-        "alignment": 2,
-        "spacing": 1
-    },
-    "hormozi_green": {
-        "name": "Hormozi Green (Crisp)",
-        "fontname": "Arial Black",
-        "fontsize": 60,
-        "primary_colour": "&H0000FF00",  # Green
-        "back_colour": "&H80000000",
-        "outline_colour": "&H00000000",
-        "bold": -1,
-        "italic": 0,
-        "border_style": 1,
-        "outline": 4,
-        "shadow": 2,           # Sharp shadow
-        "margin_v": 55,
-        "alignment": 2,
-        "spacing": 0
-    },
-    "finance_blue": {
-        "name": "Finance Blue (Electric)",
+    "youtube_massive_white": {
+        "name": "YouTube Massive White",
         "fontname": "Arial",
-        "fontsize": 80,
-        "primary_colour": "&H00FFFFFF",  # White Text
-        "back_colour": "&H00000000",
-        "outline_colour": "&H00FF8C2D",  # Electric Blue (BGR)
+        "fontsize": 90,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&HE0000000",     # Very opaque black box
+        "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
-        "border_style": 1,
-        "outline": 3,
-        "shadow": 2,
-        "margin_v": 50,
-        "alignment": 2,
-        "spacing": 1
-    },
-    "netflix_box": {
-        "name": "Netflix Clean",
-        "fontname": "Roboto",
-        "fontsize": 80,
-        "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&H60000000",     # Semi-transparent box
-        "outline_colour": "&H00000000",
-        "bold": 0,
-        "italic": 0,
-        "border_style": 3,     # Opaque Box
+        "border_style": 4,  # Box with soft edges
         "outline": 0,
         "shadow": 0,
-        "margin_v": 40,
-        "alignment": 2,
-        "spacing": 0
+        "margin_v": 140,  # Distance from bottom
+        "alignment": 2,   # Bottom center
+        "spacing": 3,
+        "margin_l": 100,  # Left padding
+        "margin_r": 100   # Right padding
     },
-    "tiktok_white": {
-        "name": "TikTok White (Safe Zone)",
-        "fontname": "Arial",   # Proxima Nova usually isn't installed on Linux servers, Arial is safer
-        "fontsize": 75,
-        "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&H00000000",
-        "outline_colour": "&H00000000",  # Black Outline
-        "bold": -1,            # Bold
+    "bold_yellow_huge": {
+        "name": "Bold Yellow Huge",
+        "fontname": "Arial",
+        "fontsize": 95,
+        "primary_colour": "&H0000FFFF",  # Bright yellow
+        "back_colour": "&HD8000000",     # Very dark box
+        "outline_colour": "&H00000000",
+        "bold": -1,
         "italic": 0,
-        "border_style": 1,     # Outline
-        "outline": 3,
-        "shadow": 4,           # Soft Shadow
-        "margin_v": 40,       # <-- High margin to avoid TikTok UI
+        "border_style": 4,
+        "outline": 0,
+        "shadow": 3,
+        "margin_v": 150,
         "alignment": 2,
-        "spacing": 0
+        "spacing": 4,
+        "margin_l": 100,
+        "margin_r": 100
+    },
+    "white_ultra_thick": {
+        "name": "White Ultra Thick Outline",
+        "fontname": "Arial",
+        "fontsize": 100,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00000000",  # Ultra thick black outline
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,  # Outline only
+        "outline": 8,  # Ultra thick outline
+        "shadow": 4,
+        "margin_v": 160,
+        "alignment": 2,
+        "spacing": 4,
+        "margin_l": 80,
+        "margin_r": 80
+    },
+    "netflix_huge_bold": {
+        "name": "Netflix Huge Bold",
+        "fontname": "Arial",
+        "fontsize": 88,
+        "primary_colour": "&H00FFFFFF",  # White text
+        "back_colour": "&HE8000000",     # Almost opaque box
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 4,
+        "outline": 0,
+        "shadow": 0,
+        "margin_v": 135,
+        "alignment": 2,
+        "spacing": 4,
+        "margin_l": 110,
+        "margin_r": 110
+    },
+    "cyan_massive_glow": {
+        "name": "Cyan Massive Glow",
+        "fontname": "Arial",
+        "fontsize": 110,
+        "primary_colour": "&H00FFFF00",  # Bright cyan
+        "back_colour": "&HCC000000",
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 4,
+        "outline": 5,
+        "shadow": 3,
+        "margin_v": 170,
+        "alignment": 2,
+        "spacing": 5,
+        "margin_l": 90,
+        "margin_r": 90
     }
 }
 
@@ -192,14 +212,15 @@ def create_ass_file(sentences, ass_file):
         f.write("ScriptType: v4.00+\n")
         f.write("PlayResX: 1920\n")
         f.write("PlayResY: 1080\n")
-        f.write("WrapStyle: 2\n")  # Smart wrapping
+        f.write("WrapStyle: 2\n")
         f.write("ScaledBorderAndShadow: yes\n\n")
         
-        # Style definition with custom margins
+        # Style Definition
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
         
-        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},{style['margin_l']},{style['margin_r']},{style['margin_v']},1\n\n")
+        # FIX 1: Hardcoded MarginL and MarginR to 30 to prevent KeyError
+        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},30,30,{style['margin_v']},1\n\n")
         
         # Events
         f.write("[Events]\n")
@@ -209,21 +230,33 @@ def create_ass_file(sentences, ass_file):
             start_time = format_ass_time(s['start'])
             end_time = format_ass_time(s['end'])
             
-            # Clean and format text
+            # Clean text
             text = s['text'].strip()
             text = text.replace('\\', '\\\\').replace('\n', ' ')
             
-            # Smart line breaking optimized for MASSIVE fonts
-            # Aim for 25-30 chars per line for huge fonts (85-110px)
+            # FIX 2: Remove trailing dot (and comma) for cleaner look
+            if text.endswith('.'):
+                text = text[:-1]
+            if text.endswith(','):
+                text = text[:-1]
+            
+            # Force Uppercase for Viral Styles
+            if "mrbeast" in style_key or "hormozi" in style_key or "yellow" in style_key:
+                text = text.upper()
+
+            # FIX 3: Tighter wrapping to prevent off-screen text
+            # Massive fonts need fewer chars per line. 
+            # Reduced from 28 to 18 chars to fit 1920px width.
+            MAX_CHARS = 18 
+            
             words = text.split()
             lines = []
             current_line = []
             current_length = 0
             
             for word in words:
-                word_length = len(word) + 1  # +1 for space
-                # Break at 28 chars for massive fonts - ensures readability
-                if current_length + word_length > 28 and current_line:
+                word_length = len(word) + 1 
+                if current_length + word_length > MAX_CHARS and current_line:
                     lines.append(' '.join(current_line))
                     current_line = [word]
                     current_length = word_length
@@ -234,21 +267,8 @@ def create_ass_file(sentences, ass_file):
             if current_line:
                 lines.append(' '.join(current_line))
             
-            # Join with line breaks (max 2 lines for massive text)
-            if len(lines) > 2:
-                # Redistribute to fit in 2 lines
-                mid = len(lines) // 2
-                line1_words = ' '.join(lines[:mid]).split()
-                line2_words = ' '.join(lines[mid:]).split()
-                
-                # Balance the lines
-                total_words = len(line1_words) + len(line2_words)
-                half = total_words // 2
-                
-                all_words = line1_words + line2_words
-                formatted_text = ' '.join(all_words[:half]) + '\\N' + ' '.join(all_words[half:])
-            else:
-                formatted_text = '\\N'.join(lines)
+            # Allow up to 3 lines (Removed the "Force 2 lines" block)
+            formatted_text = '\\N'.join(lines)
             
             f.write(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{formatted_text}\n")
 
@@ -374,7 +394,6 @@ def upload_to_google_drive(file_path):
         # import traceback
         # traceback.print_exc()
         return None
-
 # ==========================================
 # 5. EXPANDED VISUAL DICTIONARY (700+ TOPICS)
 # ==========================================
@@ -1185,16 +1204,18 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         all_results = []
         services_to_try = []
         
-        # Add available services
+        # Add available services in priority order
+        if FREEPIK_API_KEY:
+            services_to_try.append(('freepik', []))  # Priority 1: Freepik (FREE high-quality)
         if PEXELS_KEYS and PEXELS_KEYS[0]:
-            services_to_try.append(('pexels', PEXELS_KEYS))
+            services_to_try.append(('pexels', PEXELS_KEYS))  # Priority 2: Pexels
         if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-            services_to_try.append(('pixabay', PIXABAY_KEYS))
-        # Add Videvo and Coverr (free APIs)
-        services_to_try.extend([('videvo', []), ('coverr', [])])
+            services_to_try.append(('pixabay', PIXABAY_KEYS))  # Priority 3: Pixabay
+        # Add Coverr (free API)
+        services_to_try.append(('coverr', []))  # Priority 4: Coverr
         
         # Search each service
-        for service, keys in services_to_try[:3]:  # Try up to 3 services
+        for service, keys in services_to_try[:4]:  # Try up to 4 services
             page = random.randint(1, 3)
             results = intelligent_video_search(query, service, keys, page)
             
