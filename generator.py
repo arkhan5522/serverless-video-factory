@@ -384,6 +384,7 @@ def upload_to_google_drive(file_path):
         # import traceback
         # traceback.print_exc()
         return None
+
 # ==========================================
 # 5. EXPANDED VISUAL DICTIONARY (700+ TOPICS)
 # ==========================================
@@ -1021,8 +1022,294 @@ def get_visual_query(text):
         "mountain vista aerial",
         "forest canopy drone"
     ]
+    return random.choice(fallbacks)
+
 # ==========================================
-# 6. UTILS: STATUS & DOWNLOAD
+# 6. AI-POWERED VISUAL QUERIES
+# ==========================================
+def get_ai_visual_query(text, current_gemini_key_index=0):
+    """Generate intelligent search queries using Gemini AI"""
+    
+    # Use Gemini to generate better search queries
+    prompt = f"""
+    Analyze this documentary sentence and suggest the BEST video search query.
+    
+    SENTENCE: "{text}"
+    
+    RULES:
+    1. Output ONLY the search query (no explanations)
+    2. Make it specific and visual
+    3. Include descriptive terms like "4k", "cinematic", "documentary", "timelapse" when relevant
+    4. Focus on concrete, visual concepts, not abstract ideas
+    5. Use 2-5 words maximum
+    
+    Examples:
+    - "scientists studying dna in lab" → "laboratory research scientists working 4k"
+    - "the economy is growing rapidly" → "stock market growth charts timelapse"
+    - "artificial intelligence is changing everything" → "neural network visualization futuristic tech"
+    - "people should exercise more often" → "fitness workout gym motivation"
+    
+    SEARCH QUERY:
+    """
+    
+    try:
+        # Use Gemini API
+        key = GEMINI_KEYS[current_gemini_key_index % len(GEMINI_KEYS)]
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        response = model.generate_content(prompt)
+        query = response.text.strip().strip('"').strip("'")
+        
+        # Clean up
+        query = re.sub(r'^["\']+|["\']+$', '', query)  # Remove quotes
+        query = re.sub(r'[^\w\s\-]', '', query)  # Remove special chars except hyphen
+        
+        # Add quality/formatting terms if not present
+        quality_terms = ['4k', 'cinematic', 'documentary', 'timelapse', 'stock footage']
+        if not any(term in query.lower() for term in quality_terms):
+            query = f"{query} 4k"
+        
+        print(f"  🤖 AI Query: '{query}' (Original: '{text[:50]}...')")
+        return query
+        
+    except Exception as e:
+        print(f"  ⚠️ AI query failed: {e}. Using fallback...")
+        return get_visual_query(text)  # Fallback to current method
+
+def get_hybrid_visual_query(text, use_ai=True):
+    """Try AI first, fallback to keyword matching"""
+    if use_ai and GEMINI_KEYS:
+        try:
+            return get_ai_visual_query(text)
+        except:
+            return get_visual_query(text)
+    return get_visual_query(text)
+
+# ==========================================
+# 7. INTELLIGENT VIDEO SEARCH
+# ==========================================
+def calculate_relevance_score(video, query, sentence_text):
+    """Calculate relevance score for a video based on query and sentence context"""
+    score = 0
+    
+    # Check query in title/description
+    query_terms = query.lower().split()
+    title_desc = (video.get('title', '') + ' ' + video.get('description', '')).lower()
+    
+    for term in query_terms:
+        if term in title_desc:
+            score += 10
+    
+    # Check sentence context relevance
+    sentence_lower = sentence_text.lower()
+    
+    # Score based on category matching
+    for category, terms in VISUAL_MAP.items():
+        if category in query.lower():
+            # Higher score if the category matches directly
+            score += 15
+            break
+    
+    # Score based on video quality indicators
+    if video.get('quality', '').lower() in ['high', 'hd', '4k', 'uhd']:
+        score += 8
+    
+    if video.get('duration', 0) >= 20:  # Longer videos preferred
+        score += 5
+    
+    # Random factor for variety
+    score += random.randint(0, 5)
+    
+    return score
+
+def intelligent_video_search(query, service, keys, page=1):
+    """Search for videos across multiple services with intelligent filtering"""
+    all_results = []
+    
+    if service == 'freepik' and FREEPIK_API_KEY:
+        # Freepik API for FREE videos only
+        try:
+            print(f"    Searching Freepik for: {query}")
+            url = "https://api.freepik.com/v1/resources"
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Freepik-API-Key": FREEPIK_API_KEY
+            }
+            
+            params = {
+                "page": page,
+                "limit": 10,
+                "filters[content_type]": "video",
+                "filters[license]": "free",  # FREE videos only
+                "order": "relevant",
+                "locale": "en-US",
+                "query": query
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for item in data.get('data', []):
+                    # Get video preview URL (preferably free)
+                    preview_url = None
+                    
+                    # Check for video previews
+                    if 'video_previews' in item.get('attributes', {}):
+                        video_previews = item['attributes']['video_previews']
+                        if video_previews:
+                            # Try to get HD quality first
+                            for quality in ['hd', 'high', 'medium', 'low']:
+                                if quality in video_previews:
+                                    preview_url = video_previews[quality]
+                                    break
+                    
+                    # Fallback to preview image if no video
+                    if not preview_url and 'previews' in item.get('attributes', {}):
+                        previews = item['attributes']['previews']
+                        for size in ['extra_large', 'large', 'medium']:
+                            if size in previews:
+                                preview_url = previews[size]
+                                break
+                    
+                    if preview_url:
+                        all_results.append({
+                            'url': preview_url,
+                            'title': item.get('attributes', {}).get('title', query),
+                            'description': item.get('attributes', {}).get('description', ''),
+                            'duration': item.get('attributes', {}).get('duration', 0),
+                            'service': 'freepik',
+                            'quality': 'hd',
+                            'license': 'free'
+                        })
+                        
+        except Exception as e:
+            print(f"    Freepik error: {str(e)[:50]}")
+    
+    elif service == 'pexels' and keys:
+        # Pexels API
+        try:
+            key = random.choice([k for k in keys if k])
+            print(f"    Searching Pexels for: {query}")
+            url = f"https://api.pexels.com/videos/search"
+            headers = {"Authorization": key}
+            params = {
+                "query": query,
+                "per_page": 10,
+                "page": page,
+                "orientation": "landscape",
+                "size": "medium"
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for video in data.get('videos', []):
+                    # Get the best quality video file
+                    video_files = video.get('video_files', [])
+                    if video_files:
+                        # Prefer HD quality
+                        hd_files = [f for f in video_files if f.get('quality') == 'hd']
+                        sd_files = [f for f in video_files if f.get('quality') == 'sd']
+                        
+                        best_file = None
+                        if hd_files:
+                            best_file = random.choice(hd_files)
+                        elif sd_files:
+                            best_file = random.choice(sd_files)
+                        
+                        if best_file:
+                            all_results.append({
+                                'url': best_file['link'],
+                                'title': video.get('user', {}).get('name', query),
+                                'description': f"Pexels video by {video.get('user', {}).get('name', '')}",
+                                'duration': video.get('duration', 0),
+                                'service': 'pexels',
+                                'quality': best_file.get('quality', 'sd'),
+                                'license': 'free'
+                            })
+                            
+        except Exception as e:
+            print(f"    Pexels error: {str(e)[:50]}")
+    
+    elif service == 'pixabay' and keys:
+        # Pixabay API
+        try:
+            key = random.choice([k for k in keys if k])
+            print(f"    Searching Pixabay for: {query}")
+            url = f"https://pixabay.com/api/videos/"
+            params = {
+                "key": key,
+                "q": query,
+                "per_page": 10,
+                "page": page,
+                "orientation": "horizontal",
+                "video_type": "film",
+                "min_width": 1280
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for video in data.get('hits', []):
+                    # Get the largest video
+                    videos = video.get('videos', {})
+                    best_quality = None
+                    
+                    for quality in ['large', 'medium', 'small']:
+                        if quality in videos:
+                            best_quality = videos[quality]
+                            break
+                    
+                    if best_quality:
+                        all_results.append({
+                            'url': best_quality['url'],
+                            'title': video.get('tags', query),
+                            'description': f"Pixabay video ID: {video.get('id', '')}",
+                            'duration': video.get('duration', 0),
+                            'service': 'pixabay',
+                            'quality': 'large' if 'large' in videos else 'medium',
+                            'license': 'free'
+                        })
+                        
+        except Exception as e:
+            print(f"    Pixabay error: {str(e)[:50]}")
+    
+    elif service == 'coverr':
+        # Coverr free API (no key required)
+        try:
+            print(f"    Searching Coverr for: {query}")
+            url = f"https://api.coverr.co/videos"
+            params = {
+                "query": query,
+                "page": page,
+                "per_page": 10
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for video in data.get('videos', []):
+                    # Get HD URL if available
+                    hd_url = video.get('urls', {}).get('sd')
+                    if hd_url:
+                        all_results.append({
+                            'url': hd_url,
+                            'title': video.get('title', query),
+                            'description': video.get('description', ''),
+                            'duration': video.get('duration', 0),
+                            'service': 'coverr',
+                            'quality': 'hd',
+                            'license': 'free'
+                        })
+                        
+        except Exception as e:
+            print(f"    Coverr error: {str(e)[:50]}")
+    
+    return all_results
+
+# ==========================================
+# 8. UTILS: STATUS & DOWNLOAD
 # ==========================================
 def update_status(progress, message, status="processing", file_url=None):
     print(f"--- {progress}% | {message} ---")
@@ -1059,7 +1346,7 @@ def download_asset(path, local):
     return False
 
 # ==========================================
-# 7. SCRIPT & AUDIO
+# 9. SCRIPT & AUDIO
 # ==========================================
 def generate_script(topic, minutes):
     words = int(minutes * 180)
@@ -1173,7 +1460,7 @@ def clone_voice_robust(text, ref_audio, out_path):
         return False
 
 # ==========================================
-# 8. VISUALS & RENDER (GPU ACCELERATED)
+# 10. VISUALS & RENDER (GPU ACCELERATED)
 # ==========================================
 USED_VIDEO_URLS = set()
 
@@ -1185,7 +1472,8 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         dur = max(3.5, sent['end'] - sent['start'])
         
         # Get intelligent query based on sentence analysis
-        query = get_visual_query(sent['text'])
+        query = get_hybrid_visual_query(sent['text'])  # Use AI-powered queries
+        
         out = TEMP_DIR / f"s_{i}.mp4"
         
         print(f"  🔍 Clip {i}: Searching for '{query}'...")
@@ -1356,7 +1644,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         return False
 
 # ==========================================
-# 9. EXECUTION
+# 11. EXECUTION
 # ==========================================
 print("--- 🚀 START ---")
 update_status(1, "Initializing...")
