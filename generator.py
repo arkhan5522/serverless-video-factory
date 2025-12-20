@@ -1169,8 +1169,10 @@ def get_category_locked_query(text, sentence_index, total_sentences):
 
 def calculate_enhanced_relevance_score(video, query, sentence_text, context_keywords, full_script="", topic=""):
     """
-    ENHANCED: Calculate relevance with STRICT category enforcement
-    Now heavily penalizes videos outside the locked category
+    SMART SCORING: Intelligent relevance without being overly strict
+    
+    KEY INSIGHT: If we SEARCHED for something in the category, we should TRUST the results.
+    Don't penalize videos just because uploader didn't write exact category name.
     """
     global VIDEO_CATEGORY, CATEGORY_KEYWORDS
     
@@ -1179,47 +1181,113 @@ def calculate_enhanced_relevance_score(video, query, sentence_text, context_keyw
     # Prepare text
     video_text = (video.get('title', '') + ' ' + video.get('description', '')).lower()
     sentence_lower = sentence_text.lower()
+    query_lower = query.lower()
     
-    # === CRITICAL: CATEGORY LOCK ENFORCEMENT ===
-    # If video doesn't mention category AT ALL, apply massive penalty
-    category_mentioned = False
+    # === SMART CATEGORY VALIDATION ===
+    # Instead of strict penalty, use TRUST-BASED validation:
+    # If our query contains category context, we already filtered the search properly
+    
+    category_trust_score = 0
+    
+    # Check 1: Does video mention category directly?
     if VIDEO_CATEGORY and VIDEO_CATEGORY in video_text:
-        score += 30  # Major bonus for category match
-        category_mentioned = True
+        category_trust_score += 25
+        print(f"      ✓ Category '{VIDEO_CATEGORY}' in video")
     
-    # Check for any category keywords
-    for keyword in CATEGORY_KEYWORDS:
+    # Check 2: Does video mention any category keywords?
+    keyword_matches = 0
+    for keyword in CATEGORY_KEYWORDS[:5]:  # Check top 5 keywords
         if keyword in video_text:
-            score += 10
-            category_mentioned = True
+            keyword_matches += 1
+            category_trust_score += 8
     
-    # STRICT PENALTY: If no category match at all, heavily penalize
-    if not category_mentioned:
-        score -= 60  # Makes it almost impossible to be selected
-        print(f"      ⚠️ Video lacks category '{VIDEO_CATEGORY}' - penalized")
+    if keyword_matches > 0:
+        print(f"      ✓ {keyword_matches} category keywords matched")
     
-    # === 1. QUERY MATCH (25 points) ===
-    query_terms = query.lower().split()
+    # Check 3: CRITICAL - Does our QUERY contain category context?
+    # If yes, trust that Pexels/Pixabay already filtered results for us
+    query_has_category = False
+    if VIDEO_CATEGORY in query_lower:
+        query_has_category = True
+        category_trust_score += 20
+        print(f"      ✓ Query contains category - trusting search API")
+    
+    # Check if query has any category keywords
+    for keyword in CATEGORY_KEYWORDS[:3]:
+        if keyword in query_lower:
+            query_has_category = True
+            category_trust_score += 10
+            break
+    
+    # Check 4: Does query match category TERMS from VISUAL_MAP?
+    if VIDEO_CATEGORY in VISUAL_MAP:
+        category_terms = VISUAL_MAP[VIDEO_CATEGORY]
+        for term in category_terms[:10]:  # Check first 10 terms
+            # Check if any words from the term appear in query
+            term_words = term.split()
+            for term_word in term_words:
+                if len(term_word) > 3 and term_word in query_lower:
+                    category_trust_score += 5
+                    query_has_category = True
+                    break
+    
+    # === SMART PENALTY LOGIC ===
+    # Only apply penalty if ALL conditions fail:
+    # 1. Video doesn't mention category
+    # 2. Video doesn't mention any keywords
+    # 3. Our query ALSO doesn't contain category (means we searched generically)
+    
+    if category_trust_score > 0:
+        # Video or query has category context - GOOD!
+        score += category_trust_score
+    elif not query_has_category:
+        # Video has NO category match AND our query was generic - apply mild penalty
+        score -= 15  # Reduced from -60
+        print(f"      ⚠️ Weak category match (mild penalty)")
+    else:
+        # Query has category, video doesn't mention it explicitly
+        # But that's OK - search API already filtered for us
+        score += 10  # Small bonus for being in search results
+        print(f"      → Query-based trust (no penalty)")
+    
+    # === 1. QUERY MATCH (30 points) ===
+    query_terms = [t for t in query_lower.split() if len(t) > 3 and t not in ['landscape', 'cinematic', 'abstract']]
     query_match_count = 0
+    
     for term in query_terms:
-        if len(term) > 3:
-            if term in video_text:
-                query_match_count += 1
-                score += 8
+        if term in video_text:
+            query_match_count += 1
+            score += 10
     
-    if query.lower() in video_text:
-        score += 10
+    # Bonus for exact phrase
+    if len(query_terms) >= 2:
+        query_phrase = ' '.join(query_terms[:2])
+        if query_phrase in video_text:
+            score += 15
     
-    # === 2. CONTEXT KEYWORDS MATCH (20 points) ===
+    # === 2. CONTEXT KEYWORDS MATCH (25 points) ===
     context_match_count = 0
     for keyword in context_keywords:
-        if keyword in video_text:
-            context_match_count += 1
-            score += 7
-        if keyword in sentence_lower:
-            score += 3
+        if len(keyword) > 3:
+            if keyword in video_text:
+                context_match_count += 1
+                score += 8
+            if keyword in sentence_lower:
+                score += 3
     
-    # === 3. VIDEO QUALITY (15 points) ===
+    # === 3. SEMANTIC RELEVANCE (20 points) ===
+    # Check if video relates to the overall topic/theme
+    # Extract meaningful words from topic/script
+    topic_lower = topic.lower()
+    topic_words = [w for w in re.findall(r'\b\w{5,}\b', topic_lower)][:5]
+    
+    semantic_matches = 0
+    for word in topic_words:
+        if word in video_text:
+            semantic_matches += 1
+            score += 4
+    
+    # === 4. VIDEO QUALITY (15 points) ===
     quality = video.get('quality', '').lower()
     if '4k' in quality or 'uhd' in quality:
         score += 15
@@ -1227,63 +1295,95 @@ def calculate_enhanced_relevance_score(video, query, sentence_text, context_keyw
         score += 12
     elif 'medium' in quality:
         score += 8
+    else:
+        score += 4  # Give some points even for SD
     
     duration = video.get('duration', 0)
     if duration >= 15:
         score += 5
     elif duration >= 10:
         score += 3
+    elif duration >= 5:
+        score += 1
     
-    # === 4. LANDSCAPE VERIFICATION (10 points + penalties) ===
+    # === 5. LANDSCAPE VERIFICATION (10 points + penalties) ===
     landscape_indicators = ['landscape', 'horizontal', 'wide', 'panoramic', 'widescreen', '16:9']
-    portrait_indicators = ['vertical', 'portrait', '9:16', 'instagram', 'tiktok', 'reel']
+    portrait_indicators = ['vertical', 'portrait', '9:16', 'instagram', 'tiktok', 'reel', 'story']
     
     if any(indicator in video_text for indicator in landscape_indicators):
         score += 10
-    elif any(indicator in video_text for indicator in portrait_indicators):
-        score -= 50
     
+    # Check for explicit portrait indicators
+    portrait_detected = False
+    for indicator in portrait_indicators:
+        if indicator in video_text:
+            portrait_detected = True
+            break
+    
+    if portrait_detected:
+        score -= 40  # Penalty for confirmed portrait
+    
+    # Check dimensions
     width = video.get('width', 0)
     height = video.get('height', 0)
     if width and height:
         aspect_ratio = width / height
-        if aspect_ratio >= 1.5:
+        if aspect_ratio >= 1.5:  # Landscape (16:9 or wider)
             score += 10
-        elif aspect_ratio < 1.0:
-            score -= 60  # Severe penalty for portrait
+        elif aspect_ratio >= 1.2:  # Slightly landscape
+            score += 5
+        elif aspect_ratio < 1.0:  # Portrait
+            score -= 50
+            print(f"      ✗ Portrait aspect ratio detected")
     
-    # === 5. INAPPROPRIATE CONTENT DETECTION ===
-    # Blacklist terms that should NEVER appear
-    blacklist = [
-        'belly', 'bikini', 'sexy', 'hot girl', 'attractive woman',
-        'army', 'military', 'weapon', 'gun', 'soldier', 'war',
-        'violence', 'blood', 'gore', 'death',
-        'underwear', 'lingerie', 'swimsuit','hindu','nude','women','lady'
+    # === 6. SMART INAPPROPRIATE CONTENT DETECTION ===
+    # Only block obviously inappropriate content
+    strict_blacklist = [
+        'sexy', 'bikini', 'underwear', 'lingerie', 'swimsuit', 'hot girl',
+        'violence', 'blood', 'gore', 'weapon', 'gun'
     ]
     
-    # If locked to tech/internet/business category, these should NEVER appear
+    # Contextual blacklist - only for certain categories
     if VIDEO_CATEGORY in ['tech', 'technology', 'internet', 'computer', 'digital', 
-                           'business', 'finance', 'data', 'ai', 'software']:
-        for term in blacklist:
-            if term in video_text:
-                score -= 100  # Instant disqualification
-                print(f"      🚫 BLOCKED: Inappropriate term '{term}' detected in video")
+                           'business', 'finance', 'data', 'ai', 'software', 'science']:
+        contextual_blacklist = [
+            'belly', 'fashion model', 'makeup', 'beauty salon',
+            'war', 'military operation', 'combat', 'battlefield'
+        ]
+    else:
+        contextual_blacklist = []
     
-    # Platform quality bias
+    # Check blacklists
+    for term in strict_blacklist:
+        if term in video_text:
+            score -= 80
+            print(f"      🚫 BLOCKED: Inappropriate term '{term}'")
+    
+    for term in contextual_blacklist:
+        if term in video_text:
+            score -= 40  # Moderate penalty, not instant disqualification
+            print(f"      ⚠️ Off-category term '{term}' detected")
+    
+    # === 7. PLATFORM & SOURCE QUALITY ===
     service = video.get('service', '')
     if service == 'pexels':
         score += 5
     elif service == 'pixabay':
         score += 3
     
-    # === BONUS: Perfect Category Alignment ===
-    if category_mentioned and query_match_count >= 2 and context_match_count >= 1:
-        score += 15
+    # === 8. BONUS: Multi-factor Perfect Match ===
+    # If video matches query, context, AND has good quality
+    if query_match_count >= 2 and context_match_count >= 1 and quality in ['hd', 'large', '4k', 'uhd']:
+        score += 10
+        print(f"      ⭐ Perfect match bonus")
     
-    # Random variety
-    score += random.randint(0, 3)
+    # Small random factor for variety (reduced from before)
+    score += random.randint(0, 2)
     
-    return min(100, max(0, score))
+    # Cap between 0-100
+    final_score = min(100, max(0, score))
+    
+    return final_score
 
 # ========================================== 
 # 8. VIDEO SEARCH (Pixabay & Pexels)
@@ -1394,9 +1494,6 @@ def intelligent_video_search(query, service, keys, page=1):
     return all_results
 
 # ========================================== 
-# 9. UTILS
-# ========================================== 
-
 # ==========================================
 # 9. UTILS (FIXED: Updates GitHub Status)
 # ==========================================
@@ -1483,6 +1580,7 @@ def download_asset(path, local):
     except:
         pass
     return False
+
 # ========================================== 
 # 10. SCRIPT & AUDIO
 # ========================================== 
@@ -1595,7 +1693,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
     analyze_script_and_set_category(full_script, topic)
     
     def get_clip_with_category_lock(i, sent, max_retries=4):
-        """Enhanced retry with STRICT category enforcement"""
+        """Enhanced retry with SMART (not strict) category enforcement"""
         dur = max(3.5, sent['end'] - sent['start'])
         
         # Get category-locked query
@@ -1646,8 +1744,15 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
             # Sort by score
             all_results.sort(key=lambda x: x['relevance_score'], reverse=True)
             
-            # STRICT scoring thresholds - only use high-quality matches
-            score_thresholds = [70, 60, 50, 40, 30]  # Stricter thresholds
+            # RELAXED scoring thresholds - accept good matches
+            # Lower thresholds mean we accept videos more easily
+            if attempt == 0:
+                score_thresholds = [60, 50, 40, 30, 20]  # First attempt: prefer quality
+            elif attempt == 1:
+                score_thresholds = [50, 40, 30, 20, 10]  # Second: more relaxed
+            else:
+                score_thresholds = [40, 30, 20, 10, 0]   # Later: accept anything reasonable
+            
             found_link = None
             selected_video = None
             
@@ -1690,6 +1795,12 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
                 except Exception as e:
                     print(f"    ✗ Download failed: {str(e)[:60]}")
                     continue
+            else:
+                # No videos found in this attempt
+                if len(all_results) > 0:
+                    print(f"    ⚠️ {len(all_results)} videos found but all used/low score")
+                else:
+                    print(f"    ⚠️ No videos returned from APIs")
         
         # Fallback - use category-themed gradient
         print(f"  → Clip {i}: Using category-themed fallback")
@@ -1701,6 +1812,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
             "internet": ["0x0f3460:0x533483", "0x16213e:0x533483"],
             "digital": ["0x16213e:0x533483", "0x0f3460:0x16213e"],
             "ai": ["0x0f3460:0x16213e", "0x1a1a2e:0x533483"],
+            "computer": ["0x1a1a2e:0x16213e", "0x0f3460:0x1a1a2e"],
             "business": ["0x1e3a5f:0x2a2d34", "0x1a1a2e:0x2a2d34"],
             "finance": ["0x0f3460:0x1e3a5f", "0x16213e:0x1e3a5f"],
             "nature": ["0x1e4d2b:0x2d5016", "0x1a3a1e:0x2d5016"],
