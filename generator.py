@@ -1397,8 +1397,77 @@ def intelligent_video_search(query, service, keys, page=1):
 # 9. UTILS
 # ========================================== 
 
+# ==========================================
+# 9. UTILS (FIXED: Updates GitHub Status)
+# ==========================================
+
+# Buffer to store logs for the HTML frontend
+LOG_BUFFER = []
+
 def update_status(progress, message, status="processing", file_url=None):
+    """Updates status.json in GitHub repo so HTML can read it"""
+    
+    # 1. Print to Kaggle Console
+    timestamp = time.strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {message}"
     print(f"--- {progress}% | {message} ---")
+    
+    # 2. Add to Log Buffer (Keep last 30 lines)
+    LOG_BUFFER.append(log_entry)
+    if len(LOG_BUFFER) > 30:
+        LOG_BUFFER.pop(0)
+
+    # 3. Get GitHub Credentials
+    repo = os.environ.get('GITHUB_REPOSITORY')
+    token = os.environ.get('GITHUB_TOKEN')
+    
+    # If running locally without secrets, stop here
+    if not repo or not token: 
+        return
+
+    # 4. Prepare Data for HTML
+    path = f"status/status_{JOB_ID}.json"
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    
+    data = {
+        "progress": progress,
+        "message": message,
+        "status": status,
+        "logs": "\n".join(LOG_BUFFER), # Send logs to HTML
+        "timestamp": time.time()
+    }
+    
+    # If we have a Google Drive link, send it
+    if file_url: 
+        data["file_io_url"] = file_url
+    
+    # 5. Send to GitHub API
+    import base64
+    content_json = json.dumps(data)
+    content_b64 = base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
+    
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    try:
+        # Step A: Get existing file SHA (required to update a file)
+        get_req = requests.get(url, headers=headers)
+        sha = get_req.json().get("sha") if get_req.status_code == 200 else None
+        
+        # Step B: Upload new status
+        payload = {
+            "message": f"Update status: {progress}%",
+            "content": content_b64,
+            "branch": "main" 
+        }
+        if sha:
+            payload["sha"] = sha
+            
+        requests.put(url, headers=headers, json=payload)
+    except Exception as e:
+        print(f"⚠️ Failed to update HTML status: {e}")
 
 def download_asset(path, local):
     try:
@@ -1414,7 +1483,6 @@ def download_asset(path, local):
     except:
         pass
     return False
-
 # ========================================== 
 # 10. SCRIPT & AUDIO
 # ========================================== 
