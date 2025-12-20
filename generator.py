@@ -208,7 +208,7 @@ def create_ass_file(sentences, ass_file):
                 text = text.upper()
             
             # Smart text wrapping
-            MAX_CHARS = 30
+            MAX_CHARS = 35
             words = text.split()
             lines = []
             current_line = []
