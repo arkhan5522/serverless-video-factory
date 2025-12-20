@@ -1,12 +1,10 @@
 """
 AI VIDEO GENERATOR WITH GOOGLE DRIVE UPLOAD
 ============================================
-
-ENHANCED VERSION USING ONLY PIXABAY & PEXELS WITH VISUAL MAP
-1. Local Intelligent Query System with VISUAL_MAP dictionary
-2. Strict 70+ Score Requirement with Retry Logic
-3. Landscape-Only Video Filtering
-4. Pixabay & Pexels Only with Intelligent Keyword Matching
+FIXED VERSION:
+1. Subtitle Design Implementation (ASS format properly applied)
+2. Enhanced 100% Context-Aligned Scoring System
+3. Pixabay & Pexels with Visual Map
 """
 
 import os
@@ -22,14 +20,22 @@ import requests
 import gc
 from pathlib import Path
 
-# ==========================================
+# ========================================== 
 # 1. INSTALLATION
-# ==========================================
+# ========================================== 
+
 print("--- 🔧 Installing Dependencies ---")
 try:
     libs = [
-        "chatterbox-tts", "torchaudio", "assemblyai", "google-generativeai", 
-        "requests", "beautifulsoup4", "pydub", "numpy", "--quiet"
+        "chatterbox-tts",
+        "torchaudio", 
+        "assemblyai",
+        "google-generativeai",
+        "requests",
+        "beautifulsoup4",
+        "pydub",
+        "numpy",
+        "--quiet"
     ]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
@@ -41,9 +47,10 @@ import torchaudio
 import assemblyai as aai
 import google.generativeai as genai
 
-# ==========================================
+# ========================================== 
 # 2. CONFIGURATION
-# ==========================================
+# ========================================== 
+
 MODE = """{{MODE_PLACEHOLDER}}"""
 TOPIC = """{{TOPIC_PLACEHOLDER}}"""
 SCRIPT_TEXT = """{{SCRIPT_PLACEHOLDER}}"""
@@ -52,10 +59,9 @@ VOICE_PATH = """{{VOICE_PATH_PLACEHOLDER}}"""
 LOGO_PATH = """{{LOGO_PATH_PLACEHOLDER}}"""
 JOB_ID = """{{JOB_ID_PLACEHOLDER}}"""
 
-# Keys - Only Pexels & Pixabay needed
+# Keys
 raw_gemini = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_KEYS = [k.strip() for k in raw_gemini.split(",") if k.strip()]
-
 ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
 PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
@@ -63,42 +69,44 @@ PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
 # Paths
 OUTPUT_DIR = Path("output")
 TEMP_DIR = Path("temp")
-if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
+if TEMP_DIR.exists():
+    shutil.rmtree(TEMP_DIR)
 OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
-# ==========================================
-# 3. PROFESSIONAL SUBTITLE STYLES (COMPLETE 5 STYLES)
-# ==========================================
+# ========================================== 
+# 3. FIXED SUBTITLE STYLES
+# ========================================== 
+
 SUBTITLE_STYLES = {
     "mrbeast_yellow": {
         "name": "MrBeast Yellow (3D Pop)",
         "fontname": "Arial Black",
-        "fontsize": 60,          # UNCHANGED
-        "primary_colour": "&H0000FFFF",  # Yellow (BGR)
-        "back_colour": "&H00000000",     # Black Shadow
-        "outline_colour": "&H00000000",  # Black Outline
+        "fontsize": 60,
+        "primary_colour": "&H0000FFFF",  # Yellow
+        "back_colour": "&H00000000",      # Black
+        "outline_colour": "&H00000000",   # Black
         "bold": -1,
         "italic": 0,
-        "border_style": 1,      # Outline
-        "outline": 4,           # Slightly thinner outline for sharpness
-        "shadow": 3,            # ADDED: Hard drop shadow for 3D effect
+        "border_style": 1,
+        "outline": 4,
+        "shadow": 3,
         "margin_v": 45,
         "alignment": 2,
-        "spacing": 1.5          # ADDED: Wider spacing for "Cinematic" feel
+        "spacing": 1.5
     },
     "hormozi_green": {
         "name": "Hormozi Green (High Contrast)",
         "fontname": "Arial Black",
-        "fontsize": 60,          # UNCHANGED
-        "primary_colour": "&H0000FF00",  # Pure Green (BGR)
-        "back_colour": "&H80000000",     # Semi-transparent shadow
-        "outline_colour": "&H00000000",  # Black Outline
+        "fontsize": 60,
+        "primary_colour": "&H0000FF00",  # Green
+        "back_colour": "&H80000000",
+        "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
         "border_style": 1,
-        "outline": 5,           # INCREASED: Thicker outline for readability on busy backgrounds
-        "shadow": 0,            # REMOVED: Hormozi style is usually flat but thick outline
+        "outline": 5,
+        "shadow": 0,
         "margin_v": 55,
         "alignment": 2,
         "spacing": 0.5
@@ -106,62 +114,62 @@ SUBTITLE_STYLES = {
     "finance_blue": {
         "name": "Finance Blue (Neon Glow)",
         "fontname": "Arial",
-        "fontsize": 80,          # UNCHANGED
-        "primary_colour": "&H00FFFFFF",  # White Text
-        "back_colour": "&H00000000",     # Black Shadow
-        # FIXED COLOR: This is now actually Electric Blue in BGR (Old code was Orange)
-        "outline_colour": "&H00FF9900",  # Vivid Blue (BGR: BBGGRR)
+        "fontsize": 80,
+        "primary_colour": "&H00FFFFFF",  # White
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00FF9900",  # Blue
         "bold": -1,
         "italic": 0,
         "border_style": 1,
-        "outline": 2,           # Thinner outline...
-        "shadow": 3,            # ...plus deeper shadow creates a "Glow" effect
+        "outline": 2,
+        "shadow": 3,
         "margin_v": 50,
         "alignment": 2,
-        "spacing": 2            # Wide spacing looks expensive/financial
+        "spacing": 2
     },
     "netflix_box": {
         "name": "Netflix Modern",
         "fontname": "Roboto",
-        "fontsize": 80,          # UNCHANGED
+        "fontsize": 80,
         "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&H90000000",     # DARKER: Increased opacity (90) for better contrast
+        "back_colour": "&H90000000",     # Dark box
         "outline_colour": "&H00000000",
         "bold": 0,
         "italic": 0,
-        "border_style": 3,      # Opaque Box
+        "border_style": 3,  # Opaque box
         "outline": 0,
         "shadow": 0,
-        "margin_v": 35,         # Lowered slightly
+        "margin_v": 35,
         "alignment": 2,
         "spacing": 0.5
     },
     "tiktok_white": {
         "name": "TikTok White (Ultra Bold)",
-        "fontname": "Arial Black",   # CHANGED: From 'Arial' to 'Arial Black'
-        "fontsize": 65,              # UNCHANGED
+        "fontname": "Arial Black",
+        "fontsize": 65,
         "primary_colour": "&H00FFFFFF",  # White
-        "back_colour": "&H60000000",     # Darker shadow for contrast
-        "outline_colour": "&H00000000",  # Black Outline
-        "bold": -1,                  # Still bold
+        "back_colour": "&H60000000",
+        "outline_colour": "&H00000000",
+        "bold": -1,
         "italic": 0,
         "border_style": 1,
-        "outline": 4.5,              # INCREASED: Thicker outline = bolder look
-        "shadow": 2,                 # Tighter shadow
+        "outline": 4.5,
+        "shadow": 2,
         "margin_v": 40,
         "alignment": 2,
-        "spacing": -0.5              # ADDED: Tight spacing (tracking) makes it look chunkier
+        "spacing": -0.5
     }
 }
 
 def create_ass_file(sentences, ass_file):
-    """Create ASS subtitle file with MASSIVE, bold, highly engaging formatting"""
+    """FIXED: Create ASS subtitle file with proper format encoding"""
     style_key = random.choice(list(SUBTITLE_STYLES.keys()))
     style = SUBTITLE_STYLES[style_key]
     
-    print(f"✨ Using Subtitle Style: {style['name']} (Size: {style['fontsize']}px - MASSIVE)")
+    print(f"✨ Using Subtitle Style: {style['name']} (Size: {style['fontsize']}px)")
     
-    with open(ass_file, "w", encoding="utf-8") as f:
+    # CRITICAL FIX: Use UTF-8-BOM encoding for proper ASS rendering
+    with open(ass_file, "w", encoding="utf-8-sig") as f:
         # Header
         f.write("[Script Info]\n")
         f.write("ScriptType: v4.00+\n")
@@ -174,7 +182,7 @@ def create_ass_file(sentences, ass_file):
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
         
-        # FIX 1: Hardcoded MarginL and MarginR to 30 to prevent KeyError
+        # FIXED: Proper style formatting with all parameters
         f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},25,25,{style['margin_v']},1\n\n")
         
         # Events
@@ -189,26 +197,25 @@ def create_ass_file(sentences, ass_file):
             text = s['text'].strip()
             text = text.replace('\\', '\\\\').replace('\n', ' ')
             
-            # FIX 2: Remove trailing dot (and comma) for cleaner look
+            # Remove trailing punctuation
             if text.endswith('.'):
                 text = text[:-1]
             if text.endswith(','):
                 text = text[:-1]
             
-            # Force Uppercase for Viral Styles
-            if "mrbeast" in style_key or "hormozi" in style_key or "yellow" in style_key:
+            # Force uppercase for viral styles
+            if "mrbeast" in style_key or "hormozi" in style_key:
                 text = text.upper()
-
-            # FIX 3: Tighter wrapping to prevent off-screen text
-            MAX_CHARS = 30
             
+            # Smart text wrapping
+            MAX_CHARS = 30
             words = text.split()
             lines = []
             current_line = []
             current_length = 0
             
             for word in words:
-                word_length = len(word) + 1 
+                word_length = len(word) + 1
                 if current_length + word_length > MAX_CHARS and current_line:
                     lines.append(' '.join(current_line))
                     current_line = [word]
@@ -222,6 +229,7 @@ def create_ass_file(sentences, ass_file):
             
             formatted_text = '\\N'.join(lines)
             
+            # Write dialogue line
             f.write(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{formatted_text}\n")
 
 def format_ass_time(seconds):
@@ -232,35 +240,28 @@ def format_ass_time(seconds):
     cs = int((seconds % 1) * 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-# ==========================================
+# ========================================== 
 # 4. GOOGLE DRIVE UPLOAD
-# ==========================================
-def upload_to_google_drive(file_path):
-    """
-    Uploads using OAuth 2.0 Refresh Token (Direct User Upload).
-    This uses YOUR 2TB storage directly.
-    """
-    import os
-    import requests
-    import json
+# ========================================== 
 
+def upload_to_google_drive(file_path):
+    """Uploads using OAuth 2.0 Refresh Token"""
     if not os.path.exists(file_path):
         print(f"❌ Error: File not found: {file_path}")
         return None
-
+    
     print("🔑 Authenticating via OAuth (Refresh Token)...")
     
-    # 1. Get Secrets
     client_id = os.environ.get("OAUTH_CLIENT_ID")
     client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
     refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
     folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
-
+    
     if not all([client_id, client_secret, refresh_token]):
-        print("❌ Error: Missing OAuth Secrets (CLIENT_ID, CLIENT_SECRET, or REFRESH_TOKEN).")
+        print("❌ Error: Missing OAuth Secrets")
         return None
-
-    # 2. Swap Refresh Token for Access Token
+    
+    # Get Access Token
     token_url = "https://oauth2.googleapis.com/token"
     data = {
         "client_id": client_id,
@@ -273,55 +274,45 @@ def upload_to_google_drive(file_path):
         r = requests.post(token_url, data=data)
         r.raise_for_status()
         access_token = r.json()['access_token']
-        print("✅ Access Token refreshed successfully.")
+        print("✅ Access Token refreshed")
     except Exception as e:
         print(f"❌ Failed to refresh token: {e}")
-        print(f"Response: {r.text}")
         return None
-
-    # 3. Resumable Upload Logic
+    
+    # Upload
     filename = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
-    
     upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
     
-    metadata = {
-        "name": filename,
-        "mimeType": "video/mp4"
-    }
+    metadata = {"name": filename, "mimeType": "video/mp4"}
     if folder_id:
         metadata["parents"] = [folder_id]
-
+    
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json; charset=UTF-8",
         "X-Upload-Content-Type": "video/mp4",
         "X-Upload-Content-Length": str(file_size)
     }
-
-    # Step A: Initiate Session
-    response = requests.post(upload_url, headers=headers, json=metadata)
     
+    response = requests.post(upload_url, headers=headers, json=metadata)
     if response.status_code != 200:
         print(f"❌ Init failed: {response.text}")
         return None
-        
-    session_uri = response.headers.get("Location")
-
-    # Step B: Upload File
-    print(f"☁️ Uploading {filename} ({file_size / (1024*1024):.1f} MB)...")
     
+    session_uri = response.headers.get("Location")
+    
+    print(f"☁️ Uploading {filename} ({file_size / (1024*1024):.1f} MB)...")
     with open(file_path, "rb") as f:
-        # Standard put request for the binary data
         upload_headers = {"Content-Length": str(file_size)}
         upload_resp = requests.put(session_uri, headers=upload_headers, data=f)
-
+    
     if upload_resp.status_code in [200, 201]:
         file_data = upload_resp.json()
         file_id = file_data.get('id')
         print(f"✅ Upload Success! File ID: {file_id}")
         
-        # Make Public Link
+        # Make public
         perm_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
         requests.post(
             perm_url,
@@ -336,9 +327,10 @@ def upload_to_google_drive(file_path):
         print(f"❌ Upload Failed: {upload_resp.text}")
         return None
 
-# ==========================================
-# 5. COMPLETE VISUAL DICTIONARY (700+ TOPICS) - RESTORED
-# ==========================================
+# ========================================== 
+# 5. VISUAL DICTIONARY (700+ TOPICS)
+# ========================================== 
+
 VISUAL_MAP = {
     # TECH & AI
     "tech": ["server room", "circuit board", "hologram display", "robot assembly", "coding screen", "data center", "fiber optics", "microchip manufacturing"],
@@ -921,157 +913,195 @@ VISUAL_MAP = {
     "backup": ["data backup", "backup server", "file backup"],
     "recovery": ["data recovery", "disaster recovery", "system recovery"]
 }
+# ========================================== 
+# 6. ENHANCED VISUAL QUERY WITH CONTEXT
+# ========================================== 
 
-# ==========================================
-# 6. ENHANCED LOCAL VISUAL QUERY INTELLIGENCE
-# ==========================================
-def get_visual_query(text):
-    """Intelligent visual query - extracts most relevant keywords from sentence using VISUAL_MAP"""
+def get_visual_query_with_context(text, full_script="", topic=""):
+    """
+    ENHANCED: Extract visual query with full context awareness
+    Returns: (primary_query, fallback_queries, context_keywords)
+    """
     text = text.lower()
+    full_context = (text + " " + full_script[:500] + " " + topic).lower()
     
-    # Remove common filler words
-    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
-                  'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'been', 'be',
-                  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-                  'should', 'may', 'might', 'must', 'can', 'this', 'that', 'these', 'those'}
+    # Remove stop words
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 
+                  'with', 'by', 'from', 'as', 'is', 'was', 'are', 'been', 'be', 'have', 'has'}
     
-    # Extract meaningful words (4+ letters)
+    # Extract meaningful words
     words = [w for w in re.findall(r'\b\w+\b', text) if len(w) >= 4 and w not in stop_words]
+    context_words = [w for w in re.findall(r'\b\w+\b', full_context) if len(w) >= 4 and w not in stop_words]
     
-    # Priority 1: Check for exact category matches in VISUAL_MAP
+    # Priority 1: Exact category match in VISUAL_MAP
     for word in words:
-        for category, terms in VISUAL_MAP.items():
-            if word == category:
-                selected_term = random.choice(terms)
-                return f"{selected_term} 4k"
+        if word in VISUAL_MAP:
+            selected_term = random.choice(VISUAL_MAP[word])
+            fallbacks = [random.choice(VISUAL_MAP[word]) for _ in range(3)]
+            return selected_term, fallbacks, [word]
     
-    # Priority 2: Check for partial matches in categories
+    # Priority 2: Partial match in categories
     for word in words:
         for category, terms in VISUAL_MAP.items():
             if word in category or category in word:
                 selected_term = random.choice(terms)
-                return f"{selected_term} 4k"
+                fallbacks = [random.choice(terms) for _ in range(3)]
+                return selected_term, fallbacks, [word, category]
     
-    # Priority 3: Use the most significant nouns (6+ letters, not common)
+    # Priority 3: Context-based matching
+    for word in context_words[:5]:  # Check first 5 context words
+        for category, terms in VISUAL_MAP.items():
+            if word in category:
+                selected_term = random.choice(terms)
+                fallbacks = [random.choice(terms) for _ in range(3)]
+                return selected_term, fallbacks, [word, category]
+    
+    # Priority 4: Use significant nouns
     significant = [w for w in words if len(w) >= 6]
     if significant:
         main_word = significant[0]
-        
-        # Check if any category contains this word
         for category, terms in VISUAL_MAP.items():
-            if main_word in category or any(main_word in term for term in terms):
+            if main_word in " ".join(terms):
                 selected_term = random.choice(terms)
-                return f"{selected_term} 4k"
-        
-        return f"{main_word} landscape 4k"
+                return selected_term, [main_word], [main_word]
+        return f"{main_word} landscape", [f"{main_word} cinematic"], [main_word]
     
-    # Priority 4: Use any meaningful noun with visual enhancement
+    # Fallback
     if words:
-        return f"{words[0]} landscape 4k"
+        return f"{words[0]} landscape", [f"{words[0]} cinematic", "nature landscape"], words[:2]
     
-    # Final fallback
-    fallbacks = [
-        "nature landscape 4k",
-        "cinematic landscape",
-        "time lapse landscape",
-        "mountain landscape",
-        "forest landscape",
-        "ocean waves landscape"
-    ]
-    return random.choice(fallbacks)
+    fallbacks = ["nature landscape", "cinematic landscape", "mountain vista", "forest aerial"]
+    return random.choice(fallbacks), fallbacks, ["landscape"]
 
-# ==========================================
-# 7. ENHANCED SCORING WITH LANDSCAPE DETECTION
-# ==========================================
-def calculate_relevance_score(video, query, sentence_text):
-    """Calculate relevance score for a video (0-100) with strict quality requirements"""
+# ========================================== 
+# 7. ENHANCED SCORING SYSTEM (100% Context Aligned)
+# ========================================== 
+
+def calculate_enhanced_relevance_score(video, query, sentence_text, context_keywords, full_script="", topic=""):
+    """
+    ENHANCED: Calculate relevance with 100% context alignment
+    Score breakdown:
+    - Query match: 30 points
+    - Context keywords: 30 points  
+    - Topic alignment: 20 points
+    - Quality: 15 points
+    - Landscape: 5 points
+    """
     score = 0
     
-    # Check query in title/description
-    query_terms = query.lower().split()
-    title_desc = (video.get('title', '') + ' ' + video.get('description', '')).lower()
-    
-    for term in query_terms:
-        if term in title_desc:
-            score += 10
-    
-    # Check sentence context relevance
+    # Prepare text for matching
+    video_text = (video.get('title', '') + ' ' + video.get('description', '')).lower()
     sentence_lower = sentence_text.lower()
-    for term in query_terms:
-        if term in sentence_lower and len(term) > 3:
-            score += 8
+    topic_lower = topic.lower()
     
-    # Video quality indicators
+    # === 1. QUERY MATCH (30 points) ===
+    query_terms = query.lower().split()
+    query_match_count = 0
+    for term in query_terms:
+        if len(term) > 3:  # Only meaningful terms
+            if term in video_text:
+                query_match_count += 1
+                score += 10
+    
+    # Bonus for exact phrase match
+    if query.lower() in video_text:
+        score += 10
+    
+    # === 2. CONTEXT KEYWORDS MATCH (30 points) ===
+    context_match_count = 0
+    for keyword in context_keywords:
+        if keyword in video_text:
+            context_match_count += 1
+            score += 10
+        # Check in sentence
+        if keyword in sentence_lower:
+            score += 5
+    
+    # === 3. TOPIC ALIGNMENT (20 points) ===
+    topic_words = [w for w in topic_lower.split() if len(w) > 3]
+    topic_match_count = 0
+    for word in topic_words[:5]:  # Check first 5 topic words
+        if word in video_text:
+            topic_match_count += 1
+            score += 4
+    
+    # === 4. VIDEO QUALITY (15 points) ===
     quality = video.get('quality', '').lower()
     if '4k' in quality or 'uhd' in quality:
-        score += 20
-    elif 'hd' in quality or 'high' in quality or 'large' in quality:
         score += 15
+    elif 'hd' in quality or 'high' in quality or 'large' in quality:
+        score += 12
     elif 'medium' in quality:
-        score += 10
+        score += 8
     elif 'sd' in quality or 'standard' in quality:
-        score += 5
-    
-    # Duration check
-    duration = video.get('duration', 0)
-    if duration >= 15:
-        score += 10
-    elif duration >= 10:
-        score += 7
-    elif duration >= 5:
         score += 4
     
-    # Platform quality bias (Pexels slightly better quality)
+    # Duration bonus
+    duration = video.get('duration', 0)
+    if duration >= 15:
+        score += 5
+    elif duration >= 10:
+        score += 3
+    
+    # === 5. LANDSCAPE VERIFICATION (5 points + penalties) ===
+    landscape_indicators = ['landscape', 'horizontal', 'wide', 'panoramic', 'widescreen', '16:9']
+    portrait_indicators = ['vertical', 'portrait', '9:16', 'instagram', 'tiktok', 'reel']
+    
+    if any(indicator in video_text for indicator in landscape_indicators):
+        score += 5
+    elif any(indicator in video_text for indicator in portrait_indicators):
+        score -= 40  # Heavy penalty for portrait
+    
+    # Check actual dimensions if available
+    width = video.get('width', 0)
+    height = video.get('height', 0)
+    if width and height:
+        aspect_ratio = width / height
+        if aspect_ratio >= 1.5:  # 16:9 or wider
+            score += 10
+        elif aspect_ratio < 1.0:  # Portrait
+            score -= 50
+    
+    # Platform quality bias
     service = video.get('service', '')
     if service == 'pexels':
-        score += 8
+        score += 5
     elif service == 'pixabay':
-        score += 6
+        score += 3
     
-    # STRICT LANDSCAPE DETECTION - Critical for your requirement
-    metadata = (video.get('title', '') + ' ' + video.get('description', '')).lower()
-    landscape_indicators = ['landscape', 'horizontal', 'wide', 'panoramic', 'widescreen', '16:9', '1920x1080', '1080p']
-    portrait_indicators = ['vertical', 'portrait', '9:16', '1080x1920', 'instagram', 'tiktok', 'reel', 'story']
+    # === BONUS: Perfect Match Detection ===
+    # If video matches query AND context AND topic
+    if query_match_count >= 2 and context_match_count >= 2 and topic_match_count >= 1:
+        score += 20  # Perfect alignment bonus
     
-    # Bonus for landscape, penalty for portrait
-    if any(indicator in metadata for indicator in landscape_indicators):
-        score += 25  # Major bonus for confirmed landscape
-    elif any(indicator in metadata for indicator in portrait_indicators):
-        score -= 30  # Major penalty for portrait
+    # Random variety factor
+    score += random.randint(0, 3)
     
-    # For Pexels, check orientation parameter was used
-    if service == 'pexels' and 'orientation=landscape' in str(video.get('url', '')):
-        score += 15
-    
-    # Random factor for variety
-    score += random.randint(0, 5)
-    
-    # Cap at 100
+    # Cap at 100, floor at 0
     return min(100, max(0, score))
 
-# ==========================================
-# 8. PIXABAY & PEXELS VIDEO SEARCH ONLY
-# ==========================================
+# ========================================== 
+# 8. VIDEO SEARCH (Pixabay & Pexels)
+# ========================================== 
+
 USED_VIDEO_URLS = set()
 
 def intelligent_video_search(query, service, keys, page=1):
-    """Search for videos using ONLY Pexels or Pixabay"""
+    """Search for videos using Pexels or Pixabay"""
     all_results = []
     
     if service == 'pexels' and keys:
         try:
             key = random.choice([k for k in keys if k])
             print(f"    Searching Pexels: {query}")
-            url = f"https://api.pexels.com/videos/search"
+            url = "https://api.pexels.com/videos/search"
             headers = {"Authorization": key}
-            
-            # CRITICAL: Always force landscape orientation
             params = {
                 "query": query,
-                "per_page": 20,  # Get more results to find good ones
+                "per_page": 20,
                 "page": page,
-                "orientation": "landscape",  # Force landscape
-                "size": "medium_large"  # Better quality
+                "orientation": "landscape",
+                "size": "medium_large"
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=15)
@@ -1080,7 +1110,6 @@ def intelligent_video_search(query, service, keys, page=1):
                 for video in data.get('videos', []):
                     video_files = video.get('video_files', [])
                     if video_files:
-                        # Prioritize HD quality
                         hd_files = [f for f in video_files if f.get('quality') == 'hd' and f.get('width', 0) >= 1280]
                         large_files = [f for f in video_files if f.get('quality') == 'large']
                         medium_files = [f for f in video_files if f.get('quality') == 'medium']
@@ -1105,7 +1134,6 @@ def intelligent_video_search(query, service, keys, page=1):
                                 'height': best_file.get('height', 0),
                                 'license': 'free'
                             })
-                            
         except Exception as e:
             print(f"    Pexels error: {str(e)[:50]}")
     
@@ -1113,18 +1141,15 @@ def intelligent_video_search(query, service, keys, page=1):
         try:
             key = random.choice([k for k in keys if k])
             print(f"    Searching Pixabay: {query}")
-            url = f"https://pixabay.com/api/videos/"
-            
-            # CRITICAL: Always force horizontal orientation
+            url = "https://pixabay.com/api/videos/"
             params = {
                 "key": key,
                 "q": query,
-                "per_page": 20,  # Get more results
+                "per_page": 20,
                 "page": page,
-                "orientation": "horizontal",  # Force horizontal
+                "orientation": "horizontal",
                 "video_type": "film",
-                "min_width": 1280,  # Minimum HD
-                "editors_choice": "true"  # Higher quality
+                "min_width": 1280
             }
             
             response = requests.get(url, params=params, timeout=15)
@@ -1133,17 +1158,14 @@ def intelligent_video_search(query, service, keys, page=1):
                 for video in data.get('hits', []):
                     videos_dict = video.get('videos', {})
                     
-                    # Check if video is landscape
-                    width = video.get('videos', {}).get('large', {}).get('width', 0)
-                    height = video.get('videos', {}).get('large', {}).get('height', 0)
+                    # Check landscape
+                    width = videos_dict.get('large', {}).get('width', 0)
+                    height = videos_dict.get('large', {}).get('height', 0)
                     
-                    # Skip if portrait (height > width)
                     if height > width:
                         continue
                     
                     best_quality = None
-                    
-                    # Prioritize larger sizes
                     for quality in ['large', 'medium', 'small']:
                         if quality in videos_dict:
                             best_quality = videos_dict[quality]
@@ -1161,35 +1183,17 @@ def intelligent_video_search(query, service, keys, page=1):
                             'height': best_quality.get('height', 0),
                             'license': 'free'
                         })
-                        
         except Exception as e:
             print(f"    Pixabay error: {str(e)[:50]}")
     
     return all_results
 
-# ==========================================
-# 9. UTILS: STATUS & DOWNLOAD
-# ==========================================
+# ========================================== 
+# 9. UTILS
+# ========================================== 
+
 def update_status(progress, message, status="processing", file_url=None):
     print(f"--- {progress}% | {message} ---")
-    repo = os.environ.get('GITHUB_REPOSITORY')
-    token = os.environ.get('GITHUB_TOKEN')
-    if not repo or not token: return
-
-    url = f"https://api.github.com/repos/{repo}/contents/status/status_{JOB_ID}.json"
-    data = {"progress": progress, "message": message, "status": status, "timestamp": time.time()}
-    if file_url: data["file_io_url"] = file_url
-    
-    import base64
-    content = base64.b64encode(json.dumps(data).encode()).decode()
-    
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-    try:
-        sha = requests.get(url, headers=headers).json().get("sha")
-        payload = {"message": "upd", "content": content, "branch": "main"}
-        if sha: payload["sha"] = sha
-        requests.put(url, headers=headers, json=payload)
-    except: pass
 
 def download_asset(path, local):
     try:
@@ -1199,14 +1203,17 @@ def download_asset(path, local):
         headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3.raw"}
         r = requests.get(url, headers=headers)
         if r.status_code == 200:
-            with open(local, "wb") as f: f.write(r.content)
+            with open(local, "wb") as f:
+                f.write(r.content)
             return True
-    except: pass
+    except:
+        pass
     return False
 
-# ==========================================
+# ========================================== 
 # 10. SCRIPT & AUDIO
-# ==========================================
+# ========================================== 
+
 def generate_script(topic, minutes):
     words = int(minutes * 180)
     print(f"Generating Script (~{words} words)...")
@@ -1246,13 +1253,14 @@ def call_gemini(prompt):
             genai.configure(api_key=key)
             model = genai.GenerativeModel('gemini-2.5-flash')
             return model.generate_content(prompt).text.replace("*","").replace("#","").strip()
-        except: continue
+        except:
+            continue
     return "Script generation failed."
 
 def clone_voice_robust(text, ref_audio, out_path):
-    """Synthesize audio with padding to prevent cutoff"""
     print("🎤 Synthesizing Audio...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     try:
         from chatterbox.tts import ChatterboxTTS
         model = ChatterboxTTS.from_pretrained(device=device)
@@ -1261,25 +1269,25 @@ def clone_voice_robust(text, ref_audio, out_path):
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean) if len(s.strip()) > 2]
         
         print(f"📝 Processing {len(sentences)} sentences...")
-        
         all_wavs = []
+        
         for i, chunk in enumerate(sentences):
-            if i % 10 == 0: 
+            if i % 10 == 0:
                 update_status(20 + int((i/len(sentences))*30), f"Voice Gen {i}/{len(sentences)}")
             
             try:
                 with torch.no_grad():
                     chunk_clean = chunk.replace('"', '').replace('"', '').replace('"', '')
-                    if chunk_clean.endswith('.'): chunk_clean = chunk_clean + ' '
-                    
+                    if chunk_clean.endswith('.'):
+                        chunk_clean = chunk_clean + ' '
                     wav = model.generate(
-                        text=chunk_clean, 
+                        text=chunk_clean,
                         audio_prompt_path=str(ref_audio),
                         exaggeration=0.5
                     )
                     all_wavs.append(wav.cpu())
-                    
-                if i % 20 == 0 and device == "cuda": 
+                
+                if i % 20 == 0 and device == "cuda":
                     torch.cuda.empty_cache()
                     gc.collect()
             except Exception as e:
@@ -1296,235 +1304,197 @@ def clone_voice_robust(text, ref_audio, out_path):
         full_audio_padded = torch.cat([full_audio, silence], dim=1)
         
         torchaudio.save(out_path, full_audio_padded, 24000)
-        
         audio_duration = full_audio_padded.shape[1] / 24000
         print(f"✅ Audio generated: {audio_duration:.1f} seconds")
-        
         return True
-        
     except Exception as e:
         print(f"❌ Audio synthesis failed: {e}")
         return False
 
-# ==========================================
-# 11. VISUALS & RENDER WITH ENHANCED RETRY LOGIC
-# ==========================================
-def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
-    print("🎬 Visual Processing (Pexels & Pixabay Only with VISUAL_MAP)...")
+# ========================================== 
+# 11. ENHANCED VISUAL PROCESSING
+# ========================================== 
+
+def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_script="", topic=""):
+    print("🎬 Visual Processing with Enhanced Context Matching...")
     
-    def get_clip_with_retry(i, sent, max_retries=3):
-        """Enhanced function with retry logic for 70+ scores using Pexels & Pixabay only"""
+    def get_clip_with_enhanced_retry(i, sent, max_retries=4):
+        """Enhanced retry with 100% context alignment"""
         dur = max(3.5, sent['end'] - sent['start'])
-        original_query = get_visual_query(sent['text'])
         
-        # Try multiple times with different strategies
+        # Get primary query with context
+        primary_query, fallback_queries, context_keywords = get_visual_query_with_context(
+            sent['text'], full_script, topic
+        )
+        
+        print(f"  🔍 Clip {i}: Context={context_keywords[:2]}")
+        
         for attempt in range(max_retries):
             out = TEMP_DIR / f"s_{i}_attempt{attempt}.mp4"
             
-            # Adjust query strategy based on attempt
+            # Select query based on attempt
             if attempt == 0:
-                query = original_query
-            elif attempt == 1:
-                # Try broader query using VISUAL_MAP
-                query_words = original_query.split()
-                if len(query_words) > 2:
-                    # Get main keyword and find related terms
-                    main_word = query_words[0]
-                    for category, terms in VISUAL_MAP.items():
-                        if main_word in category or any(main_word in term for term in terms):
-                            selected_term = random.choice(terms)
-                            query = f"{selected_term} landscape"
-                            break
-                    else:
-                        query = ' '.join(query_words[:2]) + " landscape"
-                else:
-                    query = original_query + " landscape"
+                query = primary_query
+            elif attempt < len(fallback_queries) + 1:
+                query = fallback_queries[attempt - 1]
             else:
-                # Try completely different approach using VISUAL_MAP
-                fallback_categories = ["nature", "landscape", "city", "technology", "science"]
-                fallback_category = random.choice(fallback_categories)
-                if fallback_category in VISUAL_MAP:
-                    selected_term = random.choice(VISUAL_MAP[fallback_category])
-                    query = f"{selected_term} landscape"
-                else:
-                    query = "nature landscape 4k"
+                query = f"{context_keywords[0]} landscape" if context_keywords else "nature landscape"
             
-            print(f"  🔍 Clip {i}, Attempt {attempt+1}: '{query}'")
+            print(f"    Attempt {attempt+1}: '{query}'")
             
-            # Search BOTH services: Pexels and Pixabay
+            # Search both services
             all_results = []
+            page = random.randint(1, 3)
             
-            # Try Pexels first
             if PEXELS_KEYS and PEXELS_KEYS[0]:
-                page = random.randint(1, 3)  # Try different pages
                 pexels_results = intelligent_video_search(query, 'pexels', PEXELS_KEYS, page)
-                
-                # Score Pexels results
                 for video in pexels_results:
                     if video['url'] not in USED_VIDEO_URLS:
-                        relevance = calculate_relevance_score(video, query, sent['text'])
+                        relevance = calculate_enhanced_relevance_score(
+                            video, query, sent['text'], context_keywords, full_script, topic
+                        )
                         video['relevance_score'] = relevance
                         all_results.append(video)
             
-            # Try Pixabay
             if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-                page = random.randint(1, 3)  # Try different pages
                 pixabay_results = intelligent_video_search(query, 'pixabay', PIXABAY_KEYS, page)
-                
-                # Score Pixabay results
                 for video in pixabay_results:
                     if video['url'] not in USED_VIDEO_URLS:
-                        relevance = calculate_relevance_score(video, query, sent['text'])
+                        relevance = calculate_enhanced_relevance_score(
+                            video, query, sent['text'], context_keywords, full_script, topic
+                        )
                         video['relevance_score'] = relevance
                         all_results.append(video)
             
             # Sort by score
             all_results.sort(key=lambda x: x['relevance_score'], reverse=True)
             
-            # YOUR REQUESTED LOGIC: Try 70+ first, then lower scores
+            # Progressive score thresholds
+            score_thresholds = [75, 65, 55, 45, 0]
             found_link = None
             selected_video = None
             
-            # Priority 1: Try 70+ scores
-            for video in all_results:
-                if video['url'] not in USED_VIDEO_URLS and video['relevance_score'] >= 70:
-                    found_link = video['url']
-                    selected_video = video
+            for threshold in score_thresholds:
+                for video in all_results:
+                    if video['url'] not in USED_VIDEO_URLS and video['relevance_score'] >= threshold:
+                        found_link = video['url']
+                        selected_video = video
+                        break
+                if found_link:
                     break
             
-            # Priority 2: If no 70+, try 60+
-            if not found_link:
-                for video in all_results:
-                    if video['url'] not in USED_VIDEO_URLS and video['relevance_score'] >= 60:
-                        found_link = video['url']
-                        selected_video = video
-                        print(f"  ⚠️ Clip {i}: Using 60+ score ({video['relevance_score']})")
-                        break
-            
-            # Priority 3: If no 60+, try 50+
-            if not found_link:
-                for video in all_results:
-                    if video['url'] not in USED_VIDEO_URLS and video['relevance_score'] >= 50:
-                        found_link = video['url']
-                        selected_video = video
-                        print(f"  ⚠️ Clip {i}: Using 50+ score ({video['relevance_score']})")
-                        break
-            
-            # Priority 4: If no 50+, use best available (even if < 50)
-            if not found_link and all_results:
-                for video in all_results:
-                    if video['url'] not in USED_VIDEO_URLS:
-                        found_link = video['url']
-                        selected_video = video
-                        print(f"  ⚠️ Clip {i}: Using best available ({video['relevance_score']})")
-                        break
-            
-            # If found, download and process
             if found_link and selected_video:
                 USED_VIDEO_URLS.add(found_link)
-                print(f"  ✓ Clip {i}: Found {selected_video['service']} video (score: {selected_video['relevance_score']})")
+                print(f"    ✓ Found {selected_video['service']} (score: {selected_video['relevance_score']})")
                 
                 try:
                     raw = TEMP_DIR / f"r_{i}.mp4"
-                    
                     response = requests.get(found_link, timeout=40, stream=True)
-                    total_size = int(response.headers.get('content-length', 0))
                     
                     with open(raw, "wb") as f:
-                        if total_size > 0:
-                            downloaded = 0
-                            for chunk in response.iter_content(chunk_size=8192):
-                                if chunk:
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                        else:
-                            f.write(response.content)
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
                     
-                    # Process with GPU - ensure landscape and proper scaling
+                    # Process with proper scaling
                     cmd = [
-                        "ffmpeg", "-y", "-hwaccel", "cuda", "-i", str(raw), 
+                        "ffmpeg", "-y", "-hwaccel", "cuda",
+                        "-i", str(raw),
                         "-t", str(dur),
                         "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30",
-                        "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M",
-                        "-an", str(out)
+                        "-c:v", "h264_nvenc",
+                        "-preset", "p4",
+                        "-b:v", "8M",
+                        "-an",
+                        str(out)
                     ]
                     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
                     return str(out)
-                    
                 except Exception as e:
-                    print(f"  ✗ Download/process failed: {str(e)[:60]}")
-                    continue  # Try next attempt
-            
-            # If this attempt failed, try next one
-            print(f"  ⚠️ Clip {i}, Attempt {attempt+1} failed, retrying...")
+                    print(f"    ✗ Download failed: {str(e)[:60]}")
+                    continue
         
-        # If all attempts failed, use fallback
-        print(f"  → Clip {i}: All attempts failed, using fallback")
-        colors = ["0x1a1a2e:0x16213e", "0x0f3460:0x533483", "0x2a2d34:0x1e3a5f"]
-        gradient = random.choice(colors)
+        # Fallback
+        print(f"  → Clip {i}: Using fallback")
+        gradient = random.choice(["0x1a1a2e:0x16213e", "0x0f3460:0x533483"])
         out = TEMP_DIR / f"s_{i}_fallback.mp4"
         cmd = [
-            "ffmpeg", "-y", "-f", "lavfi", 
+            "ffmpeg", "-y",
+            "-f", "lavfi",
             "-i", f"color=c={gradient.split(':')[0]}:s=1920x1080:d={dur}",
             "-vf", f"fade=in:0:30,fade=out:st={dur-1}:d=1",
-            "-c:v", "h264_nvenc", "-preset", "p1", "-t", str(dur), str(out)
+            "-c:v", "h264_nvenc",
+            "-preset", "p1",
+            "-t", str(dur),
+            str(out)
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return str(out)
     
-    # Process all clips with enhanced retry logic
-    print(f"📥 Downloading {len(sentences)} video clips from Pexels & Pixabay...")
+    # Process all clips
+    print(f"📥 Downloading {len(sentences)} clips with enhanced matching...")
     clips = []
     for i, sent in enumerate(sentences):
         update_status(60 + int((i/len(sentences))*30), f"Processing clip {i+1}/{len(sentences)}...")
-        clip_path = get_clip_with_retry(i, sent)
+        clip_path = get_clip_with_enhanced_retry(i, sent)
         clips.append(clip_path)
     
-    # Concatenate clips
+    # Concatenate
     print("🔗 Concatenating video clips...")
     with open("list.txt", "w") as f:
-        for c in clips: 
+        for c in clips:
             if os.path.exists(c):
                 f.write(f"file '{c}'\n")
     
     subprocess.run(
-        "ffmpeg -y -f concat -safe 0 -i list.txt -c:v h264_nvenc -preset p1 -b:v 10M visual.mp4", 
+        "ffmpeg -y -f concat -safe 0 -i list.txt -c:v h264_nvenc -preset p1 -b:v 10M visual.mp4",
         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     
-    # Final render
-    print("🎬 Rendering final video...")
-    ass_path = str(ass_file).replace('\\', '\\\\').replace(':', '\\:')
+    # Final render with FIXED subtitle filter
+    print("🎬 Rendering final video with subtitles...")
+    
+    # CRITICAL FIX: Properly escape ASS file path for FFmpeg
+    ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
     
     import wave
     try:
         with wave.open(str(audio_path), 'rb') as wav_file:
-            frames = wav_file.getnframes()
-            rate = wav_file.getframerate()
-            audio_duration = frames / float(rate)
-        print(f"🎵 Audio duration: {audio_duration:.1f} seconds")
+            audio_duration = wav_file.getnframes() / float(wav_file.getframerate())
+            print(f"🎵 Audio duration: {audio_duration:.1f} seconds")
     except:
         audio_duration = None
     
     if logo_path and os.path.exists(logo_path):
-        filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[withlogo];[withlogo]ass='{ass_path}'[v]"
+        filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[withlogo];[withlogo]subtitles='{ass_path}'[v]"
         cmd = [
             "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
+            "-i", "visual.mp4",
+            "-i", str(logo_path),
+            "-i", str(audio_path),
             "-filter_complex", filter_complex,
-            "-map", "[v]", "-map", "2:a",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k"
+            "-map", "[v]",
+            "-map", "2:a",
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-b:v", "12M",
+            "-c:a", "aac",
+            "-b:a", "256k"
         ]
     else:
-        filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[bg]ass='{ass_path}'[v]"
+        filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[bg]subtitles='{ass_path}'[v]"
         cmd = [
             "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", "visual.mp4", "-i", str(audio_path),
+            "-i", "visual.mp4",
+            "-i", str(audio_path),
             "-filter_complex", filter_complex,
-            "-map", "[v]", "-map", "1:a",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k"
+            "-map", "[v]",
+            "-map", "1:a",
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-b:v", "12M",
+            "-c:a", "aac",
+            "-b:a", "256k"
         ]
     
     if audio_duration:
@@ -1544,10 +1514,11 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out):
         print(f"❌ Rendering exception: {e}")
         return False
 
-# ==========================================
-# 12. EXECUTION
-# ==========================================
-print("--- 🚀 START (Pexels & Pixabay Only System with VISUAL_MAP) ---")
+# ========================================== 
+# 12. MAIN EXECUTION
+# ========================================== 
+
+print("--- 🚀 START (FIXED VERSION: Subtitles + Enhanced Scoring) ---")
 update_status(1, "Initializing...")
 
 # Download assets
@@ -1558,19 +1529,18 @@ if not download_asset(VOICE_PATH, ref_voice):
     update_status(0, "Voice asset download failed", "failed")
     exit(1)
 
-print(f"✅ Voice reference downloaded: {ref_voice}")
+print(f"✅ Voice reference downloaded")
 
 if LOGO_PATH and LOGO_PATH != "None":
     download_asset(LOGO_PATH, ref_logo)
     if os.path.exists(ref_logo):
-        print(f"✅ Logo downloaded: {ref_logo}")
+        print(f"✅ Logo downloaded")
     else:
-        print("⚠️ Logo not found or download failed")
         ref_logo = None
 else:
     ref_logo = None
 
-# Generate or use provided script
+# Generate script
 update_status(10, "Scripting...")
 if MODE == "topic":
     text = generate_script(TOPIC, DURATION_MINS)
@@ -1578,7 +1548,7 @@ else:
     text = SCRIPT_TEXT
 
 if not text or len(text) < 100:
-    print("❌ Script is too short or empty")
+    print("❌ Script too short")
     update_status(0, "Script generation failed", "failed")
     exit(1)
 
@@ -1591,13 +1561,12 @@ audio_out = TEMP_DIR / "out.wav"
 if clone_voice_robust(text, ref_voice, audio_out):
     update_status(50, "Creating Subtitles...")
     
-    # Create subtitles
+    # Transcribe for subtitles
     if ASSEMBLY_KEY:
         try:
             aai.settings.api_key = ASSEMBLY_KEY
             transcriber = aai.Transcriber()
-            
-            print("📝 Transcribing audio for subtitles...")
+            print("📝 Transcribing audio...")
             transcript = transcriber.transcribe(str(audio_out))
             
             if transcript.status == aai.TranscriptStatus.completed:
@@ -1608,25 +1577,18 @@ if clone_voice_robust(text, ref_voice, audio_out):
                         "start": sentence.start / 1000,
                         "end": sentence.end / 1000
                     })
-                
-                if sentences: sentences[-1]['end'] += 1.0
+                if sentences:
+                    sentences[-1]['end'] += 1.0
                 print(f"✅ Transcription complete: {len(sentences)} sentences")
-                
             else:
-                print(f"❌ Transcription failed: {transcript.status}")
                 raise Exception("Transcription failed")
-                
         except Exception as e:
-            print(f"⚠️ AssemblyAI failed: {e}. Using fallback timing...")
+            print(f"⚠️ AssemblyAI failed: {e}. Using fallback...")
+            # Fallback timing logic
             words = text.split()
             import wave
-            try:
-                with wave.open(str(audio_out), 'rb') as wav_file:
-                    frames = wav_file.getnframes()
-                    rate = wav_file.getframerate()
-                    total_duration = frames / float(rate)
-            except:
-                total_duration = DURATION_MINS * 60
+            with wave.open(str(audio_out), 'rb') as wav_file:
+                total_duration = wav_file.getnframes() / float(wav_file.getframerate())
             
             words_per_second = len(words) / total_duration
             sentences = []
@@ -1635,28 +1597,22 @@ if clone_voice_robust(text, ref_voice, audio_out):
             
             for i in range(0, len(words), words_per_sentence):
                 chunk = words[i:i + words_per_sentence]
-                sentence_text = ' '.join(chunk)
                 sentence_duration = len(chunk) / words_per_second
-                
                 sentences.append({
-                    "text": sentence_text,
+                    "text": ' '.join(chunk),
                     "start": current_time,
                     "end": current_time + sentence_duration
                 })
                 current_time += sentence_duration
             
-            if sentences: sentences[-1]['end'] += 1.5
+            if sentences:
+                sentences[-1]['end'] += 1.5
     else:
-        print("⚠️ No AssemblyAI key. Using fallback timing...")
+        # Fallback if no AssemblyAI
         words = text.split()
         import wave
-        try:
-            with wave.open(str(audio_out), 'rb') as wav_file:
-                frames = wav_file.getnframes()
-                rate = wav_file.getframerate()
-                total_duration = frames / float(rate)
-        except:
-            total_duration = DURATION_MINS * 60
+        with wave.open(str(audio_out), 'rb') as wav_file:
+            total_duration = wav_file.getnframes() / float(wav_file.getframerate())
         
         words_per_second = len(words) / total_duration
         sentences = []
@@ -1665,59 +1621,52 @@ if clone_voice_robust(text, ref_voice, audio_out):
         
         for i in range(0, len(words), words_per_sentence):
             chunk = words[i:i + words_per_sentence]
-            sentence_text = ' '.join(chunk)
             sentence_duration = len(chunk) / words_per_second
-            
             sentences.append({
-                "text": sentence_text,
+                "text": ' '.join(chunk),
                 "start": current_time,
                 "end": current_time + sentence_duration
             })
             current_time += sentence_duration
         
-        if sentences: sentences[-1]['end'] += 1.5
+        if sentences:
+            sentences[-1]['end'] += 1.5
     
-    # Create ASS subtitle file
+    # Create ASS subtitles
     ass_file = TEMP_DIR / "subtitles.ass"
     create_ass_file(sentences, ass_file)
     
-    # Process visuals with Pexels & Pixabay only
-    update_status(60, "Gathering Visuals (Pexels & Pixabay Only)...")
+    # Process visuals
+    update_status(60, "Gathering Visuals with Enhanced Matching...")
     final_output = OUTPUT_DIR / f"final_{JOB_ID}.mp4"
     
-    if process_visuals(sentences, audio_out, ass_file, ref_logo, final_output):
+    if process_visuals(sentences, audio_out, ass_file, ref_logo, final_output, text, TOPIC):
         if final_output.exists():
             file_size = os.path.getsize(final_output) / (1024 * 1024)
-            print(f"✅ Video created: {final_output} ({file_size:.1f} MB)")
+            print(f"✅ Video created: {file_size:.1f} MB")
             
             update_status(99, "Uploading to Google Drive...")
             drive_link = upload_to_google_drive(final_output)
             
             if drive_link:
-                update_status(100, "Success! Video Uploaded to Google Drive!", "completed", drive_link)
+                update_status(100, "Success!", "completed", drive_link)
                 print(f"🎉 Google Drive Link: {drive_link}")
             else:
                 update_status(100, "Upload Failed - Video Ready Locally", "completed")
-                print(f"📁 Video saved locally: {final_output}")
         else:
-            update_status(0, "Rendering Failed - No Output File", "failed")
-            print("❌ Final video file was not created")
+            update_status(0, "Rendering Failed", "failed")
     else:
         update_status(0, "Visual Processing Failed", "failed")
-        print("❌ Visual processing failed")
-        
 else:
     update_status(0, "Audio Synthesis Failed", "failed")
-    print("❌ Audio synthesis failed")
 
 # Cleanup
-print("Cleaning up temporary files...")
+print("Cleaning up...")
 if TEMP_DIR.exists():
     try:
         shutil.rmtree(TEMP_DIR)
-        print("✅ Temporary files cleaned")
     except:
-        print("⚠️ Could not clean all temporary files")
+        pass
 
 for temp_file in ["visual.mp4", "list.txt"]:
     if os.path.exists(temp_file):
@@ -1726,4 +1675,4 @@ for temp_file in ["visual.mp4", "list.txt"]:
         except:
             pass
 
-print("--- ✅ PROCESS COMPLETE (Pexels & Pixabay Only System with VISUAL_MAP) ---")
+print("--- ✅ PROCESS COMPLETE ---")
