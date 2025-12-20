@@ -208,7 +208,7 @@ def create_ass_file(sentences, ass_file):
                 text = text.upper()
             
             # Smart text wrapping
-            MAX_CHARS = 35
+            MAX_CHARS = 30
             words = text.split()
             lines = []
             current_line = []
@@ -914,64 +914,174 @@ VISUAL_MAP = {
     "recovery": ["data recovery", "disaster recovery", "system recovery"]
 }
 # ========================================== 
-# 6. ENHANCED VISUAL QUERY WITH CONTEXT
+# 6. INTELLIGENT CATEGORY-LOCKED SYSTEM
 # ========================================== 
 
-def get_visual_query_with_context(text, full_script="", topic=""):
+# Global variable to lock the video category throughout the entire video
+VIDEO_CATEGORY = None
+CATEGORY_KEYWORDS = []
+
+def analyze_script_and_set_category(script, topic):
     """
-    ENHANCED: Extract visual query with full context awareness
-    Returns: (primary_query, fallback_queries, context_keywords)
+    CRITICAL: Analyze the ENTIRE script once and determine the PRIMARY category
+    This locks the visual theme for the entire video to prevent off-topic clips
     """
-    text = text.lower()
-    full_context = (text + " " + full_script[:500] + " " + topic).lower()
+    global VIDEO_CATEGORY, CATEGORY_KEYWORDS
+    
+    print("\n🔍 Analyzing script to determine video category...")
+    
+    full_text = (script + " " + topic).lower()
+    
+    # Remove stop words
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 
+                  'with', 'by', 'from', 'as', 'is', 'was', 'are', 'been', 'be', 'have', 'has',
+                  'this', 'that', 'will', 'can', 'could', 'would', 'should', 'may', 'might'}
+    
+    words = [w for w in re.findall(r'\b\w+\b', full_text) if len(w) >= 4 and w not in stop_words]
+    
+    # Count category matches across the ENTIRE script
+    category_scores = {}
+    for category, terms in VISUAL_MAP.items():
+        score = 0
+        # Check if category name appears in script
+        if category in full_text:
+            score += full_text.count(category) * 10
+        
+        # Check if any category terms appear
+        for term in terms:
+            term_words = term.split()
+            for term_word in term_words:
+                if len(term_word) > 3 and term_word in words:
+                    score += 3
+        
+        # Check for related keywords
+        for word in words[:50]:  # Check first 50 meaningful words
+            if word in category or category in word:
+                score += 5
+        
+        if score > 0:
+            category_scores[category] = score
+    
+    # Sort categories by score
+    sorted_categories = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    if sorted_categories:
+        VIDEO_CATEGORY = sorted_categories[0][0]
+        category_score = sorted_categories[0][1]
+        
+        # Extract all keywords related to this category
+        CATEGORY_KEYWORDS = [VIDEO_CATEGORY]
+        
+        # Add related words from script
+        for word in words[:30]:
+            if word in VIDEO_CATEGORY or VIDEO_CATEGORY in word:
+                CATEGORY_KEYWORDS.append(word)
+            # Check if word appears in category terms
+            for term in VISUAL_MAP[VIDEO_CATEGORY]:
+                if word in term:
+                    CATEGORY_KEYWORDS.append(word)
+        
+        # Remove duplicates
+        CATEGORY_KEYWORDS = list(set(CATEGORY_KEYWORDS))[:10]
+        
+        print(f"✅ VIDEO CATEGORY LOCKED: '{VIDEO_CATEGORY}' (score: {category_score})")
+        print(f"📋 Category Keywords: {', '.join(CATEGORY_KEYWORDS[:5])}")
+        
+        # Show top 3 categories for transparency
+        print(f"📊 Top Categories Detected:")
+        for i, (cat, score) in enumerate(sorted_categories[:3]):
+            print(f"   {i+1}. {cat}: {score} points")
+    else:
+        # Default fallback categories based on common themes
+        VIDEO_CATEGORY = "technology"
+        CATEGORY_KEYWORDS = ["technology", "tech", "digital", "innovation"]
+        print(f"⚠️ No clear category detected. Using default: '{VIDEO_CATEGORY}'")
+    
+    return VIDEO_CATEGORY, CATEGORY_KEYWORDS
+
+def get_category_locked_query(text, sentence_index, total_sentences):
+    """
+    INTELLIGENT: Generate queries that STAY WITHIN the locked category
+    Prevents random/inappropriate clips like "women belly" or "armies" for tech topics
+    """
+    global VIDEO_CATEGORY, CATEGORY_KEYWORDS
+    
+    if not VIDEO_CATEGORY:
+        print("⚠️ Category not set! Using generic query")
+        return "abstract technology", ["digital background", "data visualization"], ["technology"]
+    
+    text_lower = text.lower()
     
     # Remove stop words
     stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 
                   'with', 'by', 'from', 'as', 'is', 'was', 'are', 'been', 'be', 'have', 'has'}
     
-    # Extract meaningful words
-    words = [w for w in re.findall(r'\b\w+\b', text) if len(w) >= 4 and w not in stop_words]
-    context_words = [w for w in re.findall(r'\b\w+\b', full_context) if len(w) >= 4 and w not in stop_words]
+    sentence_words = [w for w in re.findall(r'\b\w+\b', text_lower) if len(w) >= 4 and w not in stop_words]
     
-    # Priority 1: Exact category match in VISUAL_MAP
-    for word in words:
-        if word in VISUAL_MAP:
-            selected_term = random.choice(VISUAL_MAP[word])
-            fallbacks = [random.choice(VISUAL_MAP[word]) for _ in range(3)]
-            return selected_term, fallbacks, [word]
+    # Get category-specific terms
+    category_terms = VISUAL_MAP.get(VIDEO_CATEGORY, [])
     
-    # Priority 2: Partial match in categories
-    for word in words:
-        for category, terms in VISUAL_MAP.items():
-            if word in category or category in word:
-                selected_term = random.choice(terms)
-                fallbacks = [random.choice(terms) for _ in range(3)]
-                return selected_term, fallbacks, [word, category]
+    # Strategy 1: Find sentence words that match category terms
+    matched_terms = []
+    for word in sentence_words:
+        for term in category_terms:
+            if word in term or term in word:
+                matched_terms.append(term)
+                break
     
-    # Priority 3: Context-based matching
-    for word in context_words[:5]:  # Check first 5 context words
-        for category, terms in VISUAL_MAP.items():
-            if word in category:
-                selected_term = random.choice(terms)
-                fallbacks = [random.choice(terms) for _ in range(3)]
-                return selected_term, fallbacks, [word, category]
+    # Strategy 2: Use category keywords from script analysis
+    keyword_matches = []
+    for word in sentence_words:
+        if word in CATEGORY_KEYWORDS:
+            keyword_matches.append(word)
     
-    # Priority 4: Use significant nouns
-    significant = [w for w in words if len(w) >= 6]
-    if significant:
-        main_word = significant[0]
-        for category, terms in VISUAL_MAP.items():
-            if main_word in " ".join(terms):
-                selected_term = random.choice(terms)
-                return selected_term, [main_word], [main_word]
-        return f"{main_word} landscape", [f"{main_word} cinematic"], [main_word]
+    # Strategy 3: Direct category term selection
+    # Select terms that are safe and relevant
+    safe_category_terms = [term for term in category_terms if len(term.split()) <= 4]
     
-    # Fallback
-    if words:
-        return f"{words[0]} landscape", [f"{words[0]} cinematic", "nature landscape"], words[:2]
+    # Build query priority
+    if matched_terms:
+        # Best case: sentence word matches a category term
+        primary = random.choice(matched_terms)
+        fallbacks = [random.choice(safe_category_terms) for _ in range(3)]
+        keywords = [VIDEO_CATEGORY] + matched_terms[:2]
+    elif keyword_matches:
+        # Good case: sentence has category keywords
+        main_keyword = keyword_matches[0]
+        # Find category terms that contain this keyword
+        related_terms = [term for term in safe_category_terms if main_keyword in term]
+        if related_terms:
+            primary = random.choice(related_terms)
+        else:
+            primary = f"{main_keyword} {VIDEO_CATEGORY}"
+        fallbacks = [random.choice(safe_category_terms) for _ in range(3)]
+        keywords = [VIDEO_CATEGORY, main_keyword]
+    else:
+        # Fallback: Use pure category terms with variation
+        # Vary the terms based on sentence position for visual variety
+        term_index = sentence_index % len(safe_category_terms)
+        primary = safe_category_terms[term_index] if safe_category_terms else VIDEO_CATEGORY
+        
+        # Create fallbacks from category
+        fallbacks = []
+        for i in range(3):
+            idx = (sentence_index + i + 1) % len(safe_category_terms)
+            fallbacks.append(safe_category_terms[idx] if safe_category_terms else VIDEO_CATEGORY)
+        
+        keywords = [VIDEO_CATEGORY]
     
-    fallbacks = ["nature landscape", "cinematic landscape", "mountain vista", "forest aerial"]
-    return random.choice(fallbacks), fallbacks, ["landscape"]
+    # CRITICAL SAFETY CHECK: Ensure query contains category context
+    if VIDEO_CATEGORY not in primary.lower():
+        # Force category context into query
+        primary = f"{primary} {VIDEO_CATEGORY}"
+    
+    # Add quality indicators
+    primary = f"{primary} 4k"
+    fallbacks = [f"{fb} cinematic" for fb in fallbacks]
+    
+    print(f"    📌 Query (locked to '{VIDEO_CATEGORY}'): '{primary}'")
+    
+    return primary, fallbacks, keywords
 
 # ========================================== 
 # 7. ENHANCED SCORING SYSTEM (100% Context Aligned)
@@ -979,53 +1089,57 @@ def get_visual_query_with_context(text, full_script="", topic=""):
 
 def calculate_enhanced_relevance_score(video, query, sentence_text, context_keywords, full_script="", topic=""):
     """
-    ENHANCED: Calculate relevance with 100% context alignment
-    Score breakdown:
-    - Query match: 30 points
-    - Context keywords: 30 points  
-    - Topic alignment: 20 points
-    - Quality: 15 points
-    - Landscape: 5 points
+    ENHANCED: Calculate relevance with STRICT category enforcement
+    Now heavily penalizes videos outside the locked category
     """
+    global VIDEO_CATEGORY, CATEGORY_KEYWORDS
+    
     score = 0
     
-    # Prepare text for matching
+    # Prepare text
     video_text = (video.get('title', '') + ' ' + video.get('description', '')).lower()
     sentence_lower = sentence_text.lower()
-    topic_lower = topic.lower()
     
-    # === 1. QUERY MATCH (30 points) ===
+    # === CRITICAL: CATEGORY LOCK ENFORCEMENT ===
+    # If video doesn't mention category AT ALL, apply massive penalty
+    category_mentioned = False
+    if VIDEO_CATEGORY and VIDEO_CATEGORY in video_text:
+        score += 30  # Major bonus for category match
+        category_mentioned = True
+    
+    # Check for any category keywords
+    for keyword in CATEGORY_KEYWORDS:
+        if keyword in video_text:
+            score += 10
+            category_mentioned = True
+    
+    # STRICT PENALTY: If no category match at all, heavily penalize
+    if not category_mentioned:
+        score -= 60  # Makes it almost impossible to be selected
+        print(f"      ⚠️ Video lacks category '{VIDEO_CATEGORY}' - penalized")
+    
+    # === 1. QUERY MATCH (25 points) ===
     query_terms = query.lower().split()
     query_match_count = 0
     for term in query_terms:
-        if len(term) > 3:  # Only meaningful terms
+        if len(term) > 3:
             if term in video_text:
                 query_match_count += 1
-                score += 10
+                score += 8
     
-    # Bonus for exact phrase match
     if query.lower() in video_text:
         score += 10
     
-    # === 2. CONTEXT KEYWORDS MATCH (30 points) ===
+    # === 2. CONTEXT KEYWORDS MATCH (20 points) ===
     context_match_count = 0
     for keyword in context_keywords:
         if keyword in video_text:
             context_match_count += 1
-            score += 10
-        # Check in sentence
+            score += 7
         if keyword in sentence_lower:
-            score += 5
+            score += 3
     
-    # === 3. TOPIC ALIGNMENT (20 points) ===
-    topic_words = [w for w in topic_lower.split() if len(w) > 3]
-    topic_match_count = 0
-    for word in topic_words[:5]:  # Check first 5 topic words
-        if word in video_text:
-            topic_match_count += 1
-            score += 4
-    
-    # === 4. VIDEO QUALITY (15 points) ===
+    # === 3. VIDEO QUALITY (15 points) ===
     quality = video.get('quality', '').lower()
     if '4k' in quality or 'uhd' in quality:
         score += 15
@@ -1033,34 +1147,47 @@ def calculate_enhanced_relevance_score(video, query, sentence_text, context_keyw
         score += 12
     elif 'medium' in quality:
         score += 8
-    elif 'sd' in quality or 'standard' in quality:
-        score += 4
     
-    # Duration bonus
     duration = video.get('duration', 0)
     if duration >= 15:
         score += 5
     elif duration >= 10:
         score += 3
     
-    # === 5. LANDSCAPE VERIFICATION (5 points + penalties) ===
+    # === 4. LANDSCAPE VERIFICATION (10 points + penalties) ===
     landscape_indicators = ['landscape', 'horizontal', 'wide', 'panoramic', 'widescreen', '16:9']
     portrait_indicators = ['vertical', 'portrait', '9:16', 'instagram', 'tiktok', 'reel']
     
     if any(indicator in video_text for indicator in landscape_indicators):
-        score += 5
+        score += 10
     elif any(indicator in video_text for indicator in portrait_indicators):
-        score -= 40  # Heavy penalty for portrait
+        score -= 50
     
-    # Check actual dimensions if available
     width = video.get('width', 0)
     height = video.get('height', 0)
     if width and height:
         aspect_ratio = width / height
-        if aspect_ratio >= 1.5:  # 16:9 or wider
+        if aspect_ratio >= 1.5:
             score += 10
-        elif aspect_ratio < 1.0:  # Portrait
-            score -= 50
+        elif aspect_ratio < 1.0:
+            score -= 60  # Severe penalty for portrait
+    
+    # === 5. INAPPROPRIATE CONTENT DETECTION ===
+    # Blacklist terms that should NEVER appear
+    blacklist = [
+        'belly', 'bikini', 'sexy', 'hot girl', 'attractive woman',
+        'army', 'military', 'weapon', 'gun', 'soldier', 'war',
+        'violence', 'blood', 'gore', 'death',
+        'underwear', 'lingerie', 'swimsuit'
+    ]
+    
+    # If locked to tech/internet/business category, these should NEVER appear
+    if VIDEO_CATEGORY in ['tech', 'technology', 'internet', 'computer', 'digital', 
+                           'business', 'finance', 'data', 'ai', 'software']:
+        for term in blacklist:
+            if term in video_text:
+                score -= 100  # Instant disqualification
+                print(f"      🚫 BLOCKED: Inappropriate term '{term}' detected in video")
     
     # Platform quality bias
     service = video.get('service', '')
@@ -1069,15 +1196,13 @@ def calculate_enhanced_relevance_score(video, query, sentence_text, context_keyw
     elif service == 'pixabay':
         score += 3
     
-    # === BONUS: Perfect Match Detection ===
-    # If video matches query AND context AND topic
-    if query_match_count >= 2 and context_match_count >= 2 and topic_match_count >= 1:
-        score += 20  # Perfect alignment bonus
+    # === BONUS: Perfect Category Alignment ===
+    if category_mentioned and query_match_count >= 2 and context_match_count >= 1:
+        score += 15
     
-    # Random variety factor
+    # Random variety
     score += random.randint(0, 3)
     
-    # Cap at 100, floor at 0
     return min(100, max(0, score))
 
 # ========================================== 
@@ -1316,18 +1441,21 @@ def clone_voice_robust(text, ref_audio, out_path):
 # ========================================== 
 
 def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_script="", topic=""):
-    print("🎬 Visual Processing with Enhanced Context Matching...")
+    print("🎬 Visual Processing with Category-Locked Intelligence...")
     
-    def get_clip_with_enhanced_retry(i, sent, max_retries=4):
-        """Enhanced retry with 100% context alignment"""
+    # CRITICAL: Analyze script ONCE and lock category for entire video
+    analyze_script_and_set_category(full_script, topic)
+    
+    def get_clip_with_category_lock(i, sent, max_retries=4):
+        """Enhanced retry with STRICT category enforcement"""
         dur = max(3.5, sent['end'] - sent['start'])
         
-        # Get primary query with context
-        primary_query, fallback_queries, context_keywords = get_visual_query_with_context(
-            sent['text'], full_script, topic
+        # Get category-locked query
+        primary_query, fallback_queries, context_keywords = get_category_locked_query(
+            sent['text'], i, len(sentences)
         )
         
-        print(f"  🔍 Clip {i}: Context={context_keywords[:2]}")
+        print(f"  🔍 Clip {i+1}/{len(sentences)}: '{sent['text'][:50]}...'")
         
         for attempt in range(max_retries):
             out = TEMP_DIR / f"s_{i}_attempt{attempt}.mp4"
@@ -1338,7 +1466,8 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
             elif attempt < len(fallback_queries) + 1:
                 query = fallback_queries[attempt - 1]
             else:
-                query = f"{context_keywords[0]} landscape" if context_keywords else "nature landscape"
+                # Last resort: pure category terms
+                query = f"{VIDEO_CATEGORY} abstract 4k"
             
             print(f"    Attempt {attempt+1}: '{query}'")
             
@@ -1369,8 +1498,8 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
             # Sort by score
             all_results.sort(key=lambda x: x['relevance_score'], reverse=True)
             
-            # Progressive score thresholds
-            score_thresholds = [75, 65, 55, 45, 0]
+            # STRICT scoring thresholds - only use high-quality matches
+            score_thresholds = [70, 60, 50, 40, 30]  # Stricter thresholds
             found_link = None
             selected_video = None
             
@@ -1385,7 +1514,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
             
             if found_link and selected_video:
                 USED_VIDEO_URLS.add(found_link)
-                print(f"    ✓ Found {selected_video['service']} (score: {selected_video['relevance_score']})")
+                print(f"    ✓ {selected_video['service']} (score: {selected_video['relevance_score']}) - {selected_video.get('title', '')[:40]}")
                 
                 try:
                     raw = TEMP_DIR / f"r_{i}.mp4"
@@ -1414,9 +1543,24 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
                     print(f"    ✗ Download failed: {str(e)[:60]}")
                     continue
         
-        # Fallback
-        print(f"  → Clip {i}: Using fallback")
-        gradient = random.choice(["0x1a1a2e:0x16213e", "0x0f3460:0x533483"])
+        # Fallback - use category-themed gradient
+        print(f"  → Clip {i}: Using category-themed fallback")
+        
+        # Category-specific gradients
+        category_gradients = {
+            "tech": ["0x1a1a2e:0x0f3460", "0x16213e:0x0f3460"],
+            "technology": ["0x1a1a2e:0x0f3460", "0x16213e:0x0f3460"],
+            "internet": ["0x0f3460:0x533483", "0x16213e:0x533483"],
+            "digital": ["0x16213e:0x533483", "0x0f3460:0x16213e"],
+            "ai": ["0x0f3460:0x16213e", "0x1a1a2e:0x533483"],
+            "business": ["0x1e3a5f:0x2a2d34", "0x1a1a2e:0x2a2d34"],
+            "finance": ["0x0f3460:0x1e3a5f", "0x16213e:0x1e3a5f"],
+            "nature": ["0x1e4d2b:0x2d5016", "0x1a3a1e:0x2d5016"],
+            "science": ["0x1e3a5f:0x0f3460", "0x16213e:0x0f3460"],
+        }
+        
+        gradient = category_gradients.get(VIDEO_CATEGORY, ["0x1a1a2e:0x16213e"])[0]
+        
         out = TEMP_DIR / f"s_{i}_fallback.mp4"
         cmd = [
             "ffmpeg", "-y",
@@ -1432,11 +1576,11 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, final_out, full_
         return str(out)
     
     # Process all clips
-    print(f"📥 Downloading {len(sentences)} clips with enhanced matching...")
+    print(f"\n📥 Downloading {len(sentences)} clips (Category: {VIDEO_CATEGORY})...")
     clips = []
     for i, sent in enumerate(sentences):
         update_status(60 + int((i/len(sentences))*30), f"Processing clip {i+1}/{len(sentences)}...")
-        clip_path = get_clip_with_enhanced_retry(i, sent)
+        clip_path = get_clip_with_category_lock(i, sent)
         clips.append(clip_path)
     
     # Concatenate
