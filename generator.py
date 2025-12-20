@@ -913,6 +913,7 @@ VISUAL_MAP = {
     "backup": ["data backup", "backup server", "file backup"],
     "recovery": ["data recovery", "disaster recovery", "system recovery"]
 }
+
 # ========================================== 
 # 6. INTELLIGENT CATEGORY-LOCKED SYSTEM
 # ========================================== 
@@ -1001,8 +1002,15 @@ def analyze_script_and_set_category(script, topic):
 
 def get_category_locked_query(text, sentence_index, total_sentences):
     """
-    INTELLIGENT: Generate queries that STAY WITHIN the locked category
-    Prevents random/inappropriate clips like "women belly" or "armies" for tech topics
+    INTELLIGENT: Generate queries that:
+    1. STAY WITHIN the locked category (prevents off-topic clips)
+    2. USE SEGMENT-SPECIFIC KEYWORDS (makes each clip contextually relevant)
+    
+    Example for "Internet is Dying" topic:
+    - Segment: "Social media algorithms control what we see"
+      → Query: "social media algorithm technology 4k" (category: internet + segment keyword)
+    - Segment: "Corporate monopolies dominate the web"
+      → Query: "corporate office technology 4k" (category: tech + segment keyword)
     """
     global VIDEO_CATEGORY, CATEGORY_KEYWORDS
     
@@ -1014,72 +1022,144 @@ def get_category_locked_query(text, sentence_index, total_sentences):
     
     # Remove stop words
     stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 
-                  'with', 'by', 'from', 'as', 'is', 'was', 'are', 'been', 'be', 'have', 'has'}
+                  'with', 'by', 'from', 'as', 'is', 'was', 'are', 'been', 'be', 'have', 'has',
+                  'this', 'that', 'these', 'those', 'will', 'would', 'could', 'should'}
     
+    # Extract meaningful words from THIS specific segment
     sentence_words = [w for w in re.findall(r'\b\w+\b', text_lower) if len(w) >= 4 and w not in stop_words]
+    
+    print(f"    🔎 Segment analysis: '{text[:60]}...'")
+    print(f"       Keywords found: {sentence_words[:5]}")
     
     # Get category-specific terms
     category_terms = VISUAL_MAP.get(VIDEO_CATEGORY, [])
+    safe_category_terms = [term for term in category_terms if len(term.split()) <= 4]
     
-    # Strategy 1: Find sentence words that match category terms
+    # === STRATEGY 1: EXACT MATCH - Segment keyword matches category term ===
+    # Example: Segment has "algorithm" → matches category term "AI algorithm"
     matched_terms = []
     for word in sentence_words:
         for term in category_terms:
-            if word in term or term in word:
+            if word in term or (len(word) > 5 and term in word):
                 matched_terms.append(term)
+                print(f"       ✓ Exact match: '{word}' → '{term}'")
                 break
     
-    # Strategy 2: Use category keywords from script analysis
+    # === STRATEGY 2: SEMANTIC MATCH - Segment keyword is category-relevant ===
+    # Example: Segment has "algorithm" → it's in CATEGORY_KEYWORDS
     keyword_matches = []
     for word in sentence_words:
         if word in CATEGORY_KEYWORDS:
             keyword_matches.append(word)
+            print(f"       ✓ Category keyword: '{word}'")
     
-    # Strategy 3: Direct category term selection
-    # Select terms that are safe and relevant
-    safe_category_terms = [term for term in category_terms if len(term.split()) <= 4]
+    # === STRATEGY 3: CONTEXTUAL MATCH - Use segment's most important words ===
+    # Extract nouns and important terms (6+ letters, not too common)
+    important_words = [w for w in sentence_words if len(w) >= 6][:3]
     
-    # Build query priority
+    # Check if these words relate to ANY category in VISUAL_MAP
+    segment_relevant_terms = []
+    for word in important_words:
+        for cat, terms in VISUAL_MAP.items():
+            # Check if word relates to any term in the category
+            for term in terms:
+                if word in term or term.split()[0] == word:
+                    segment_relevant_terms.append(term)
+                    break
+            if segment_relevant_terms:
+                break
+    
+    # === BUILD PRIMARY QUERY ===
     if matched_terms:
-        # Best case: sentence word matches a category term
-        primary = random.choice(matched_terms)
-        fallbacks = [random.choice(safe_category_terms) for _ in range(3)]
-        keywords = [VIDEO_CATEGORY] + matched_terms[:2]
+        # BEST CASE: Direct match between segment and category
+        # Example: "algorithm" in segment → "AI algorithm" from category
+        segment_keyword = matched_terms[0]
+        primary = f"{segment_keyword}"
+        keywords = [VIDEO_CATEGORY, segment_keyword] + sentence_words[:2]
+        print(f"       → Strategy: Exact match ('{segment_keyword}')")
+        
     elif keyword_matches:
-        # Good case: sentence has category keywords
+        # GOOD CASE: Segment keyword is in category keywords
+        # Example: "data" in segment → "data visualization" from category
         main_keyword = keyword_matches[0]
-        # Find category terms that contain this keyword
         related_terms = [term for term in safe_category_terms if main_keyword in term]
         if related_terms:
-            primary = random.choice(related_terms)
+            segment_keyword = random.choice(related_terms)
+            primary = f"{segment_keyword}"
         else:
-            primary = f"{main_keyword} {VIDEO_CATEGORY}"
-        fallbacks = [random.choice(safe_category_terms) for _ in range(3)]
-        keywords = [VIDEO_CATEGORY, main_keyword]
+            segment_keyword = f"{main_keyword} {VIDEO_CATEGORY}"
+            primary = segment_keyword
+        keywords = [VIDEO_CATEGORY, main_keyword] + sentence_words[:2]
+        print(f"       → Strategy: Keyword match ('{main_keyword}')")
+        
+    elif segment_relevant_terms:
+        # DECENT CASE: Segment's important word relates to some category
+        # Example: "monopoly" → "corporate office" (business category)
+        segment_keyword = segment_relevant_terms[0]
+        primary = f"{segment_keyword} {VIDEO_CATEGORY}"
+        keywords = [VIDEO_CATEGORY, segment_keyword] + important_words[:2]
+        print(f"       → Strategy: Contextual match ('{segment_keyword}')")
+        
+    elif important_words:
+        # FALLBACK 1: Use segment's most important word + category
+        # Example: "manipulation" → "manipulation technology"
+        segment_keyword = important_words[0]
+        # Check if this word is safe and visual
+        if segment_keyword in ['problem', 'issue', 'thing', 'situation', 'question']:
+            # Skip generic words, use category directly
+            segment_keyword = random.choice(safe_category_terms) if safe_category_terms else VIDEO_CATEGORY
+        primary = f"{segment_keyword} {VIDEO_CATEGORY}"
+        keywords = [VIDEO_CATEGORY, segment_keyword]
+        print(f"       → Strategy: Important word ('{segment_keyword}')")
+        
     else:
-        # Fallback: Use pure category terms with variation
-        # Vary the terms based on sentence position for visual variety
+        # FALLBACK 2: Pure category terms with variation
+        # Use different category terms for visual variety
         term_index = sentence_index % len(safe_category_terms)
-        primary = safe_category_terms[term_index] if safe_category_terms else VIDEO_CATEGORY
-        
-        # Create fallbacks from category
-        fallbacks = []
-        for i in range(3):
-            idx = (sentence_index + i + 1) % len(safe_category_terms)
-            fallbacks.append(safe_category_terms[idx] if safe_category_terms else VIDEO_CATEGORY)
-        
+        segment_keyword = safe_category_terms[term_index] if safe_category_terms else VIDEO_CATEGORY
+        primary = segment_keyword
         keywords = [VIDEO_CATEGORY]
+        print(f"       → Strategy: Category rotation (term #{term_index})")
     
-    # CRITICAL SAFETY CHECK: Ensure query contains category context
+    # === BUILD FALLBACK QUERIES (also segment-aware) ===
+    fallbacks = []
+    
+    # Fallback 1: Another matched term or category term
+    if len(matched_terms) > 1:
+        fallbacks.append(matched_terms[1])
+    elif safe_category_terms:
+        fallbacks.append(random.choice(safe_category_terms))
+    else:
+        fallbacks.append(VIDEO_CATEGORY)
+    
+    # Fallback 2: Category keyword + segment word
+    if keyword_matches and sentence_words:
+        fallbacks.append(f"{keyword_matches[0]} {sentence_words[0]}")
+    elif safe_category_terms:
+        fallbacks.append(random.choice(safe_category_terms))
+    else:
+        fallbacks.append(f"{VIDEO_CATEGORY} abstract")
+    
+    # Fallback 3: Pure category term (different from primary)
+    if safe_category_terms:
+        alt_terms = [t for t in safe_category_terms if t != primary]
+        if alt_terms:
+            fallbacks.append(random.choice(alt_terms))
+        else:
+            fallbacks.append(safe_category_terms[0])
+    else:
+        fallbacks.append(f"{VIDEO_CATEGORY} landscape")
+    
+    # === SAFETY CHECK: Ensure category is always present ===
     if VIDEO_CATEGORY not in primary.lower():
-        # Force category context into query
         primary = f"{primary} {VIDEO_CATEGORY}"
     
     # Add quality indicators
     primary = f"{primary} 4k"
     fallbacks = [f"{fb} cinematic" for fb in fallbacks]
     
-    print(f"    📌 Query (locked to '{VIDEO_CATEGORY}'): '{primary}'")
+    print(f"    📌 Final Query: '{primary}'")
+    print(f"       Fallbacks: {fallbacks}")
     
     return primary, fallbacks, keywords
 
@@ -1178,7 +1258,7 @@ def calculate_enhanced_relevance_score(video, query, sentence_text, context_keyw
         'belly', 'bikini', 'sexy', 'hot girl', 'attractive woman',
         'army', 'military', 'weapon', 'gun', 'soldier', 'war',
         'violence', 'blood', 'gore', 'death',
-        'underwear', 'lingerie', 'swimsuit'
+        'underwear', 'lingerie', 'swimsuit','hindu','nude','women','lady'
     ]
     
     # If locked to tech/internet/business category, these should NEVER appear
