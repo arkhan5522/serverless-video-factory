@@ -1116,8 +1116,12 @@ def process_visuals_parallel(sentences, topic, full_script):
 # 12. DUAL OUTPUT RENDERER (ENHANCED)
 # ========================================== 
 
+# ========================================== 
+# 12. DUAL OUTPUT RENDERER (FIXED FFMPEG)
+# ========================================== 
+
 def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
-    """Render two versions: with and without subtitles"""
+    """Render two versions: with and without subtitles - FIXED FFMPEG"""
     
     print("🎬 Concatenating clips...")
     
@@ -1139,10 +1143,12 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
             f.write(f"file '{clip}'\n")
     
     concatenated = TEMP_DIR / "concatenated.mp4"
+    
+    # FIXED: Use proper FFmpeg settings from working version
     cmd = [
         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
         "-i", str(concat_list),
-        "-c:v", "libx264", "-preset", "fast",
+        "-c:v", "libx264", "-preset", "medium",
         "-b:v", "8M", "-an", str(concatenated)
     ]
     
@@ -1150,7 +1156,7 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60)
         print(f"✅ Concatenated {len(valid_clips)} clips")
     except subprocess.TimeoutExpired:
-        print("⚠️ Concatenation timed out, trying with simpler settings")
+        print("⚠️ Concatenation timed out, trying simpler settings")
         # Try simpler concatenation
         cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
@@ -1166,215 +1172,158 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
     print("🎬 Rendering version 1 (no subtitles)...")
     final_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_no_subs.mp4"
     
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(concatenated),
-        "-i", str(audio_path),
-        "-filter_complex", "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v]",
-        "-map", "[v]", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "fast",
-        "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
-        "-shortest", str(final_no_subs)
-    ]
+    # Get audio duration for proper timing
+    audio_duration = None
+    try:
+        cmd_duration = ["ffprobe", "-v", "error", "-show_entries", "format=duration", 
+                       "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)]
+        result = subprocess.run(cmd_duration, capture_output=True, text=True)
+        if result.returncode == 0:
+            audio_duration = float(result.stdout.strip())
+            print(f"🎵 Audio duration: {audio_duration:.1f}s")
+    except:
+        pass
+    
+    # FIXED: Use same FFmpeg settings as working version
+    if logo_path and os.path.exists(logo_path):
+        # Version with logo
+        filter_complex = (
+            f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];"
+            f"[1:v]scale=230:-1[logo];"
+            f"[bg][logo]overlay=30:30[v]"
+        )
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(concatenated),
+            "-i", str(logo_path),
+            "-i", str(audio_path),
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-map", "2:a",
+            "-c:v", "libx264",
+            "-preset", "medium",  # Changed from fast to medium
+            "-b:v", "10M",
+            "-c:a", "aac",
+            "-b:a", "256k",
+            "-shortest"  # Ensure video matches audio length
+        ]
+    else:
+        # Version without logo
+        filter_complex = (
+            f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[v]"
+        )
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(concatenated),
+            "-i", str(audio_path),
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-map", "1:a",
+            "-c:v", "libx264",
+            "-preset", "medium",  # Changed from fast to medium
+            "-b:v", "10M",
+            "-c:a", "aac",
+            "-b:a", "256k",
+            "-shortest"  # Ensure video matches audio length
+        ]
+    
+    if audio_duration:
+        cmd.extend(["-t", str(audio_duration)])
+    
+    cmd.append(str(final_no_subs))
     
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
-        print(f"✅ Version 1: {os.path.getsize(final_no_subs)/(1024*1024):.1f}MB")
+        print(f"🚀 Rendering version 1...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode == 0:
+            print(f"✅ Version 1: {os.path.getsize(final_no_subs)/(1024*1024):.1f}MB")
+        else:
+            print(f"❌ Version 1 failed: {result.stderr[:200]}")
+            final_no_subs = None
     except Exception as e:
-        print(f"❌ Version 1 failed: {e}")
+        print(f"❌ Version 1 exception: {e}")
         final_no_subs = None
     
     print("🎬 Rendering version 2 (with subtitles)...")
     final_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_with_subs.mp4"
     
-    # Escape path for FFmpeg
-    ass_path = str(ass_file).replace('\\', '\\\\').replace(':', '\\:')
+    # CRITICAL FIX: Properly escape ASS file path for FFmpeg
+    ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
     
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(concatenated),
-        "-i", str(audio_path),
-        "-filter_complex", f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,subtitles='{ass_path}':force_style='Fontsize=24',format=yuv420p[v]",
-        "-map", "[v]", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "fast",
-        "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
-        "-shortest", str(final_with_subs)
-    ]
+    if logo_path and os.path.exists(logo_path):
+        # Version with logo AND subtitles
+        filter_complex = (
+            f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];"
+            f"[1:v]scale=230:-1[logo];"
+            f"[bg][logo]overlay=30:30[withlogo];"
+            f"[withlogo]subtitles='{ass_path}':force_style='Fontsize=24'[v]"
+        )
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(concatenated),
+            "-i", str(logo_path),
+            "-i", str(audio_path),
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-map", "2:a",
+            "-c:v", "libx264",
+            "-preset", "medium",  # Changed from fast to medium
+            "-b:v", "10M",
+            "-c:a", "aac",
+            "-b:a", "256k",
+            "-shortest"
+        ]
+    else:
+        # Version with subtitles only
+        filter_complex = (
+            f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];"
+            f"[bg]subtitles='{ass_path}':force_style='Fontsize=24'[v]"
+        )
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(concatenated),
+            "-i", str(audio_path),
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-map", "1:a",
+            "-c:v", "libx264",
+            "-preset", "medium",  # Changed from fast to medium
+            "-b:v", "10M",
+            "-c:a", "aac",
+            "-b:a", "256k",
+            "-shortest"
+        ]
+    
+    if audio_duration:
+        cmd.extend(["-t", str(audio_duration)])
+    
+    cmd.append(str(final_with_subs))
     
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
-        print(f"✅ Version 2: {os.path.getsize(final_with_subs)/(1024*1024):.1f}MB")
+        print(f"🚀 Rendering version 2...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode == 0:
+            print(f"✅ Version 2: {os.path.getsize(final_with_subs)/(1024*1024):.1f}MB")
+        else:
+            print(f"❌ Version 2 failed: {result.stderr[:200]}")
+            final_with_subs = None
     except Exception as e:
-        print(f"❌ Version 2 failed: {e}")
+        print(f"❌ Version 2 exception: {e}")
         final_with_subs = None
     
     return final_no_subs, final_with_subs
 
-# ========================================== 
-# 13. PARALLEL AUDIO GENERATION (FIXED)
-# ========================================== 
-
-class AudioGenerator:
-    """Async audio generation with better error handling"""
-    
-    def __init__(self, text, ref_audio, out_path):
-        self.text = text
-        self.ref_audio = ref_audio
-        self.out_path = out_path
-        self.completed = False
-        self.success = False
-        self.error = None
-        
-    def generate_in_background(self):
-        """Run in separate thread"""
-        try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            print(f"🎤 Audio device: {device}")
-            
-            from chatterbox.tts import ChatterboxTTS
-            model = ChatterboxTTS.from_pretrained(device=device)
-            
-            # Clean text
-            clean = re.sub(r'\[.*?\]', '', self.text)
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean) if len(s.strip()) > 2]
-            
-            print(f"🎤 Generating audio ({len(sentences)} sentences)...")
-            all_wavs = []
-            
-            for i, chunk in enumerate(sentences):
-                if i % 20 == 0:
-                    update_status(20 + int((i/len(sentences))*25), f"Audio: {i}/{len(sentences)}")
-                
-                try:
-                    with torch.no_grad():
-                        chunk_clean = chunk.replace('"', '').replace('"', '').replace('"', '')
-                        if chunk_clean.endswith('.'):
-                            chunk_clean = chunk_clean + ' '
-                        
-                        wav = model.generate(
-                            text=chunk_clean,
-                            audio_prompt_path=str(self.ref_audio),
-                            exaggeration=0.5
-                        )
-                        all_wavs.append(wav.cpu())
-                    
-                    # Clean GPU memory periodically
-                    if i % 25 == 0 and device == "cuda":
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                        
-                except Exception as e:
-                    print(f"⚠️ Audio sentence {i} failed, using fallback: {str(e)[:50]}")
-                    # Create silent audio as fallback
-                    fallback_duration = len(chunk.split()) / 2.5
-                    fallback_samples = int(fallback_duration * 24000)
-                    fallback_wav = torch.zeros((1, fallback_samples))
-                    all_wavs.append(fallback_wav)
-                    continue
-            
-            if all_wavs:
-                # Concatenate all audio
-                full_audio = torch.cat(all_wavs, dim=1)
-                
-                # Add ending silence
-                silence = torch.zeros((full_audio.shape[0], int(1.5 * 24000)))
-                full_audio_padded = torch.cat([full_audio, silence], dim=1)
-                
-                # Save audio
-                torchaudio.save(self.out_path, full_audio_padded, 24000)
-                
-                duration = full_audio_padded.shape[1] / 24000
-                print(f"✅ Audio complete: {duration:.1f}s ({os.path.getsize(self.out_path)/(1024*1024):.1f} MB)")
-                self.success = True
-            else:
-                print("❌ No audio generated")
-                self.success = False
-                
-        except Exception as e:
-            print(f"❌ Audio generation failed: {e}")
-            self.error = str(e)
-            self.success = False
-        finally:
-            self.completed = True
 
 # ========================================== 
-# 14. SCRIPT GENERATION WITH ISLAMIC FILTERING
-# ========================================== 
-
-def generate_script(topic, minutes):
-    words = int(minutes * 180)
-    print(f"Generating Script (~{words} words)...")
-    
-    if not GEMINI_KEYS:
-        return f"This is a sample script about {topic}. " * 50
-    
-    random.shuffle(GEMINI_KEYS)
-    
-    # Add Islamic content filtering to prompt
-    prompt = f"""Write a YouTube documentary script about '{topic}'. {words} words.
-
-CRITICAL REQUIREMENTS:
-1. Write ONLY spoken narration. NO [brackets], NO stage directions, NO sound effects.
-2. Content must be family-friendly and suitable for Islamic values.
-3. Avoid any references to: nudity, sexuality, alcohol, drugs, violence, gambling, or any haram content.
-4. Focus on educational, inspirational, or informative content only.
-5. Use professional, respectful language throughout.
-
-The script should be engaging, informative, and suitable for all audiences."""
-    
-    for key in GEMINI_KEYS:
-        try:
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-pro')
-            
-            # Add safety settings
-            safety_settings = [
-                {
-                    "category": "HARM_CATEGORY_HARASSMENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_HATE_SPEECH",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                }
-            ]
-            
-            response = model.generate_content(
-                prompt,
-                safety_settings=safety_settings
-            )
-            
-            script = response.text.replace("*","").replace("#","").strip()
-            
-            # Additional filtering
-            script = re.sub(r'\[.*?\]', '', script)
-            
-            # Remove any potentially problematic content
-            for category, keywords in FORBIDDEN_KEYWORDS.items():
-                for keyword in keywords:
-                    if keyword in script.lower():
-                        script = re.sub(fr'\b{keyword}\b', '[redacted]', script, flags=re.IGNORECASE)
-            
-            print(f"✅ Script generated: {len(script.split())} words")
-            return script
-            
-        except Exception as e:
-            print(f"⚠️ Gemini error: {str(e)[:50]}")
-            continue
-    
-    print("⚠️ Using fallback script")
-    return f"This is a documentary about {topic}. " * 100
-
-# ========================================== 
-# 15. MAIN EXECUTION (FIXED CONTINUATION)
+# 13. MAIN EXECUTION (WITH FIXED CONTINUATION)
 # ========================================== 
 
 print("--- 🚀 PARALLEL PROCESSING MODE ---")
@@ -1413,7 +1362,6 @@ if not text or len(text) < 100:
     exit(1)
 
 print(f"✅ Script: {len(text.split())} words")
-print(f"📝 First 200 chars: {text[:200]}...")
 
 # Split script into timed sentences
 update_status(15, "Preparing audio and video timeline...")
@@ -1473,9 +1421,12 @@ if not audio_gen.completed:
     
 if not audio_gen.success:
     print(f"❌ Audio generation failed: {audio_gen.error}")
-    update_status(0, "Audio generation failed", "failed")
-    exit(1)
+    # Try to continue with audio file if it exists
+    if not os.path.exists(audio_out) or os.path.getsize(audio_out) < 10000:
+        update_status(0, "Audio generation failed", "failed")
+        exit(1)
 
+# Verify audio file
 if not os.path.exists(audio_out) or os.path.getsize(audio_out) < 10000:
     print("❌ Audio file not found or too small")
     update_status(0, "Audio file invalid", "failed")
@@ -1490,7 +1441,7 @@ if not processed_clips or len(processed_clips) == 0:
     update_status(0, "No video content", "failed")
     exit(1)
 
-# Render final videos
+# Render final videos using FIXED FFmpeg settings
 update_status(90, "Rendering final outputs...")
 final_no_subs, final_with_subs = render_dual_outputs(
     processed_clips, audio_out, ass_file, ref_logo
