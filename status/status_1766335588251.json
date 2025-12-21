@@ -1,1 +1,1 @@
-{"progress": 10, "message": "Generating script with Gemini...", "status": "processing", "logs": "[16:49:19] Initializing SubMagic-level engine...\n[16:49:23] Generating script with Gemini...", "timestamp": 1766335763.0289197}
+{"progress": 15, "message": "Creating timeline with semantic analysis...", "status": "processing", "logs": "[16:49:19] Initializing SubMagic-level engine...\n[16:49:23] Generating script with Gemini...\n[16:49:24] Creating timeline with semantic analysis...", "timestamp": 1766335764.3845298}
