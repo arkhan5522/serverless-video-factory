@@ -162,7 +162,7 @@ def download_asset(path, local):
 # 4. SUBTITLE STYLES
 # ========================================== 
 
-UBTITLE_STYLES = {
+SUBTITLE_STYLES = {
     "mrbeast_yellow": {
         "name": "MrBeast Yellow (3D Pop)",
         "fontname": "Arial Black",
@@ -244,6 +244,7 @@ UBTITLE_STYLES = {
         "spacing": -0.5
     }
 }
+
 def format_ass_time(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
