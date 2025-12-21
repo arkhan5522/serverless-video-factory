@@ -49,10 +49,14 @@ try:
     
     # Download NLTK data
     import nltk
-    nltk.download('punkt', quiet=True)
-    nltk.download('averaged_perceptron_tagger', quiet=True)
-    nltk.download('stopwords', quiet=True)
-    nltk.download('wordnet', quiet=True)
+    try:
+        nltk.download('punkt', quiet=True)
+        nltk.download('averaged_perceptron_tagger', quiet=True)
+        nltk.download('stopwords', quiet=True)
+        nltk.download('wordnet', quiet=True)
+        nltk.download('omw-1.4', quiet=True)
+    except:
+        pass  # Continue even if NLTK downloads fail
     
 except Exception as e:
     print(f"Install Warning: {e}")
@@ -61,10 +65,17 @@ import torch
 import torchaudio
 import google.generativeai as genai
 import numpy as np
-import nltk
-from nltk.tokenize import word_tokenize, sent_tokenize
-from nltk.corpus import stopwords
-from nltk.tag import pos_tag
+
+# Import NLTK with fallback
+try:
+    import nltk
+    from nltk.tokenize import word_tokenize, sent_tokenize
+    from nltk.corpus import stopwords
+    from nltk.tag import pos_tag
+    NLTK_AVAILABLE = True
+except:
+    NLTK_AVAILABLE = False
+    print("⚠️ NLTK not available, using simplified analysis")
 
 # ========================================== 
 # 2. CONFIGURATION
@@ -105,7 +116,14 @@ USED_VIDEO_URLS = set()
 URL_LOCK = Lock()
 LOG_BUFFER = []
 LOG_LOCK = Lock()
-STOP_WORDS = set(stopwords.words('english'))
+STOP_WORDS = set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being'])
+
+# Initialize NLTK stopwords if available
+try:
+    if NLTK_AVAILABLE:
+        STOP_WORDS = set(stopwords.words('english'))
+except:
+    pass
 
 # ========================================== 
 # 3. SUBMAGIC-LEVEL NLP ANALYZER
@@ -160,10 +178,7 @@ class SubMagicNLPAnalyzer:
     
     @staticmethod
     def extract_entities(text):
-        """Extract key entities (nouns, verbs, concepts)"""
-        tokens = word_tokenize(text.lower())
-        tagged = pos_tag(tokens)
-        
+        """Extract key entities (nouns, verbs, concepts) - with NLTK fallback"""
         entities = {
             'nouns': [],
             'verbs': [],
@@ -171,21 +186,44 @@ class SubMagicNLPAnalyzer:
             'concepts': []
         }
         
-        for word, tag in tagged:
-            if len(word) < 3 or word in STOP_WORDS:
-                continue
-                
-            if tag.startswith('NN'):  # Noun
-                entities['nouns'].append(word)
-            elif tag.startswith('VB'):  # Verb
-                entities['verbs'].append(word)
-            elif tag.startswith('JJ'):  # Adjective
-                entities['adjectives'].append(word)
+        if not NLTK_AVAILABLE:
+            # Fallback: Simple word extraction
+            words = re.findall(r'\b\w{4,}\b', text.lower())
+            entities['nouns'] = [w for w in words if w not in STOP_WORDS][:5]
+            entities['verbs'] = entities['nouns'][:2]
+            entities['adjectives'] = []
+            
+            # Extract 2-word phrases
+            words_list = [w for w in words if w not in STOP_WORDS]
+            for i in range(len(words_list) - 1):
+                entities['concepts'].append(f"{words_list[i]} {words_list[i+1]}")
+            
+            return entities
         
-        # Extract multi-word concepts (2-3 word phrases)
-        words = [w for w in tokens if w not in STOP_WORDS and len(w) > 3]
-        for i in range(len(words) - 1):
-            entities['concepts'].append(f"{words[i]} {words[i+1]}")
+        try:
+            # Use NLTK if available
+            tokens = word_tokenize(text.lower())
+            tagged = pos_tag(tokens)
+            
+            for word, tag in tagged:
+                if len(word) < 3 or word in STOP_WORDS:
+                    continue
+                    
+                if tag.startswith('NN'):  # Noun
+                    entities['nouns'].append(word)
+                elif tag.startswith('VB'):  # Verb
+                    entities['verbs'].append(word)
+                elif tag.startswith('JJ'):  # Adjective
+                    entities['adjectives'].append(word)
+            
+            # Extract multi-word concepts
+            words = [w for w in tokens if w not in STOP_WORDS and len(w) > 3]
+            for i in range(len(words) - 1):
+                entities['concepts'].append(f"{words[i]} {words[i+1]}")
+        except:
+            # Fallback on error
+            words = re.findall(r'\b\w{4,}\b', text.lower())
+            entities['nouns'] = [w for w in words if w not in STOP_WORDS][:5]
         
         return entities
     
