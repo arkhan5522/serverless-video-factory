@@ -1,1 +1,1 @@
-{"progress": 15, "message": "Preparing audio and video timeline...", "status": "processing", "logs": "[10:28:29] Initializing parallel engine...\n[10:28:30] Generating script...\n[10:28:31] Preparing audio and video timeline...", "timestamp": 1766312911.368726}
+{"progress": 20, "message": "Starting parallel audio generation...", "status": "processing", "logs": "[10:28:29] Initializing parallel engine...\n[10:28:30] Generating script...\n[10:28:31] Preparing audio and video timeline...\n[10:28:31] Starting parallel audio generation...", "timestamp": 1766312911.9990067}
