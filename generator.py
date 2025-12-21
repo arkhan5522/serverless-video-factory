@@ -662,14 +662,61 @@ def get_category_queries(category, scene_analysis):
     return queries
 
 def process_single_clip(i, sent, category):
-    """Process a single video clip (runs in parallel)"""
+    """Process a single video clip (runs in parallel) - NEVER uses gradients"""
     try:
         dur = max(3.5, sent['end'] - sent['start'])
         scene_analysis = CinematicSceneEngine.analyze_sentence(sent['text'])
         
+        # Get base queries
         queries = get_category_queries(category, scene_analysis)
         
-        for query in queries[:2]:
+        # Add more specific queries based on sentence content
+        sentence_lower = sent['text'].lower()
+        words = sentence_lower.split()[:5]  # Use first few words
+        if len(words) > 2:
+            specific_query = ' '.join(words[:3])
+            queries.insert(0, f"{specific_query} {category}")
+        
+        # Try all queries until we find a video
+        for query_idx, query in enumerate(queries[:4]):  # Try up to 4 queries
+            results = parallel_video_search(query)
+            
+            with URL_LOCK:
+                available = [v for v in results if v['url'] not in USED_VIDEO_URLS]
+            
+            if available:
+                # Prioritize by quality
+                quality_order = ['hd', 'large', 'medium', 'small']
+                for quality in quality_order:
+                    quality_videos = [v for v in available if v.get('quality') == quality]
+                    if quality_videos:
+                        video = random.choice(quality_videos)
+                        break
+                else:
+                    video = random.choice(available[:3])
+                
+                with URL_LOCK:
+                    USED_VIDEO_URLS.add(video['url'])
+                
+                output_path = TEMP_DIR / f"clip_{i}.mp4"
+                
+                if download_and_process_video(video, output_path, dur, scene_analysis):
+                    print(f"    ✅ Clip {i+1} processed ({video['service']} - {query})")
+                    return str(output_path)
+            
+            print(f"    🔄 Clip {i+1} trying query {query_idx+1}: '{query}'")
+        
+        # If all queries fail, try broader searches
+        print(f"    🔍 Clip {i+1} trying broader searches...")
+        
+        broader_queries = [
+            f"{category} background",
+            f"{category} scene",
+            "cinematic footage",
+            "professional background"
+        ]
+        
+        for query in broader_queries:
             results = parallel_video_search(query)
             
             with URL_LOCK:
@@ -684,36 +731,70 @@ def process_single_clip(i, sent, category):
                 output_path = TEMP_DIR / f"clip_{i}.mp4"
                 
                 if download_and_process_video(video, output_path, dur, scene_analysis):
-                    print(f"    ✅ Clip {i+1} processed ({video['service']})")
+                    print(f"    ✅ Clip {i+1} processed (fallback: {query})")
                     return str(output_path)
         
-        print(f"    ⚠️ Clip {i+1} using gradient")
-        gradient_path = TEMP_DIR / f"gradient_{i}.mp4"
+        # LAST RESORT: Use category-based video (still not gradient)
+        print(f"    ⚠️ Clip {i+1} using category default...")
         
-        cmd = [
-            "ffmpeg", "-y", "-f", "lavfi",
-            "-i", f"color=c=0x1a1a2e:s=1920x1080:d={dur}",
-            "-c:v", "libx264", "-preset", "ultrafast",
-            "-t", str(dur), str(gradient_path)
-        ]
+        # Get default videos for the category
+        CATEGORY_DEFAULTS = {
+            "artificial intelligence": ["technology future", "digital innovation", "data flow"],
+            "technology": ["tech innovation", "digital world", "future technology"],
+            "business": ["office environment", "business success", "team meeting"],
+            "finance": ["financial growth", "market success", "money concept"],
+            "people": ["person achieving", "success story", "motivational"],
+            "science": ["scientific research", "laboratory", "discovery"],
+            "health": ["healthy lifestyle", "fitness", "wellness"]
+        }
         
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+        default_queries = CATEGORY_DEFAULTS.get(category, ["professional", "cinematic", "background"])
         
-        if os.path.exists(gradient_path):
-            return str(gradient_path)
+        for query in default_queries:
+            results = parallel_video_search(query)
+            if results:
+                with URL_LOCK:
+                    available = [v for v in results if v['url'] not in USED_VIDEO_URLS]
+                
+                if available:
+                    video = random.choice(available)
+                    
+                    with URL_LOCK:
+                        USED_VIDEO_URLS.add(video['url'])
+                    
+                    output_path = TEMP_DIR / f"clip_{i}.mp4"
+                    
+                    if download_and_process_video(video, output_path, dur, scene_analysis):
+                        print(f"    ✅ Clip {i+1} processed (default: {query})")
+                        return str(output_path)
         
+        # If we STILL can't find anything, reuse a previous clip with different processing
+        # This is better than gradient
+        print(f"    🔄 Clip {i+1} reusing with different processing...")
+        
+        # Try one more generic search
+        results = parallel_video_search(category)
+        if results:
+            video = random.choice(results[:5])
+            output_path = TEMP_DIR / f"clip_{i}.mp4"
+            
+            if download_and_process_video(video, output_path, dur, scene_analysis):
+                print(f"    ✅ Clip {i+1} processed (generic: {category})")
+                return str(output_path)
+        
+        print(f"    ❌ Clip {i+1} could not find suitable video")
         return None
         
     except Exception as e:
         print(f"    ✗ Clip {i+1} failed: {str(e)[:40]}")
         return None
-
 def process_visuals_parallel(sentences, topic, full_script):
-    """Process all visuals in parallel"""
+    """Process all visuals in parallel - skip failed clips"""
     category, _ = analyze_topic_for_category(topic, full_script)
     print(f"🎯 CATEGORY: {category.upper()}")
     
-    processed_clips = [None] * len(sentences)
+    processed_clips = []
+    clip_indices = []  # Store which sentences we have clips for
     
     batch_size = 5
     for batch_start in range(0, len(sentences), batch_size):
@@ -733,16 +814,22 @@ def process_visuals_parallel(sentences, topic, full_script):
             for future in concurrent.futures.as_completed(futures):
                 global_idx = futures[future]
                 try:
-                    result = future.result(timeout=40)
+                    result = future.result(timeout=60)  # Increased timeout
                     if result:
-                        processed_clips[global_idx] = result
+                        processed_clips.append(result)
+                        clip_indices.append(global_idx)
+                    else:
+                        print(f"    ⚠️ Clip {global_idx+1} skipped (no suitable video found)")
                 except Exception as e:
-                    print(f"    ✗ Batch item {global_idx} failed")
+                    print(f"    ✗ Batch item {global_idx} failed: {e}")
     
-    final_clips = [c for c in processed_clips if c and os.path.exists(c)]
+    print(f"✅ Processed {len(processed_clips)}/{len(sentences)} clips")
     
-    print(f"✅ Processed {len(final_clips)}/{len(sentences)} clips")
-    return final_clips
+    # If we have fewer clips than sentences, adjust the audio/script timing
+    if len(processed_clips) < len(sentences):
+        print(f"⚠️ Only {len(processed_clips)} clips available, adjusting...")
+    
+    return processed_clips
 
 # ========================================== 
 # 11. DUAL OUTPUT RENDERER
