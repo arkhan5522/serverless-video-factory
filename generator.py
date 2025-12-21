@@ -604,7 +604,7 @@ def generate_script(topic, duration_mins):
     
     try:
         genai.configure(api_key=random.choice(GEMINI_KEYS))
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         word_count = int(duration_mins * 150)  # 150 words per minute
         
@@ -719,21 +719,70 @@ def download_asset(path, local):
 
 SUBTITLE_STYLES = {
     "mrbeast_yellow": {
+        "name": "MrBeast Yellow (3D Pop)",
         "fontname": "Arial Black",
         "fontsize": 60,
-        "primary_colour": "&H0000FFFF",
+        "primary_colour": "&H0000FFFF",  # Yellow
+        "back_colour": "&H00000000",      # Black
+        "outline_colour": "&H00000000",   # Black
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
         "outline": 4,
-        "shadow": 3
+        "shadow": 3,
+        "margin_v": 45,
+        "alignment": 2,
+        "spacing": 1.5
     },
     "hormozi_green": {
+        "name": "Hormozi Green (High Contrast)",
         "fontname": "Arial Black",
         "fontsize": 60,
-        "primary_colour": "&H0000FF00",
+        "primary_colour": "&H0000FF00",  # Green
+        "back_colour": "&H80000000",
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
         "outline": 5,
-        "shadow": 0
-    }
+        "shadow": 0,
+        "margin_v": 55,
+        "alignment": 2,
+        "spacing": 0.5
+    },
+    "finance_blue": {
+        "name": "Finance Blue (Neon Glow)",
+        "fontname": "Arial",
+        "fontsize": 80,
+        "primary_colour": "&H00FFFFFF",  # White
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00FF9900",  # Blue
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
+        "outline": 2,
+        "shadow": 3,
+        "margin_v": 50,
+        "alignment": 2,
+        "spacing": 2
+    },
+    "netflix_box": {
+        "name": "Netflix Modern",
+        "fontname": "Roboto",
+        "fontsize": 80,
+        "primary_colour": "&H00FFFFFF",  # White
+        "back_colour": "&H90000000",     # Dark box
+        "outline_colour": "&H00000000",
+        "bold": 0,
+        "italic": 0,
+        "border_style": 3,  # Opaque box
+        "outline": 0,
+        "shadow": 0,
+        "margin_v": 35,
+        "alignment": 2,
+        "spacing": 0.5
+    },
 }
-
 def format_ass_time(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -1094,11 +1143,11 @@ def upload_to_google_drive(file_path):
         return None
 
 # ========================================== 
-# 14. VIDEO RENDERER (FIXED)
+# 14. VIDEO RENDERER (FIXED - Creates BOTH versions)
 # ========================================== 
 
 def render_final_videos(clips, audio_path, ass_file, logo_path):
-    """Render two versions: with and without subtitles"""
+    """Render two versions: with and without subtitles - FIXED VERSION"""
     
     if not clips:
         print("❌ No clips to render")
@@ -1119,7 +1168,7 @@ def render_final_videos(clips, audio_path, ass_file, logo_path):
     
     concatenated = TEMP_DIR / "concat.mp4"
     
-    # Concatenate clips
+    # FIX: Proper concatenation command
     cmd = [
         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
         "-i", str(concat_file),
@@ -1129,11 +1178,11 @@ def render_final_videos(clips, audio_path, ass_file, logo_path):
     
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
     
-    if not os.path.exists(concatenated):
+    if not os.path.exists(concatenated) or os.path.getsize(concatenated) < 10000:
         print("❌ Concatenation failed")
         return None, None
     
-    print("✅ Clips concatenated")
+    print(f"✅ Clips concatenated: {os.path.getsize(concatenated)/(1024*1024):.1f}MB")
     
     # Get audio duration
     try:
@@ -1145,13 +1194,19 @@ def render_final_videos(clips, audio_path, ass_file, logo_path):
         audio_duration = float(result.stdout.strip())
         print(f"🎵 Audio duration: {audio_duration:.1f}s")
     except:
+        print("⚠️ Could not get audio duration, using full video")
         audio_duration = None
     
-    # Version 1: No subtitles
-    print("🎬 Rendering version 1 (no subtitles)...")
+    # ==================== VERSION 1: NO SUBTITLES ====================
+    print("\n🎬 Rendering Version 1 (no subtitles)...")
     final_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_no_subs.mp4"
     
+    # Remove existing file if it exists
+    if os.path.exists(final_no_subs):
+        os.remove(final_no_subs)
+    
     if logo_path and os.path.exists(logo_path):
+        # With logo
         filter_complex = (
             "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
             "pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];"
@@ -1169,7 +1224,13 @@ def render_final_videos(clips, audio_path, ass_file, logo_path):
             "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
             "-shortest"
         ]
+        
+        if audio_duration:
+            cmd.extend(["-t", str(audio_duration)])
+        
+        cmd.append(str(final_no_subs))
     else:
+        # Without logo
         cmd = [
             "ffmpeg", "-y",
             "-i", str(concatenated),
@@ -1177,37 +1238,43 @@ def render_final_videos(clips, audio_path, ass_file, logo_path):
             "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
             "-c:v", "libx264", "-preset", "medium",
             "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
-            "-shortest", str(final_no_subs)
+            "-shortest"
         ]
-    
-    if audio_duration:
-        cmd.extend(["-t", str(audio_duration)])
-    
-    if logo_path and os.path.exists(logo_path):
+        
+        if audio_duration:
+            cmd.extend(["-t", str(audio_duration)])
+        
         cmd.append(str(final_no_subs))
     
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+    print(f"Running command: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     
-    if os.path.exists(final_no_subs):
-        print(f"✅ Version 1 rendered: {os.path.getsize(final_no_subs)/(1024*1024):.1f}MB")
+    if result.returncode == 0 and os.path.exists(final_no_subs):
+        file_size = os.path.getsize(final_no_subs) / (1024 * 1024)
+        print(f"✅ Version 1 rendered: {file_size:.1f}MB")
     else:
-        print("⚠️ Version 1 failed")
+        print(f"❌ Version 1 failed: {result.stderr[:200]}")
         final_no_subs = None
     
-    # Version 2: With subtitles
-    print("🎬 Rendering version 2 (with subtitles)...")
+    # ==================== VERSION 2: WITH SUBTITLES ====================
+    print("\n🎬 Rendering Version 2 (with subtitles)...")
     final_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_with_subs.mp4"
     
-    # CRITICAL: Escape ASS path for FFmpeg
-    ass_escaped = str(ass_file).replace('\\', '/').replace(':', '\\:')
+    # Remove existing file if it exists
+    if os.path.exists(final_with_subs):
+        os.remove(final_with_subs)
+    
+    # CRITICAL FIX: Escape ASS path for FFmpeg
+    ass_escaped = str(ass_file).replace('\\', '\\\\').replace(':', '\\:')
     
     if logo_path and os.path.exists(logo_path):
+        # With logo AND subtitles
         filter_complex = (
             "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
             "pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];"
             "[1:v]scale=230:-1[logo];"
             f"[bg][logo]overlay=30:30[withlogo];"
-            f"[withlogo]subtitles={ass_escaped}[v]"
+            f"[withlogo]subtitles=filename='{ass_escaped}':force_style='FontSize=60'[v]"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -1220,11 +1287,17 @@ def render_final_videos(clips, audio_path, ass_file, logo_path):
             "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
             "-shortest"
         ]
+        
+        if audio_duration:
+            cmd.extend(["-t", str(audio_duration)])
+        
+        cmd.append(str(final_with_subs))
     else:
+        # Without logo, with subtitles
         filter_complex = (
             f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];"
-            f"[bg]subtitles={ass_escaped}[v]"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+            f"subtitles=filename='{ass_escaped}':force_style='FontSize=60'[v]"
         )
         cmd = [
             "ffmpeg", "-y",
@@ -1234,22 +1307,33 @@ def render_final_videos(clips, audio_path, ass_file, logo_path):
             "-map", "[v]", "-map", "1:a",
             "-c:v", "libx264", "-preset", "medium",
             "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
-            "-shortest", str(final_with_subs)
+            "-shortest"
         ]
-    
-    if audio_duration:
-        cmd.extend(["-t", str(audio_duration)])
-    
-    if logo_path and os.path.exists(logo_path):
+        
+        if audio_duration:
+            cmd.extend(["-t", str(audio_duration)])
+        
         cmd.append(str(final_with_subs))
     
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+    print(f"Running command: {' '.join(cmd[:10])}...")  # Show partial command
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     
-    if os.path.exists(final_with_subs):
-        print(f"✅ Version 2 rendered: {os.path.getsize(final_with_subs)/(1024*1024):.1f}MB")
+    if result.returncode == 0 and os.path.exists(final_with_subs):
+        file_size = os.path.getsize(final_with_subs) / (1024 * 1024)
+        print(f"✅ Version 2 rendered: {file_size:.1f}MB")
     else:
-        print("⚠️ Version 2 failed")
+        print(f"❌ Version 2 failed: {result.stderr[:200]}")
         final_with_subs = None
+    
+    # ==================== VERIFY BOTH FILES ====================
+    print("\n📊 Final Output Verification:")
+    if final_no_subs and os.path.exists(final_no_subs):
+        size1 = os.path.getsize(final_no_subs) / (1024 * 1024)
+        print(f"✅ Version 1 (no subs): {size1:.1f}MB - {final_no_subs}")
+    
+    if final_with_subs and os.path.exists(final_with_subs):
+        size2 = os.path.getsize(final_with_subs) / (1024 * 1024)
+        print(f"✅ Version 2 (with subs): {size2:.1f}MB - {final_with_subs}")
     
     return final_no_subs, final_with_subs
 
@@ -1374,23 +1458,27 @@ def main():
         processed_clips, audio_out, ass_file, ref_logo
     )
     
-    # Upload to Google Drive
+    # Upload to Google Drive - BOTH VERSIONS
     uploaded_links = []
     
     if final_no_subs and os.path.exists(final_no_subs):
-        update_status(93, "Uploading version 1...")
+        update_status(93, "Uploading version 1 (no subtitles)...")
         link1 = upload_to_google_drive(final_no_subs)
         if link1:
             uploaded_links.append({"type": "no_subs", "url": link1})
     
     if final_with_subs and os.path.exists(final_with_subs):
-        update_status(97, "Uploading version 2...")
+        update_status(97, "Uploading version 2 (with subtitles)...")
         link2 = upload_to_google_drive(final_with_subs)
         if link2:
             uploaded_links.append({"type": "with_subs", "url": link2})
     
     # Final status
     if uploaded_links:
+        # Show both links
+        for link_info in uploaded_links:
+            print(f"🔗 {link_info['type']}: {link_info['url']}")
+        
         final_url = uploaded_links[-1]["url"]
         update_status(100, "Complete! Videos uploaded.", "completed", final_url)
         print(f"\n🎉 Successfully created {len(uploaded_links)} videos!")
