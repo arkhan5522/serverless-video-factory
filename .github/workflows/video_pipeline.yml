@@ -28,7 +28,7 @@ jobs:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
           
-          # PAYLOAD
+          # PAYLOAD - COMPLETE WITH ALL NEW FIELDS
           USER_MODE: ${{ github.event.client_payload.mode }}
           USER_TOPIC: ${{ github.event.client_payload.topic }}
           USER_SCRIPT: ${{ github.event.client_payload.script }}
@@ -36,6 +36,12 @@ jobs:
           USER_VOICE_PATH: ${{ github.event.client_payload.voice_path }}
           USER_LOGO_PATH: ${{ github.event.client_payload.logo_path }}
           USER_JOB_ID: ${{ github.event.client_payload.job_id }}
+          
+          # NEW ADVANCED SETTINGS - CRITICAL FIX
+          USER_SUBTITLE_STYLE: ${{ github.event.client_payload.subtitle_style || 'mrbeast_yellow' }}
+          USER_AUDIO_SPEED: ${{ github.event.client_payload.audio_speed || '1.0' }}
+          USER_AUDIO_PITCH: ${{ github.event.client_payload.audio_pitch || '1.0' }}
+          USER_AUDIO_EXAGGERATION: ${{ github.event.client_payload.audio_exaggeration || '0.5' }}
           
           # API KEYS
           GH_PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
@@ -46,7 +52,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           
-          # --- GOOGLE DRIVE OAUTH FIX (UPDATED) ---
+          # GOOGLE DRIVE OAUTH
           OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
           OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
           OAUTH_REFRESH_TOKEN: ${{ secrets.OAUTH_REFRESH_TOKEN }}
@@ -58,10 +64,12 @@ jobs:
           echo "{\"username\":\"$KAGGLE_USERNAME\",\"key\":\"$KAGGLE_KEY\"}" > ~/.kaggle/kaggle.json
           chmod 600 ~/.kaggle/kaggle.json
 
-          # 2. Build Python Script (Parameter Replacement)
+          # 2. Build Python Script (Parameter Replacement) - UPDATED FOR ADVANCED SETTINGS
           cat <<EOF > builder.py
           import os
           with open('generator.py', 'r') as f: content = f.read()
+          
+          # All parameters including new ones
           replacements = {
               '{{MODE_PLACEHOLDER}}': os.environ.get('USER_MODE', 'topic'),
               '{{TOPIC_PLACEHOLDER}}': os.environ.get('USER_TOPIC', ''),
@@ -69,16 +77,23 @@ jobs:
               '{{DURATION_PLACEHOLDER}}': os.environ.get('USER_DURATION', '3'),
               '{{VOICE_PATH_PLACEHOLDER}}': os.environ.get('USER_VOICE_PATH', ''),
               '{{LOGO_PATH_PLACEHOLDER}}': os.environ.get('USER_LOGO_PATH', ''),
-              '{{JOB_ID_PLACEHOLDER}}': os.environ.get('USER_JOB_ID', 'debug_run')
+              '{{JOB_ID_PLACEHOLDER}}': os.environ.get('USER_JOB_ID', 'debug_run'),
+              # NEW ADVANCED SETTINGS
+              '{{SUBTITLE_STYLE_PLACEHOLDER}}': os.environ.get('USER_SUBTITLE_STYLE', 'mrbeast_yellow'),
+              '{{AUDIO_SPEED_PLACEHOLDER}}': os.environ.get('USER_AUDIO_SPEED', '1.0'),
+              '{{AUDIO_PITCH_PLACEHOLDER}}': os.environ.get('USER_AUDIO_PITCH', '1.0'),
+              '{{AUDIO_EXAG_PLACEHOLDER}}': os.environ.get('USER_AUDIO_EXAGGERATION', '0.5')
           }
+          
           for k, v in replacements.items():
               safe = str(v).replace('"', '\\"').replace('\\n', ' ')
               content = content.replace(k, safe)
+          
           with open('final_script.py', 'w') as f: f.write(content)
           EOF
           python builder.py
 
-          # 3. Create Secrets Header (UPDATED FOR OAUTH)
+          # 3. Create Secrets Header (WITH ALL SECRETS)
           cat <<EOF > config_header.py
           import os
           os.environ['GH_PAT'] = '$GH_PAT'
@@ -89,7 +104,7 @@ jobs:
           os.environ['GITHUB_REPOSITORY'] = '$GITHUB_REPOSITORY'
           os.environ['GITHUB_TOKEN'] = '$GITHUB_TOKEN'
           
-          # Inject OAuth Secrets
+          # OAuth Secrets for Google Drive
           os.environ['OAUTH_CLIENT_ID'] = '$OAUTH_CLIENT_ID'
           os.environ['OAUTH_CLIENT_SECRET'] = '$OAUTH_CLIENT_SECRET'
           os.environ['OAUTH_REFRESH_TOKEN'] = '$OAUTH_REFRESH_TOKEN'
