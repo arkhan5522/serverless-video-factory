@@ -244,7 +244,6 @@ UBTITLE_STYLES = {
         "spacing": -0.5
     }
 }
-
 def format_ass_time(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -1020,7 +1019,7 @@ if TEMP_DIR.exists():
     except:
         pass
 
-print("--- ✅ PARALLEL PROCESSING COMPLETE ---")),
+print("--- ✅ PARALLEL PROCESSING COMPLETE ---"),
         "-filter_complex", ";".join(filter_parts),
         "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "fast",
