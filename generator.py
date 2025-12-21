@@ -244,7 +244,6 @@ SUBTITLE_STYLES = {
         "spacing": -0.5
     }
 }
-
 def format_ass_time(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -596,7 +595,6 @@ def parallel_video_search(query):
 def download_and_process_video(video_info, output_path, duration, scene_analysis):
     """Download and process a single video"""
     try:
-        # Download
         response = requests.get(video_info['url'], timeout=12, stream=True)
         response.raise_for_status()
         
@@ -608,13 +606,12 @@ def download_and_process_video(video_info, output_path, duration, scene_analysis
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if downloaded > 40 * 1024 * 1024:  # 40MB max
+                    if downloaded > 40 * 1024 * 1024:
                         break
         
         if not os.path.exists(temp_download) or os.path.getsize(temp_download) < 50000:
             return False
         
-        # Quick processing
         cmd = [
             "ffmpeg", "-y", "-i", str(temp_download),
             "-t", str(duration),
@@ -627,7 +624,6 @@ def download_and_process_video(video_info, output_path, duration, scene_analysis
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         proc.wait(timeout=25)
         
-        # Cleanup
         try:
             os.remove(temp_download)
         except:
@@ -673,11 +669,9 @@ def process_single_clip(i, sent, category):
         
         queries = get_category_queries(category, scene_analysis)
         
-        # Try queries
         for query in queries[:2]:
             results = parallel_video_search(query)
             
-            # Filter unused URLs
             with URL_LOCK:
                 available = [v for v in results if v['url'] not in USED_VIDEO_URLS]
             
@@ -693,7 +687,6 @@ def process_single_clip(i, sent, category):
                     print(f"    ✅ Clip {i+1} processed ({video['service']})")
                     return str(output_path)
         
-        # Fallback: gradient
         print(f"    ⚠️ Clip {i+1} using gradient")
         gradient_path = TEMP_DIR / f"gradient_{i}.mp4"
         
@@ -722,7 +715,6 @@ def process_visuals_parallel(sentences, topic, full_script):
     
     processed_clips = [None] * len(sentences)
     
-    # Process in batches of 5
     batch_size = 5
     for batch_start in range(0, len(sentences), batch_size):
         batch_end = min(batch_start + batch_size, len(sentences))
@@ -747,7 +739,6 @@ def process_visuals_parallel(sentences, topic, full_script):
                 except Exception as e:
                     print(f"    ✗ Batch item {global_idx} failed")
     
-    # Filter out None values
     final_clips = [c for c in processed_clips if c and os.path.exists(c)]
     
     print(f"✅ Processed {len(final_clips)}/{len(sentences)} clips")
@@ -777,17 +768,36 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
-    # Version 1: No subs
     print("🎬 Rendering version 1 (no subtitles)...")
     final_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_no_subs.mp4"
-    
-    filter_parts = ["[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v]"]
     
     cmd = [
         "ffmpeg", "-y",
         "-i", str(concatenated),
         "-i", str(audio_path),
-        "-filter_complex", ";".join(filter_parts),
+        "-filter_complex", "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v]",
+        "-map", "[v]", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "fast",
+        "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
+        str(final_no_subs)
+    ]
+    
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
+        print(f"✅ Version 1: {os.path.getsize(final_no_subs)/(1024*1024):.1f}MB")
+    except:
+        final_no_subs = None
+    
+    print("🎬 Rendering version 2 (with subtitles)...")
+    final_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_with_subs.mp4"
+    
+    ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
+    
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(concatenated),
+        "-i", str(audio_path),
+        "-filter_complex", f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_path}'[v]",
         "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "fast",
         "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
@@ -907,7 +917,6 @@ CRITICAL: Write ONLY spoken narration. NO [brackets], NO stage directions, NO so
 print("--- 🚀 PARALLEL PROCESSING MODE ---")
 update_status(1, "Initializing parallel engine...")
 
-# Download assets
 ref_voice = TEMP_DIR / "voice.mp3"
 ref_logo = TEMP_DIR / "logo.png"
 
@@ -924,7 +933,6 @@ if LOGO_PATH and LOGO_PATH != "None":
 else:
     ref_logo = None
 
-# Generate script
 update_status(10, "Generating script...")
 if MODE == "topic":
     text = generate_script(TOPIC, DURATION_MINS)
@@ -937,16 +945,13 @@ if not text or len(text) < 100:
 
 print(f"✅ Script: {len(text.split())} words")
 
-# START PARALLEL PROCESSING
 update_status(15, "Starting parallel audio + video processing...")
 
-# 1. Start audio generation in background
 audio_out = TEMP_DIR / "audio.wav"
 audio_gen = AudioGenerator(text, ref_voice, audio_out)
 audio_thread = Thread(target=audio_gen.generate_in_background)
 audio_thread.start()
 
-# 2. While audio generates, prepare video data
 update_status(20, "Preparing video scenes...")
 
 words = text.split()
@@ -970,23 +975,19 @@ for i in range(0, len(words), words_per_sentence):
 if sentences:
     sentences[-1]['end'] += 1.5
 
-# 3. Create subtitles
 ass_file = TEMP_DIR / "subtitles.ass"
 create_human_subtitles(sentences, ass_file)
 
-# 4. Start parallel video processing
 update_status(50, "Processing videos in parallel (5 at a time)...")
 processed_clips = process_visuals_parallel(sentences, TOPIC, text)
 
-# 5. Wait for audio to finish
 update_status(85, "Waiting for audio completion...")
-audio_thread.join(timeout=300)  # 5 min max
+audio_thread.join(timeout=300)
 
 if not audio_gen.success or not os.path.exists(audio_out):
     update_status(0, "Audio generation failed", "failed")
     exit(1)
 
-# 6. Render final videos
 if processed_clips and len(processed_clips) > 0:
     update_status(90, "Rendering final outputs...")
     
@@ -994,7 +995,6 @@ if processed_clips and len(processed_clips) > 0:
         processed_clips, audio_out, ass_file, ref_logo
     )
     
-    # Upload
     if final_no_subs and os.path.exists(final_no_subs):
         update_status(93, "Uploading version 1...")
         link1 = upload_to_google_drive(final_no_subs)
@@ -1012,7 +1012,6 @@ if processed_clips and len(processed_clips) > 0:
 else:
     update_status(0, "No clips processed", "failed")
 
-# Cleanup
 print("🧹 Cleaning up...")
 if TEMP_DIR.exists():
     try:
@@ -1020,32 +1019,4 @@ if TEMP_DIR.exists():
     except:
         pass
 
-print("--- ✅ PARALLEL PROCESSING COMPLETE ---"),
-        "-filter_complex", ";".join(filter_parts),
-        "-map", "[v]", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "fast",
-        "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
-        str(final_no_subs)
-    ]
-    
-    try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
-        print(f"✅ Version 1: {os.path.getsize(final_no_subs)/(1024*1024):.1f}MB")
-    except:
-        final_no_subs = None
-    
-    # Version 2: With subs
-    print("🎬 Rendering version 2 (with subtitles)...")
-    final_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_with_subs.mp4"
-    
-    ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
-    
-    filter_parts = [
-        "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg]",
-        f"[bg]subtitles='{ass_path}'[v]"
-    ]
-    
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(concatenated),
-        "-i", str(audio_path
+print("--- ✅ PARALLEL PROCESSING COMPLETE ---")
