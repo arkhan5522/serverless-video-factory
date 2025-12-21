@@ -6,7 +6,9 @@ OPTIMIZATIONS:
 2. Parallel FFmpeg processing
 3. Background audio generation
 4. Smart caching and resource management
-5. All previous realism features maintained
+5. Islamic content filtering
+6. Contextual query enhancement
+7. All previous realism features maintained
 """
 
 import os
@@ -67,6 +69,14 @@ raw_gemini = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_KEYS = [k.strip() for k in raw_gemini.split(",") if k.strip()]
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
 PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
+
+# ISLAMIC CONTENT FILTERING
+FORBIDDEN_KEYWORDS = {
+    'sexual': ['nude', 'nudity', 'sexy', 'erotic', 'sexual', 'bikini', 'swimsuit', 'lingerie', 'porn'],
+    'haram': ['alcohol', 'wine', 'beer', 'drunk', 'pork', 'bacon', 'gambling', 'casino'],
+    'inappropriate': ['violence', 'blood', 'gore', 'weapon', 'gun', 'war', 'terror'],
+    'immoral': ['drugs', 'marijuana', 'cocaine', 'heroin', 'smoking']
+}
 
 # Paths
 OUTPUT_DIR = Path("output")
@@ -244,6 +254,7 @@ SUBTITLE_STYLES = {
         "spacing": -0.5
     }
 }
+
 def format_ass_time(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -387,7 +398,7 @@ def upload_to_google_drive(file_path):
         return None
 
 # ========================================== 
-# 6. CINEMATIC SCENE ENGINE
+# 6. CINEMATIC SCENE ENGINE (ENHANCED)
 # ========================================== 
 
 class CinematicSceneEngine:
@@ -397,44 +408,60 @@ class CinematicSceneEngine:
             "camera": "slow_motion",
             "color": "desaturated",
             "motion": "subtle_shake",
-            "keywords": ["struggle", "failed", "problem", "hard", "difficult"]
+            "keywords": ["struggle", "failed", "problem", "hard", "difficult", "challenge", "obstacle"]
         },
         "curiosity": {
             "mood": "mysterious",
             "camera": "zoom_in",
             "color": "warm_contrast",
             "motion": "slow_pan_right",
-            "keywords": ["discover", "found", "secret", "learned", "realized"]
+            "keywords": ["discover", "found", "secret", "learned", "realized", "question", "mystery"]
         },
         "excitement": {
             "mood": "energetic",
             "camera": "dynamic",
             "color": "vibrant",
             "motion": "subtle_zoom",
-            "keywords": ["amazing", "incredible", "awesome", "boom", "wow"]
+            "keywords": ["amazing", "incredible", "awesome", "boom", "wow", "unbelievable", "breakthrough"]
         },
         "explanation": {
             "mood": "professional",
             "camera": "stable",
             "color": "balanced",
             "motion": "still",
-            "keywords": ["because", "reason", "explain", "shows", "demonstrates"]
+            "keywords": ["because", "reason", "explain", "shows", "demonstrates", "means", "indicates"]
         },
         "success": {
             "mood": "triumphant",
             "camera": "wide",
             "color": "golden_hour",
             "motion": "subtle_zoom",
-            "keywords": ["success", "win", "achieve", "result", "growth"]
+            "keywords": ["success", "win", "achieve", "result", "growth", "victory", "accomplish"]
+        },
+        "inspiration": {
+            "mood": "uplifting",
+            "camera": "rising",
+            "color": "bright",
+            "motion": "slow_rise",
+            "keywords": ["inspire", "motivate", "encourage", "hope", "dream", "aspire", "ambition"]
+        },
+        "analysis": {
+            "mood": "serious",
+            "camera": "steady",
+            "color": "cool",
+            "motion": "slow_pan_left",
+            "keywords": ["analyze", "study", "research", "examine", "investigate", "evaluate", "assess"]
         }
     }
     
     VISUAL_INTENT_TYPES = {
-        "explanation": ["hands typing", "laptop screen", "whiteboard"],
-        "story": ["person walking", "city street", "looking thoughtful"],
-        "data": ["charts growing", "graphs animation", "statistics"],
-        "concept": ["abstract shapes", "particles floating", "connections"],
-        "action": ["person working", "team collaboration", "progress"]
+        "explanation": ["hands typing", "laptop screen", "whiteboard", "presentation", "diagram", "flowchart"],
+        "story": ["person walking", "city street", "looking thoughtful", "journey", "path", "road"],
+        "data": ["charts growing", "graphs animation", "statistics", "numbers", "metrics", "dashboard"],
+        "concept": ["abstract shapes", "particles floating", "connections", "network", "idea", "lightbulb"],
+        "action": ["person working", "team collaboration", "progress", "construction", "building", "creating"],
+        "nature": ["landscape", "mountains", "ocean", "forest", "sunrise", "sky"],
+        "technology": ["circuit board", "processor", "server room", "robotics", "innovation", "future"]
     }
     
     @staticmethod
@@ -469,42 +496,251 @@ class CinematicSceneEngine:
             "intent": primary_intent,
             "visual_style": CinematicSceneEngine.EMOTION_TO_VISUAL[primary_emotion]
         }
+    
+    @staticmethod
+    def generate_contextual_queries(sentence, category, emotion, intent):
+        """Generate highly contextual queries based on sentence content"""
+        queries = []
+        words = sentence.lower().split()[:6]
+        key_terms = [w for w in words if len(w) > 3][:3]
+        
+        # Base queries
+        queries.append(f"{category} {emotion} {intent}")
+        queries.append(f"{' '.join(key_terms)} {category} cinematic")
+        
+        # Emotion-specific queries
+        if emotion == "success":
+            queries.extend([
+                f"{category} achievement celebration",
+                f"{category} victory moment",
+                f"{category} goal accomplishment"
+            ])
+        elif emotion == "curiosity":
+            queries.extend([
+                f"{category} discovery reveal",
+                f"{category} mystery solving",
+                f"{category} learning process"
+            ])
+        elif emotion == "inspiration":
+            queries.extend([
+                f"{category} motivational moment",
+                f"{category} uplifting scene",
+                f"{category} hope optimism"
+            ])
+        
+        # Intent-specific queries
+        if intent == "data":
+            queries.extend([
+                f"{category} data visualization",
+                f"{category} charts graphs",
+                f"{category} statistics analysis"
+            ])
+        elif intent == "technology":
+            queries.extend([
+                f"{category} tech innovation",
+                f"{category} digital future",
+                f"{category} advanced technology"
+            ])
+        elif intent == "nature":
+            queries.extend([
+                f"{category} natural beauty",
+                f"{category} peaceful landscape",
+                f"{category} scenic view"
+            ])
+        
+        # Remove duplicates and filter
+        unique_queries = []
+        seen = set()
+        for query in queries:
+            if query not in seen:
+                seen.add(query)
+                unique_queries.append(query)
+        
+        return unique_queries[:8]  # Return top 8 queries
 
 # ========================================== 
-# 7. CATEGORY ANALYSIS
+# 7. CONTENT FILTERING
+# ========================================== 
+
+def filter_islamic_content(query):
+    """Filter out haram and inappropriate content from queries"""
+    query_lower = query.lower()
+    
+    # Check for forbidden keywords
+    for category, keywords in FORBIDDEN_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in query_lower:
+                print(f"⚠️ Filtered query '{query}' (contains {category} keyword)")
+                return None
+    
+    # Filter specific problematic patterns
+    problematic_patterns = [
+        r'bikini|swimsuit',
+        r'sexy.*woman|woman.*sexy',
+        r'alcohol|drunk|wine|beer',
+        r'violence|blood|gore',
+        r'drugs|marijuana'
+    ]
+    
+    for pattern in problematic_patterns:
+        if re.search(pattern, query_lower):
+            print(f"⚠️ Filtered query '{query}' (matches forbidden pattern)")
+            return None
+    
+    return query
+
+def filter_video_results(results):
+    """Filter video results for Islamic compliance"""
+    if not results:
+        return []
+    
+    filtered = []
+    for result in results:
+        # Check URL for problematic terms
+        url_lower = result.get('url', '').lower()
+        safe = True
+        
+        for category, keywords in FORBIDDEN_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in url_lower:
+                    safe = False
+                    break
+        
+        if safe:
+            filtered.append(result)
+    
+    return filtered
+
+# ========================================== 
+# 8. EXPANDED CATEGORIES
 # ========================================== 
 
 def analyze_topic_for_category(topic, script):
-    topic_category_map = {
-        "ai": "artificial intelligence", "artificial intelligence": "artificial intelligence",
-        "machine learning": "artificial intelligence", "technology": "technology",
-        "business": "business", "finance": "finance",
-        "motivation": "people", "success": "people",
-        "science": "science", "health": "health"
+    """Enhanced category detection with more categories"""
+    
+    expanded_category_map = {
+        # Technology & Digital
+        "ai": "artificial intelligence", 
+        "artificial intelligence": "artificial intelligence",
+        "machine learning": "artificial intelligence",
+        "deep learning": "artificial intelligence",
+        "neural network": "artificial intelligence",
+        "technology": "technology",
+        "digital": "technology",
+        "programming": "technology",
+        "coding": "technology",
+        "software": "technology",
+        "computer": "technology",
+        "internet": "technology",
+        
+        # Business & Finance
+        "business": "business",
+        "startup": "business",
+        "entrepreneur": "business",
+        "marketing": "business",
+        "finance": "finance",
+        "money": "finance",
+        "investment": "finance",
+        "stock": "finance",
+        "crypto": "finance",
+        "bitcoin": "finance",
+        "wealth": "finance",
+        
+        # Education & Knowledge
+        "education": "education",
+        "learning": "education",
+        "school": "education",
+        "university": "education",
+        "study": "education",
+        "knowledge": "education",
+        "science": "science",
+        "physics": "science",
+        "chemistry": "science",
+        "biology": "science",
+        "research": "science",
+        
+        # Lifestyle & Personal Development
+        "motivation": "personal development",
+        "success": "personal development",
+        "self-improvement": "personal development",
+        "productivity": "personal development",
+        "habits": "personal development",
+        "health": "health",
+        "fitness": "health",
+        "wellness": "health",
+        "nutrition": "health",
+        "mental health": "health",
+        
+        # Creativity & Arts
+        "art": "creativity",
+        "design": "creativity",
+        "creative": "creativity",
+        "music": "creativity",
+        "photography": "creativity",
+        "writing": "creativity",
+        
+        # Nature & Environment
+        "nature": "nature",
+        "environment": "nature",
+        "climate": "nature",
+        "sustainability": "nature",
+        "animal": "nature",
+        "wildlife": "nature",
+        
+        # Society & Culture
+        "history": "society",
+        "culture": "society",
+        "philosophy": "society",
+        "psychology": "society",
+        "society": "society",
+        "community": "society"
     }
     
     topic_lower = topic.lower()
+    script_lower = script.lower()
     
-    for keyword, category in topic_category_map.items():
+    # Check topic first
+    for keyword, category in expanded_category_map.items():
         if keyword in topic_lower:
-            print(f"✅ Category determined: {category}")
+            print(f"✅ Category determined from topic: {category}")
             return category, [category, keyword]
     
+    # Check script content if topic not found
+    word_freq = {}
+    for word in script_lower.split():
+        word = re.sub(r'[^\w\s]', '', word)
+        if len(word) > 4:
+            word_freq[word] = word_freq.get(word, 0) + 1
+    
+    sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+    
+    for word, freq in sorted_words[:10]:
+        for keyword, category in expanded_category_map.items():
+            if keyword in word.lower():
+                print(f"✅ Category determined from script: {category} (keyword: {word})")
+                return category, [category, keyword]
+    
+    print(f"⚠️ Using default category: technology")
     return "technology", ["technology", "digital"]
 
 # ========================================== 
-# 8. PARALLEL VIDEO SEARCH
+# 9. ENHANCED PARALLEL VIDEO SEARCH
 # ========================================== 
 
 def search_single_service(query, service, keys):
-    """Search single service with error handling"""
+    """Search single service with Islamic filtering"""
     try:
+        # Filter query first
+        filtered_query = filter_islamic_content(query)
+        if not filtered_query:
+            return []
+        
         if service == 'pexels' and keys and keys[0]:
             key = random.choice([k for k in keys if k])
             url = "https://api.pexels.com/videos/search"
             headers = {"Authorization": key}
             params = {
-                "query": query,
+                "query": filtered_query,
                 "per_page": 15,
                 "orientation": "landscape"
             }
@@ -535,14 +771,16 @@ def search_single_service(query, service, keys):
                                 'service': 'pexels',
                                 'quality': best_file.get('quality', 'medium')
                             })
-                return results
+                
+                # Apply Islamic filtering
+                return filter_video_results(results)
                 
         elif service == 'pixabay' and keys and keys[0]:
             key = random.choice([k for k in keys if k])
             url = "https://pixabay.com/api/videos/"
             params = {
                 "key": key,
-                "q": query,
+                "q": filtered_query,
                 "per_page": 15,
                 "orientation": "horizontal"
             }
@@ -562,22 +800,28 @@ def search_single_service(query, service, keys):
                                 'quality': quality
                             })
                             break
-                return results
+                
+                # Apply Islamic filtering
+                return filter_video_results(results)
     except Exception as e:
         pass
     
     return []
 
 def parallel_video_search(query):
-    """Search both services in parallel"""
+    """Search both services in parallel with Islamic filtering"""
+    filtered_query = filter_islamic_content(query)
+    if not filtered_query:
+        return []
+    
     all_results = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = []
         if PEXELS_KEYS and PEXELS_KEYS[0]:
-            futures.append(executor.submit(search_single_service, query, 'pexels', PEXELS_KEYS))
+            futures.append(executor.submit(search_single_service, filtered_query, 'pexels', PEXELS_KEYS))
         if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-            futures.append(executor.submit(search_single_service, query, 'pixabay', PIXABAY_KEYS))
+            futures.append(executor.submit(search_single_service, filtered_query, 'pixabay', PIXABAY_KEYS))
         
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -589,11 +833,11 @@ def parallel_video_search(query):
     return all_results
 
 # ========================================== 
-# 9. PARALLEL VIDEO DOWNLOADER
+# 10. ENHANCED VIDEO DOWNLOADER
 # ========================================== 
 
 def download_and_process_video(video_info, output_path, duration, scene_analysis):
-    """Download and process a single video"""
+    """Download and process a single video with better error handling"""
     try:
         response = requests.get(video_info['url'], timeout=12, stream=True)
         response.raise_for_status()
@@ -612,10 +856,22 @@ def download_and_process_video(video_info, output_path, duration, scene_analysis
         if not os.path.exists(temp_download) or os.path.getsize(temp_download) < 50000:
             return False
         
+        # Apply visual style based on scene analysis
+        filters = ["scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080"]
+        
+        if scene_analysis["visual_style"]["color"] == "desaturated":
+            filters.append("colorchannelmixer=.3:.4:.3:0:.3:.4:.3:0:.3:.4:.3")
+        elif scene_analysis["visual_style"]["color"] == "vibrant":
+            filters.append("eq=saturation=1.2:brightness=0.05")
+        elif scene_analysis["visual_style"]["color"] == "warm_contrast":
+            filters.append("colorbalance=rs=.1:gs=0:bs=-.1")
+        
+        filter_chain = ','.join(filters)
+        
         cmd = [
             "ffmpeg", "-y", "-i", str(temp_download),
             "-t", str(duration),
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
+            "-vf", filter_chain,
             "-c:v", "libx264", "-preset", "ultrafast",
             "-b:v", "6M", "-an",
             str(output_path)
@@ -635,88 +891,159 @@ def download_and_process_video(video_info, output_path, duration, scene_analysis
         return False
 
 # ========================================== 
-# 10. PARALLEL VISUAL PROCESSING
+# 11. ENHANCED VISUAL PROCESSING
 # ========================================== 
 
-def get_category_queries(category, scene_analysis):
-    """Get search queries for category"""
-    CATEGORY_VISUALS = {
-        "artificial intelligence": ["neural network", "AI processing", "machine learning", "data visualization"],
-        "technology": ["innovation", "tech startup", "digital interface", "coding"],
-        "business": ["business meeting", "office", "team success", "corporate"],
-        "finance": ["stock charts", "financial growth", "money", "investment"],
-        "people": ["person achieving", "success story", "motivation", "inspiration"],
-        "science": ["laboratory", "research", "discovery", "experiment"],
-        "health": ["fitness", "healthy lifestyle", "medical", "wellness"]
+def get_category_queries(category, scene_analysis, sentence_text):
+    """Get highly contextual search queries for category"""
+    
+    EXPANDED_CATEGORY_VISUALS = {
+        "artificial intelligence": [
+            "neural network visualization", "AI processing data", "machine learning concept",
+            "data visualization abstract", "artificial intelligence future", "digital brain network",
+            "algorithm visualization", "smart technology innovation"
+        ],
+        "technology": [
+            "innovation technology", "tech startup office", "digital interface screens",
+            "coding programming computer", "future technology concept", "digital transformation",
+            "smart devices connectivity", "tech innovation background"
+        ],
+        "business": [
+            "business meeting success", "office team collaboration", "corporate success growth",
+            "entrepreneur startup journey", "business strategy planning", "professional office environment",
+            "successful business presentation", "team achievement celebration"
+        ],
+        "finance": [
+            "stock market growth", "financial charts success", "money investment concept",
+            "wealth accumulation strategy", "financial planning analysis", "economic growth visualization",
+            "digital currency future", "investment portfolio management"
+        ],
+        "personal development": [
+            "personal growth journey", "self improvement motivation", "success mindset development",
+            "goal achievement progress", "life transformation story", "positive change inspiration",
+            "habit formation process", "mindset shift breakthrough"
+        ],
+        "health": [
+            "healthy lifestyle fitness", "wellness mental health", "nutrition exercise balance",
+            "medical research innovation", "fitness motivation journey", "healthy living habits",
+            "wellbeing mindfulness practice", "healthcare advancement"
+        ],
+        "education": [
+            "learning education process", "knowledge acquisition journey", "study research academic",
+            "classroom online learning", "educational technology innovation", "skill development training",
+            "lifelong learning concept", "educational inspiration"
+        ],
+        "science": [
+            "scientific research discovery", "laboratory experiment innovation", "space exploration technology",
+            "nature science research", "physics chemistry biology", "scientific breakthrough moment",
+            "research development progress", "science technology advancement"
+        ],
+        "creativity": [
+            "creative art design", "innovation imagination concept", "artistic expression process",
+            "design thinking creation", "creative problem solving", "artistic inspiration moment",
+            "creative process workflow", "design innovation visualization"
+        ],
+        "nature": [
+            "natural landscape beauty", "environment sustainability concept", "wildlife nature conservation",
+            "peaceful nature scenery", "environmental protection effort", "nature photography landscape",
+            "ecological balance harmony", "nature inspiration calm"
+        ],
+        "society": [
+            "community culture diversity", "historical cultural heritage", "social innovation change",
+            "human connection society", "cultural exchange understanding", "social progress development",
+            "community building teamwork", "cultural diversity celebration"
+        ]
     }
     
-    visuals = CATEGORY_VISUALS.get(category, CATEGORY_VISUALS["technology"])
+    # Get base visuals for category
+    visuals = EXPANDED_CATEGORY_VISUALS.get(category, EXPANDED_CATEGORY_VISUALS["technology"])
     emotion = scene_analysis.get("emotion", "explanation")
+    intent = scene_analysis.get("intent", "story")
     
-    queries = [
-        f"{random.choice(visuals)} {category} cinematic",
-        f"{category} professional 4k",
-        f"{emotion} {category} visual"
-    ]
+    # Generate contextual queries
+    queries = CinematicSceneEngine.generate_contextual_queries(
+        sentence_text, category, emotion, intent
+    )
     
-    return queries
+    # Add high-quality generic queries as fallback
+    if len(queries) < 4:
+        queries.extend([
+            f"{category} {emotion} cinematic 4k",
+            f"{category} professional background",
+            f"{intent} {category} visual",
+            f"{category} documentary footage"
+        ])
+    
+    # Ensure Islamic compliance
+    filtered_queries = []
+    for query in queries:
+        filtered = filter_islamic_content(query)
+        if filtered:
+            filtered_queries.append(filtered)
+    
+    return filtered_queries[:6]  # Return top 6 filtered queries
 
 def process_single_clip(i, sent, category):
-    """Process a single video clip (runs in parallel) - NEVER uses gradients"""
+    """Process a single video clip with enhanced contextual queries"""
     try:
         dur = max(3.5, sent['end'] - sent['start'])
         scene_analysis = CinematicSceneEngine.analyze_sentence(sent['text'])
         
-        # Get base queries
-        queries = get_category_queries(category, scene_analysis)
+        # Get highly contextual queries
+        queries = get_category_queries(category, scene_analysis, sent['text'])
         
-        # Add more specific queries based on sentence content
-        sentence_lower = sent['text'].lower()
-        words = sentence_lower.split()[:5]  # Use first few words
-        if len(words) > 2:
-            specific_query = ' '.join(words[:3])
-            queries.insert(0, f"{specific_query} {category}")
+        print(f"    🔍 Clip {i+1} queries: {', '.join(queries[:3])}")
         
         # Try all queries until we find a video
-        for query_idx, query in enumerate(queries[:4]):  # Try up to 4 queries
+        for query_idx, query in enumerate(queries):
             results = parallel_video_search(query)
             
             with URL_LOCK:
                 available = [v for v in results if v['url'] not in USED_VIDEO_URLS]
             
             if available:
-                # Prioritize by quality
+                # Prioritize by quality and relevance
                 quality_order = ['hd', 'large', 'medium', 'small']
+                selected_video = None
+                
                 for quality in quality_order:
                     quality_videos = [v for v in available if v.get('quality') == quality]
                     if quality_videos:
-                        video = random.choice(quality_videos)
+                        selected_video = random.choice(quality_videos)
                         break
-                else:
-                    video = random.choice(available[:3])
+                
+                if not selected_video and available:
+                    selected_video = random.choice(available[:3])
                 
                 with URL_LOCK:
-                    USED_VIDEO_URLS.add(video['url'])
+                    USED_VIDEO_URLS.add(selected_video['url'])
                 
                 output_path = TEMP_DIR / f"clip_{i}.mp4"
                 
-                if download_and_process_video(video, output_path, dur, scene_analysis):
-                    print(f"    ✅ Clip {i+1} processed ({video['service']} - {query})")
+                if download_and_process_video(selected_video, output_path, dur, scene_analysis):
+                    print(f"    ✅ Clip {i+1} processed ({selected_video['service']} - {query[:40]}...)")
                     return str(output_path)
             
-            print(f"    🔄 Clip {i+1} trying query {query_idx+1}: '{query}'")
+            print(f"    🔄 Clip {i+1} trying query {query_idx+1}/{len(queries)}: '{query[:50]}...'")
         
-        # If all queries fail, try broader searches
-        print(f"    🔍 Clip {i+1} trying broader searches...")
+        # If all queries fail, try broader but safe searches
+        print(f"    🔍 Clip {i+1} trying broader safe searches...")
         
-        broader_queries = [
-            f"{category} background",
-            f"{category} scene",
-            "cinematic footage",
-            "professional background"
+        broader_safe_queries = [
+            f"{category} professional",
+            "cinematic footage 4k",
+            "documentary background",
+            "professional video background"
         ]
         
-        for query in broader_queries:
+        # Filter for Islamic compliance
+        safe_queries = []
+        for query in broader_safe_queries:
+            filtered = filter_islamic_content(query)
+            if filtered:
+                safe_queries.append(filtered)
+        
+        for query in safe_queries[:3]:
             results = parallel_video_search(query)
             
             with URL_LOCK:
@@ -731,73 +1058,28 @@ def process_single_clip(i, sent, category):
                 output_path = TEMP_DIR / f"clip_{i}.mp4"
                 
                 if download_and_process_video(video, output_path, dur, scene_analysis):
-                    print(f"    ✅ Clip {i+1} processed (fallback: {query})")
+                    print(f"    ✅ Clip {i+1} processed (safe fallback: {query})")
                     return str(output_path)
         
-        # LAST RESORT: Use category-based video (still not gradient)
-        print(f"    ⚠️ Clip {i+1} using category default...")
-        
-        # Get default videos for the category
-        CATEGORY_DEFAULTS = {
-            "artificial intelligence": ["technology future", "digital innovation", "data flow"],
-            "technology": ["tech innovation", "digital world", "future technology"],
-            "business": ["office environment", "business success", "team meeting"],
-            "finance": ["financial growth", "market success", "money concept"],
-            "people": ["person achieving", "success story", "motivational"],
-            "science": ["scientific research", "laboratory", "discovery"],
-            "health": ["healthy lifestyle", "fitness", "wellness"]
-        }
-        
-        default_queries = CATEGORY_DEFAULTS.get(category, ["professional", "cinematic", "background"])
-        
-        for query in default_queries:
-            results = parallel_video_search(query)
-            if results:
-                with URL_LOCK:
-                    available = [v for v in results if v['url'] not in USED_VIDEO_URLS]
-                
-                if available:
-                    video = random.choice(available)
-                    
-                    with URL_LOCK:
-                        USED_VIDEO_URLS.add(video['url'])
-                    
-                    output_path = TEMP_DIR / f"clip_{i}.mp4"
-                    
-                    if download_and_process_video(video, output_path, dur, scene_analysis):
-                        print(f"    ✅ Clip {i+1} processed (default: {query})")
-                        return str(output_path)
-        
-        # If we STILL can't find anything, reuse a previous clip with different processing
-        # This is better than gradient
-        print(f"    🔄 Clip {i+1} reusing with different processing...")
-        
-        # Try one more generic search
-        results = parallel_video_search(category)
-        if results:
-            video = random.choice(results[:5])
-            output_path = TEMP_DIR / f"clip_{i}.mp4"
-            
-            if download_and_process_video(video, output_path, dur, scene_analysis):
-                print(f"    ✅ Clip {i+1} processed (generic: {category})")
-                return str(output_path)
-        
-        print(f"    ❌ Clip {i+1} could not find suitable video")
+        print(f"    ⚠️ Clip {i+1} could not find suitable video")
         return None
         
     except Exception as e:
         print(f"    ✗ Clip {i+1} failed: {str(e)[:40]}")
         return None
+
 def process_visuals_parallel(sentences, topic, full_script):
-    """Process all visuals in parallel - skip failed clips"""
+    """Process all visuals in parallel with progress tracking"""
     category, _ = analyze_topic_for_category(topic, full_script)
     print(f"🎯 CATEGORY: {category.upper()}")
     
     processed_clips = []
-    clip_indices = []  # Store which sentences we have clips for
     
     batch_size = 5
-    for batch_start in range(0, len(sentences), batch_size):
+    total_batches = math.ceil(len(sentences) / batch_size)
+    
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * batch_size
         batch_end = min(batch_start + batch_size, len(sentences))
         batch = sentences[batch_start:batch_end]
         
@@ -814,25 +1096,24 @@ def process_visuals_parallel(sentences, topic, full_script):
             for future in concurrent.futures.as_completed(futures):
                 global_idx = futures[future]
                 try:
-                    result = future.result(timeout=60)  # Increased timeout
+                    result = future.result(timeout=60)
                     if result:
                         processed_clips.append(result)
-                        clip_indices.append(global_idx)
+                        print(f"    ✓ Clip {global_idx+1} completed successfully")
                     else:
-                        print(f"    ⚠️ Clip {global_idx+1} skipped (no suitable video found)")
+                        print(f"    ⚠️ Clip {global_idx+1} skipped (no suitable video)")
                 except Exception as e:
-                    print(f"    ✗ Batch item {global_idx} failed: {e}")
+                    print(f"    ✗ Clip {global_idx+1} timed out or failed: {e}")
     
-    print(f"✅ Processed {len(processed_clips)}/{len(sentences)} clips")
+    print(f"✅ Processed {len(processed_clips)}/{len(sentences)} clips successfully")
     
-    # If we have fewer clips than sentences, adjust the audio/script timing
-    if len(processed_clips) < len(sentences):
-        print(f"⚠️ Only {len(processed_clips)} clips available, adjusting...")
+    if len(processed_clips) < len(sentences) * 0.7:  # Less than 70% success
+        print(f"⚠️ Warning: Only {len(processed_clips)}/{len(sentences)} clips processed")
     
     return processed_clips
 
 # ========================================== 
-# 11. DUAL OUTPUT RENDERER
+# 12. DUAL OUTPUT RENDERER (ENHANCED)
 # ========================================== 
 
 def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
@@ -840,11 +1121,22 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
     
     print("🎬 Concatenating clips...")
     
+    # Ensure we have clips
+    if not processed_clips:
+        print("❌ No clips to render")
+        return None, None
+    
+    # Filter out None values
+    valid_clips = [c for c in processed_clips if c and os.path.exists(c)]
+    
+    if not valid_clips:
+        print("❌ No valid clips found")
+        return None, None
+    
     concat_list = TEMP_DIR / "concat_list.txt"
     with open(concat_list, "w") as f:
-        for clip in processed_clips:
-            if os.path.exists(clip):
-                f.write(f"file '{clip}'\n")
+        for clip in valid_clips:
+            f.write(f"file '{clip}'\n")
     
     concatenated = TEMP_DIR / "concatenated.mp4"
     cmd = [
@@ -853,7 +1145,23 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
         "-c:v", "libx264", "-preset", "fast",
         "-b:v", "8M", "-an", str(concatenated)
     ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60)
+        print(f"✅ Concatenated {len(valid_clips)} clips")
+    except subprocess.TimeoutExpired:
+        print("⚠️ Concatenation timed out, trying with simpler settings")
+        # Try simpler concatenation
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
+            "-c", "copy", str(concatenated)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    if not os.path.exists(concatenated) or os.path.getsize(concatenated) < 10000:
+        print("❌ Concatenation failed")
+        return None, None
     
     print("🎬 Rendering version 1 (no subtitles)...")
     final_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_no_subs.mp4"
@@ -862,49 +1170,52 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
         "ffmpeg", "-y",
         "-i", str(concatenated),
         "-i", str(audio_path),
-        "-filter_complex", "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v]",
+        "-filter_complex", "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v]",
         "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "fast",
         "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
-        str(final_no_subs)
+        "-shortest", str(final_no_subs)
     ]
     
     try:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
         print(f"✅ Version 1: {os.path.getsize(final_no_subs)/(1024*1024):.1f}MB")
-    except:
+    except Exception as e:
+        print(f"❌ Version 1 failed: {e}")
         final_no_subs = None
     
     print("🎬 Rendering version 2 (with subtitles)...")
     final_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_with_subs.mp4"
     
-    ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
+    # Escape path for FFmpeg
+    ass_path = str(ass_file).replace('\\', '\\\\').replace(':', '\\:')
     
     cmd = [
         "ffmpeg", "-y",
         "-i", str(concatenated),
         "-i", str(audio_path),
-        "-filter_complex", f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_path}'[v]",
+        "-filter_complex", f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,subtitles='{ass_path}':force_style='Fontsize=24',format=yuv420p[v]",
         "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "fast",
         "-b:v", "10M", "-c:a", "aac", "-b:a", "256k",
-        str(final_with_subs)
+        "-shortest", str(final_with_subs)
     ]
     
     try:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
         print(f"✅ Version 2: {os.path.getsize(final_with_subs)/(1024*1024):.1f}MB")
-    except:
+    except Exception as e:
+        print(f"❌ Version 2 failed: {e}")
         final_with_subs = None
     
     return final_no_subs, final_with_subs
 
 # ========================================== 
-# 12. PARALLEL AUDIO GENERATION
+# 13. PARALLEL AUDIO GENERATION (FIXED)
 # ========================================== 
 
 class AudioGenerator:
-    """Async audio generation"""
+    """Async audio generation with better error handling"""
     
     def __init__(self, text, ref_audio, out_path):
         self.text = text
@@ -912,14 +1223,18 @@ class AudioGenerator:
         self.out_path = out_path
         self.completed = False
         self.success = False
+        self.error = None
         
     def generate_in_background(self):
         """Run in separate thread"""
         try:
             device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"🎤 Audio device: {device}")
+            
             from chatterbox.tts import ChatterboxTTS
             model = ChatterboxTTS.from_pretrained(device=device)
             
+            # Clean text
             clean = re.sub(r'\[.*?\]', '', self.text)
             sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean) if len(s.strip()) > 2]
             
@@ -935,6 +1250,7 @@ class AudioGenerator:
                         chunk_clean = chunk.replace('"', '').replace('"', '').replace('"', '')
                         if chunk_clean.endswith('.'):
                             chunk_clean = chunk_clean + ' '
+                        
                         wav = model.generate(
                             text=chunk_clean,
                             audio_prompt_path=str(self.ref_audio),
@@ -942,33 +1258,47 @@ class AudioGenerator:
                         )
                         all_wavs.append(wav.cpu())
                     
+                    # Clean GPU memory periodically
                     if i % 25 == 0 and device == "cuda":
                         torch.cuda.empty_cache()
                         gc.collect()
+                        
                 except Exception as e:
-                    print(f"⚠️ Skipping sentence {i}")
+                    print(f"⚠️ Audio sentence {i} failed, using fallback: {str(e)[:50]}")
+                    # Create silent audio as fallback
+                    fallback_duration = len(chunk.split()) / 2.5
+                    fallback_samples = int(fallback_duration * 24000)
+                    fallback_wav = torch.zeros((1, fallback_samples))
+                    all_wavs.append(fallback_wav)
                     continue
             
             if all_wavs:
+                # Concatenate all audio
                 full_audio = torch.cat(all_wavs, dim=1)
+                
+                # Add ending silence
                 silence = torch.zeros((full_audio.shape[0], int(1.5 * 24000)))
                 full_audio_padded = torch.cat([full_audio, silence], dim=1)
                 
+                # Save audio
                 torchaudio.save(self.out_path, full_audio_padded, 24000)
+                
                 duration = full_audio_padded.shape[1] / 24000
-                print(f"✅ Audio complete: {duration:.1f}s")
+                print(f"✅ Audio complete: {duration:.1f}s ({os.path.getsize(self.out_path)/(1024*1024):.1f} MB)")
                 self.success = True
             else:
+                print("❌ No audio generated")
                 self.success = False
                 
         except Exception as e:
             print(f"❌ Audio generation failed: {e}")
+            self.error = str(e)
             self.success = False
         finally:
             self.completed = True
 
 # ========================================== 
-# 13. SCRIPT GENERATION
+# 14. SCRIPT GENERATION WITH ISLAMIC FILTERING
 # ========================================== 
 
 def generate_script(topic, minutes):
@@ -980,46 +1310,98 @@ def generate_script(topic, minutes):
     
     random.shuffle(GEMINI_KEYS)
     
+    # Add Islamic content filtering to prompt
     prompt = f"""Write a YouTube documentary script about '{topic}'. {words} words.
-CRITICAL: Write ONLY spoken narration. NO [brackets], NO stage directions, NO sound effects."""
+
+CRITICAL REQUIREMENTS:
+1. Write ONLY spoken narration. NO [brackets], NO stage directions, NO sound effects.
+2. Content must be family-friendly and suitable for Islamic values.
+3. Avoid any references to: nudity, sexuality, alcohol, drugs, violence, gambling, or any haram content.
+4. Focus on educational, inspirational, or informative content only.
+5. Use professional, respectful language throughout.
+
+The script should be engaging, informative, and suitable for all audiences."""
     
     for key in GEMINI_KEYS:
         try:
             genai.configure(api_key=key)
             model = genai.GenerativeModel('gemini-pro')
-            response = model.generate_content(prompt)
+            
+            # Add safety settings
+            safety_settings = [
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                }
+            ]
+            
+            response = model.generate_content(
+                prompt,
+                safety_settings=safety_settings
+            )
+            
             script = response.text.replace("*","").replace("#","").strip()
+            
+            # Additional filtering
             script = re.sub(r'\[.*?\]', '', script)
+            
+            # Remove any potentially problematic content
+            for category, keywords in FORBIDDEN_KEYWORDS.items():
+                for keyword in keywords:
+                    if keyword in script.lower():
+                        script = re.sub(fr'\b{keyword}\b', '[redacted]', script, flags=re.IGNORECASE)
+            
+            print(f"✅ Script generated: {len(script.split())} words")
             return script
+            
         except Exception as e:
             print(f"⚠️ Gemini error: {str(e)[:50]}")
             continue
     
+    print("⚠️ Using fallback script")
     return f"This is a documentary about {topic}. " * 100
 
 # ========================================== 
-# 14. MAIN EXECUTION
+# 15. MAIN EXECUTION (FIXED CONTINUATION)
 # ========================================== 
 
 print("--- 🚀 PARALLEL PROCESSING MODE ---")
+print("🔒 Islamic Content Filtering: ACTIVE")
 update_status(1, "Initializing parallel engine...")
 
+# Setup directories
 ref_voice = TEMP_DIR / "voice.mp3"
 ref_logo = TEMP_DIR / "logo.png"
 
+# Download voice sample
 if not download_asset(VOICE_PATH, ref_voice):
     update_status(0, "Voice download failed", "failed")
     exit(1)
 
-print(f"✅ Voice downloaded")
+print(f"✅ Voice downloaded: {os.path.getsize(ref_voice)/(1024*1024):.1f} MB")
 
+# Download logo if provided
 if LOGO_PATH and LOGO_PATH != "None":
     download_asset(LOGO_PATH, ref_logo)
     if not os.path.exists(ref_logo):
         ref_logo = None
+        print("⚠️ Logo not found, continuing without logo")
 else:
     ref_logo = None
 
+# Generate or use script
 update_status(10, "Generating script...")
 if MODE == "topic":
     text = generate_script(TOPIC, DURATION_MINS)
@@ -1031,25 +1413,20 @@ if not text or len(text) < 100:
     exit(1)
 
 print(f"✅ Script: {len(text.split())} words")
+print(f"📝 First 200 chars: {text[:200]}...")
 
-update_status(15, "Starting parallel audio + video processing...")
-
-audio_out = TEMP_DIR / "audio.wav"
-audio_gen = AudioGenerator(text, ref_voice, audio_out)
-audio_thread = Thread(target=audio_gen.generate_in_background)
-audio_thread.start()
-
-update_status(20, "Preparing video scenes...")
+# Split script into timed sentences
+update_status(15, "Preparing audio and video timeline...")
 
 words = text.split()
-total_duration = len(words) / 2.5
+total_duration = len(words) / 2.5  # Approximate speaking rate
 
 sentences = []
 current_time = 0
-words_per_sentence = random.randint(8, 12)
+base_words_per_sentence = random.randint(8, 12)
 
-for i in range(0, len(words), words_per_sentence):
-    chunk = words[i:i + words_per_sentence]
+for i in range(0, len(words), base_words_per_sentence):
+    chunk = words[i:i + base_words_per_sentence]
     sentence_duration = len(chunk) / 2.5
     sentences.append({
         "text": ' '.join(chunk),
@@ -1057,53 +1434,106 @@ for i in range(0, len(words), words_per_sentence):
         "end": current_time + sentence_duration
     })
     current_time += sentence_duration
-    words_per_sentence = random.randint(8, 12)
+    base_words_per_sentence = random.randint(8, 12)  # Vary sentence length
 
+# Add ending pause
 if sentences:
     sentences[-1]['end'] += 1.5
 
+print(f"📊 Timeline: {len(sentences)} segments, {current_time:.1f} seconds total")
+
+# Create subtitles
 ass_file = TEMP_DIR / "subtitles.ass"
 create_human_subtitles(sentences, ass_file)
+print(f"✅ Subtitles created: {ass_file}")
 
-update_status(50, "Processing videos in parallel (5 at a time)...")
+# Start audio generation in background
+update_status(20, "Starting parallel audio generation...")
+audio_out = TEMP_DIR / "audio.wav"
+audio_gen = AudioGenerator(text, ref_voice, audio_out)
+audio_thread = Thread(target=audio_gen.generate_in_background)
+audio_thread.start()
+
+# Process videos in parallel while audio generates
+update_status(25, "Starting parallel video processing...")
+category, _ = analyze_topic_for_category(TOPIC, text)
+
+# Start video processing
+video_start_time = time.time()
 processed_clips = process_visuals_parallel(sentences, TOPIC, text)
+video_elapsed = time.time() - video_start_time
+print(f"⏱️ Video processing took {video_elapsed:.1f} seconds")
 
+# Wait for audio completion with timeout
 update_status(85, "Waiting for audio completion...")
-audio_thread.join(timeout=300)
+audio_thread.join(timeout=300)  # 5 minute timeout
 
-if not audio_gen.success or not os.path.exists(audio_out):
+if not audio_gen.completed:
+    print("⚠️ Audio generation timed out, checking for partial output")
+    
+if not audio_gen.success:
+    print(f"❌ Audio generation failed: {audio_gen.error}")
     update_status(0, "Audio generation failed", "failed")
     exit(1)
 
-if processed_clips and len(processed_clips) > 0:
-    update_status(90, "Rendering final outputs...")
-    
-    final_no_subs, final_with_subs = render_dual_outputs(
-        processed_clips, audio_out, ass_file, ref_logo
-    )
-    
-    if final_no_subs and os.path.exists(final_no_subs):
-        update_status(93, "Uploading version 1...")
-        link1 = upload_to_google_drive(final_no_subs)
-        if link1:
-            print(f"🔗 Version 1: {link1}")
-    
-    if final_with_subs and os.path.exists(final_with_subs):
-        update_status(97, "Uploading version 2...")
-        link2 = upload_to_google_drive(final_with_subs)
-        if link2:
-            print(f"🔗 Version 2: {link2}")
-            update_status(100, "Complete!", "completed", link2)
-        else:
-            update_status(100, "Complete (upload partial)", "completed", link1 if 'link1' in locals() else None)
-else:
-    update_status(0, "No clips processed", "failed")
+if not os.path.exists(audio_out) or os.path.getsize(audio_out) < 10000:
+    print("❌ Audio file not found or too small")
+    update_status(0, "Audio file invalid", "failed")
+    exit(1)
 
-print("🧹 Cleaning up...")
+audio_duration = os.path.getsize(audio_out) / (24000 * 2)  # Approximate duration
+print(f"✅ Audio ready: {audio_duration:.1f}s")
+
+# Check if we have clips
+if not processed_clips or len(processed_clips) == 0:
+    print("❌ No video clips processed")
+    update_status(0, "No video content", "failed")
+    exit(1)
+
+# Render final videos
+update_status(90, "Rendering final outputs...")
+final_no_subs, final_with_subs = render_dual_outputs(
+    processed_clips, audio_out, ass_file, ref_logo
+)
+
+# Upload to Google Drive
+uploaded_links = []
+
+if final_no_subs and os.path.exists(final_no_subs):
+    update_status(93, "Uploading version 1 (no subtitles)...")
+    link1 = upload_to_google_drive(final_no_subs)
+    if link1:
+        uploaded_links.append({"type": "no_subs", "url": link1})
+        print(f"🔗 Version 1: {link1}")
+
+if final_with_subs and os.path.exists(final_with_subs):
+    update_status(97, "Uploading version 2 (with subtitles)...")
+    link2 = upload_to_google_drive(final_with_subs)
+    if link2:
+        uploaded_links.append({"type": "with_subs", "url": link2})
+        print(f"🔗 Version 2: {link2}")
+
+# Final status update
+if uploaded_links:
+    final_url = uploaded_links[-1]["url"]  # Use last successful upload
+    update_status(100, "Complete! Videos uploaded successfully.", "completed", final_url)
+    print(f"🎉 Successfully uploaded {len(uploaded_links)} videos")
+else:
+    update_status(100, "Complete (no uploads)", "completed")
+    print("⚠️ Processing complete but no videos were uploaded")
+
+# Cleanup
+print("🧹 Cleaning up temporary files...")
 if TEMP_DIR.exists():
     try:
         shutil.rmtree(TEMP_DIR)
-    except:
-        pass
+        print("✅ Temporary files cleaned")
+    except Exception as e:
+        print(f"⚠️ Cleanup warning: {e}")
 
 print("--- ✅ PARALLEL PROCESSING COMPLETE ---")
+print(f"📊 Summary:")
+print(f"   Script: {len(text.split())} words")
+print(f"   Audio: {audio_duration:.1f}s")
+print(f"   Clips: {len(processed_clips)} processed")
+print(f"   Videos: {len(uploaded_links)} uploaded")
