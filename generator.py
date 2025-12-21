@@ -33,15 +33,13 @@ from collections import defaultdict
 
 print("--- 🔧 Installing Dependencies ---")
 try:
+    # Install only essential packages
     libs = [
         "chatterbox-tts",
-        "torchaudio", 
-        "assemblyai",
+        "torchaudio",
         "google-generativeai",
         "requests",
-        "beautifulsoup4",
         "pydub",
-        "numpy",
         "--quiet"
     ]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
@@ -51,7 +49,6 @@ except Exception as e:
 
 import torch
 import torchaudio
-import assemblyai as aai
 import google.generativeai as genai
 import numpy as np
 
@@ -70,7 +67,6 @@ JOB_ID = """{{JOB_ID_PLACEHOLDER}}"""
 # Keys
 raw_gemini = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_KEYS = [k.strip() for k in raw_gemini.split(",") if k.strip()]
-ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
 PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
 
@@ -83,7 +79,335 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ========================================== 
-# 3. CINEMATIC SCENE ENGINE
+# 3. LOGGING & STATUS SYSTEM
+# ========================================== 
+
+LOG_BUFFER = []
+
+def update_status(progress, message, status="processing", file_url=None):
+    """Updates status.json in GitHub repo so HTML can read it"""
+    
+    # 1. Print to Kaggle Console
+    timestamp = time.strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {message}"
+    print(f"--- {progress}% | {message} ---")
+    
+    # 2. Add to Log Buffer (Keep last 30 lines)
+    LOG_BUFFER.append(log_entry)
+    if len(LOG_BUFFER) > 30:
+        LOG_BUFFER.pop(0)
+
+    # 3. Get GitHub Credentials
+    repo = os.environ.get('GITHUB_REPOSITORY')
+    token = os.environ.get('GITHUB_TOKEN')
+    
+    # If running locally without secrets, stop here
+    if not repo or not token: 
+        return
+
+    # 4. Prepare Data for HTML
+    path = f"status/status_{JOB_ID}.json"
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    
+    data = {
+        "progress": progress,
+        "message": message,
+        "status": status,
+        "logs": "\n".join(LOG_BUFFER), # Send logs to HTML
+        "timestamp": time.time()
+    }
+    
+    # If we have a Google Drive link, send it
+    if file_url: 
+        data["file_io_url"] = file_url
+    
+    # 5. Send to GitHub API
+    import base64
+    content_json = json.dumps(data)
+    content_b64 = base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
+    
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    try:
+        # Step A: Get existing file SHA (required to update a file)
+        get_req = requests.get(url, headers=headers)
+        sha = get_req.json().get("sha") if get_req.status_code == 200 else None
+        
+        # Step B: Upload new status
+        payload = {
+            "message": f"Update status: {progress}%",
+            "content": content_b64,
+            "branch": "main" 
+        }
+        if sha:
+            payload["sha"] = sha
+            
+        requests.put(url, headers=headers, json=payload)
+    except Exception as e:
+        print(f"⚠️ Failed to update HTML status: {e}")
+
+def download_asset(path, local):
+    try:
+        repo = os.environ.get('GITHUB_REPOSITORY')
+        token = os.environ.get('GITHUB_TOKEN')
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3.raw"}
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            with open(local, "wb") as f:
+                f.write(r.content)
+            return True
+    except:
+        pass
+    return False
+
+# ========================================== 
+# 4. SUBTITLE STYLES
+# ========================================== 
+
+SUBTITLE_STYLES = {
+    "mrbeast_yellow": {
+        "name": "MrBeast Yellow (3D Pop)",
+        "fontname": "Arial Black",
+        "fontsize": 60,
+        "primary_colour": "&H0000FFFF",  # Yellow
+        "back_colour": "&H00000000",      # Black
+        "outline_colour": "&H00000000",   # Black
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
+        "outline": 4,
+        "shadow": 3,
+        "margin_v": 45,
+        "alignment": 2,
+        "spacing": 1.5
+    },
+    "hormozi_green": {
+        "name": "Hormozi Green (High Contrast)",
+        "fontname": "Arial Black",
+        "fontsize": 60,
+        "primary_colour": "&H0000FF00",  # Green
+        "back_colour": "&H80000000",
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
+        "outline": 5,
+        "shadow": 0,
+        "margin_v": 55,
+        "alignment": 2,
+        "spacing": 0.5
+    },
+    "finance_blue": {
+        "name": "Finance Blue (Neon Glow)",
+        "fontname": "Arial",
+        "fontsize": 80,
+        "primary_colour": "&H00FFFFFF",  # White
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00FF9900",  # Blue
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
+        "outline": 2,
+        "shadow": 3,
+        "margin_v": 50,
+        "alignment": 2,
+        "spacing": 2
+    },
+    "netflix_box": {
+        "name": "Netflix Modern",
+        "fontname": "Roboto",
+        "fontsize": 80,
+        "primary_colour": "&H00FFFFFF",  # White
+        "back_colour": "&H90000000",     # Dark box
+        "outline_colour": "&H00000000",
+        "bold": 0,
+        "italic": 0,
+        "border_style": 3,  # Opaque box
+        "outline": 0,
+        "shadow": 0,
+        "margin_v": 35,
+        "alignment": 2,
+        "spacing": 0.5
+    },
+    "tiktok_white": {
+        "name": "TikTok White (Ultra Bold)",
+        "fontname": "Arial Black",
+        "fontsize": 65,
+        "primary_colour": "&H00FFFFFF",  # White
+        "back_colour": "&H60000000",
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
+        "outline": 4.5,
+        "shadow": 2,
+        "margin_v": 40,
+        "alignment": 2,
+        "spacing": -0.5
+    }
+}
+
+def format_ass_time(seconds):
+    """Format seconds to ASS timestamp (H:MM:SS.CS)"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    cs = int((seconds % 1) * 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+def create_human_subtitles(sentences, ass_file):
+    """Create human-like subtitles with proper timing"""
+    
+    style_key = random.choice(list(SUBTITLE_STYLES.keys()))
+    style = SUBTITLE_STYLES[style_key]
+    
+    print(f"✨ Using Subtitle Style: {style['name']}")
+    
+    with open(ass_file, "w", encoding="utf-8-sig") as f:
+        # Header
+        f.write("[Script Info]\n")
+        f.write("ScriptType: v4.00+\n")
+        f.write("PlayResX: 1920\n")
+        f.write("PlayResY: 1080\n")
+        f.write("WrapStyle: 2\n")
+        f.write("ScaledBorderAndShadow: yes\n\n")
+        
+        # Styles
+        f.write("[V4+ Styles]\n")
+        f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
+        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},25,25,{style['margin_v']},1\n\n")
+        
+        # Events
+        f.write("[Events]\n")
+        f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+        
+        for s in sentences:
+            # Human-like timing: appear slightly before, disappear before end
+            start_time = max(0, s['start'] - 0.15)  # Appear 150ms early
+            end_time = s['end'] - 0.3  # Disappear 300ms early
+            
+            text = s['text'].strip()
+            text = re.sub(r'[\[\]]', '', text)
+            
+            # Human reading speed: 3-4 words per line
+            words = text.split()
+            lines = []
+            current_line = []
+            char_count = 0
+            
+            for word in words:
+                if char_count + len(word) + 1 > 35 or len(current_line) >= 4:
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                    char_count = len(word)
+                else:
+                    current_line.append(word)
+                    char_count += len(word) + 1
+            
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            # Uppercase for certain styles
+            if style_key in ["mrbeast_yellow", "hormozi_green", "tiktok_white"]:
+                lines = [line.upper() for line in lines]
+            
+            formatted_text = '\\N'.join(lines)
+            
+            f.write(f"Dialogue: 0,{format_ass_time(start_time)},{format_ass_time(end_time)},Default,,0,0,0,,{formatted_text}\n")
+
+# ========================================== 
+# 5. GOOGLE DRIVE UPLOAD
+# ========================================== 
+
+def upload_to_google_drive(file_path):
+    """Uploads using OAuth 2.0 Refresh Token"""
+    if not os.path.exists(file_path):
+        print(f"❌ Error: File not found: {file_path}")
+        return None
+    
+    print("🔑 Authenticating via OAuth (Refresh Token)...")
+    
+    client_id = os.environ.get("OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
+    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    
+    if not all([client_id, client_secret, refresh_token]):
+        print("❌ Error: Missing OAuth Secrets")
+        return None
+    
+    # Get Access Token
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token"
+    }
+    
+    try:
+        r = requests.post(token_url, data=data)
+        r.raise_for_status()
+        access_token = r.json()['access_token']
+        print("✅ Access Token refreshed")
+    except Exception as e:
+        print(f"❌ Failed to refresh token: {e}")
+        return None
+    
+    # Upload
+    filename = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
+    
+    metadata = {"name": filename, "mimeType": "video/mp4"}
+    if folder_id:
+        metadata["parents"] = [folder_id]
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": "video/mp4",
+        "X-Upload-Content-Length": str(file_size)
+    }
+    
+    response = requests.post(upload_url, headers=headers, json=metadata)
+    if response.status_code != 200:
+        print(f"❌ Init failed: {response.text}")
+        return None
+    
+    session_uri = response.headers.get("Location")
+    
+    print(f"☁️ Uploading {filename} ({file_size / (1024*1024):.1f} MB)...")
+    with open(file_path, "rb") as f:
+        upload_headers = {"Content-Length": str(file_size)}
+        upload_resp = requests.put(session_uri, headers=upload_headers, data=f)
+    
+    if upload_resp.status_code in [200, 201]:
+        file_data = upload_resp.json()
+        file_id = file_data.get('id')
+        print(f"✅ Upload Success! File ID: {file_id}")
+        
+        # Make public
+        perm_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
+        requests.post(
+            perm_url,
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={'role': 'reader', 'type': 'anyone'}
+        )
+        
+        link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+        print(f"🔗 Link: {link}")
+        return link
+    else:
+        print(f"❌ Upload Failed: {upload_resp.text}")
+        return None
+
+# ========================================== 
+# 6. CINEMATIC SCENE ENGINE
 # ========================================== 
 
 class CinematicSceneEngine:
@@ -196,165 +520,115 @@ class CinematicSceneEngine:
         }
 
 # ========================================== 
-# 4. STOCK VIDEO CLUSTERING SYSTEM
+# 7. STOCK VIDEO SEARCH
 # ========================================== 
 
-class StockVideoClustering:
-    """Clusters stock videos for visual consistency"""
+USED_VIDEO_URLS = set()
+
+def intelligent_video_search(query, service, keys, page=1):
+    """Search for videos using Pexels or Pixabay"""
+    all_results = []
     
-    @staticmethod
-    def calculate_clip_similarity(video1, video2):
-        """Calculate similarity between two video clips"""
-        score = 0
-        
-        # Brightness similarity
-        brightness_diff = abs(video1.get('brightness', 0.5) - video2.get('brightness', 0.5))
-        score += (1.0 - brightness_diff) * 30
-        
-        # Motion direction similarity
-        motion1 = video1.get('motion_direction', 'static')
-        motion2 = video2.get('motion_direction', 'static')
-        if motion1 == motion2:
-            score += 25
-        
-        # Color temperature similarity
-        temp_diff = abs(video1.get('color_temp', 0.5) - video2.get('color_temp', 0.5))
-        score += (1.0 - temp_diff) * 25
-        
-        # Duration similarity
-        dur1 = video1.get('duration', 0)
-        dur2 = video2.get('duration', 0)
-        if dur1 > 0 and dur2 > 0:
-            dur_ratio = min(dur1, dur2) / max(dur1, dur2)
-            score += dur_ratio * 20
-        
-        return score
-    
-    @staticmethod
-    def find_best_cluster(candidates, previous_clips, min_similarity=60):
-        """Find clips that match previous ones for consistency"""
-        if not previous_clips:
-            return candidates
-        
-        best_clips = []
-        for candidate in candidates:
-            total_similarity = 0
-            match_count = 0
+    if service == 'pexels' and keys and keys[0]:
+        try:
+            key = random.choice([k for k in keys if k])
+            print(f"    Searching Pexels: {query}")
+            url = "https://api.pexels.com/videos/search"
+            headers = {"Authorization": key}
+            params = {
+                "query": query,
+                "per_page": 20,
+                "page": page,
+                "orientation": "landscape",
+                "size": "medium_large"
+            }
             
-            for prev_clip in previous_clips[-3:]:  # Compare with last 3 clips
-                similarity = StockVideoClustering.calculate_clip_similarity(
-                    candidate, prev_clip
-                )
-                if similarity > min_similarity:
-                    total_similarity += similarity
-                    match_count += 1
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                for video in data.get('videos', []):
+                    video_files = video.get('video_files', [])
+                    if video_files:
+                        hd_files = [f for f in video_files if f.get('quality') == 'hd' and f.get('width', 0) >= 1280]
+                        large_files = [f for f in video_files if f.get('quality') == 'large']
+                        medium_files = [f for f in video_files if f.get('quality') == 'medium']
+                        
+                        best_file = None
+                        if hd_files:
+                            best_file = random.choice(hd_files)
+                        elif large_files:
+                            best_file = random.choice(large_files)
+                        elif medium_files:
+                            best_file = random.choice(medium_files)
+                        
+                        if best_file:
+                            all_results.append({
+                                'url': best_file['link'],
+                                'title': video.get('user', {}).get('name', query),
+                                'description': f"Pexels video by {video.get('user', {}).get('name', '')}",
+                                'duration': video.get('duration', 0),
+                                'service': 'pexels',
+                                'quality': best_file.get('quality', 'medium'),
+                                'width': best_file.get('width', 0),
+                                'height': best_file.get('height', 0),
+                                'license': 'free'
+                            })
+        except Exception as e:
+            print(f"    Pexels error: {str(e)[:50]}")
+    
+    elif service == 'pixabay' and keys and keys[0]:
+        try:
+            key = random.choice([k for k in keys if k])
+            print(f"    Searching Pixabay: {query}")
+            url = "https://pixabay.com/api/videos/"
+            params = {
+                "key": key,
+                "q": query,
+                "per_page": 20,
+                "page": page,
+                "orientation": "horizontal",
+                "video_type": "film",
+                "min_width": 1280
+            }
             
-            if match_count > 0:
-                avg_similarity = total_similarity / match_count
-                candidate['cluster_score'] = avg_similarity
-                best_clips.append(candidate)
-        
-        if best_clips:
-            best_clips.sort(key=lambda x: x['cluster_score'], reverse=True)
-            return best_clips[:5]
-        
-        return candidates[:5]
+            response = requests.get(url, params=params, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                for video in data.get('hits', []):
+                    videos_dict = video.get('videos', {})
+                    
+                    # Check landscape
+                    width = videos_dict.get('large', {}).get('width', 0)
+                    height = videos_dict.get('large', {}).get('height', 0)
+                    
+                    if height > width:
+                        continue
+                    
+                    best_quality = None
+                    for quality in ['large', 'medium', 'small']:
+                        if quality in videos_dict:
+                            best_quality = videos_dict[quality]
+                            break
+                    
+                    if best_quality:
+                        all_results.append({
+                            'url': best_quality['url'],
+                            'title': video.get('tags', query),
+                            'description': f"Pixabay video ID: {video.get('id', '')}",
+                            'duration': video.get('duration', 0),
+                            'service': 'pixabay',
+                            'quality': quality,
+                            'width': best_quality.get('width', 0),
+                            'height': best_quality.get('height', 0),
+                            'license': 'free'
+                        })
+        except Exception as e:
+            print(f"    Pixabay error: {str(e)[:50]}")
+    
+    return all_results
 
 # ========================================== 
-# 5. REALISM ENHANCEMENTS
-# ========================================== 
-
-class RealismEnhancer:
-    """Adds cinematic realism to videos"""
-    
-    @staticmethod
-    def add_camera_motion(input_path, output_path, motion_type="subtle_zoom"):
-        """Add subtle fake camera movement"""
-        motions = {
-            "subtle_zoom": "zoompan=z='min(zoom+0.0003,1.03)':d=125:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
-            "slow_pan_right": "zoompan=z=1:x='if(lte(on,1),0,x+1)':y='0':d=125",
-            "gentle_float": "zoompan=z=1:x='iw/2-(iw/zoom/2)+sin(on/25)*5':y='ih/2-(ih/zoom/2)+cos(on/30)*3':d=125",
-            "micro_rotation": "rotate=angle=0.1*sin(2*PI*t/10):ow=hypot(iw,ih):oh=ow"
-        }
-        
-        filter_complex = motions.get(motion_type, motions["subtle_zoom"])
-        
-        cmd = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", input_path,
-            "-vf", filter_complex,
-            "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-b:v", "8M",
-            output_path
-        ]
-        
-        try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            return True
-        except:
-            # If filter fails, just copy
-            shutil.copy(input_path, output_path)
-            return False
-    
-    @staticmethod
-    def apply_color_unification(input_path, output_path, style="cinematic"):
-        """Apply consistent color grading"""
-        color_luts = {
-            "cinematic": "colorbalance=rs=0.05:gs=0:bs=-0.05,eq=saturation=1.05:contrast=1.05",
-            "warm_contrast": "colorbalance=rs=0.1:gs=0.05:bs=-0.1,eq=saturation=1.1:contrast=1.1",
-            "cool_moody": "colorbalance=rs=-0.05:gs=0:bs=0.05,eq=saturation=0.95:contrast=1.15",
-            "golden_hour": "colorbalance=rs=0.15:gs=0.1:bs=-0.1,eq=saturation=1.15:brightness=0.02",
-            "desaturated": "eq=saturation=0.8:contrast=1.1",
-            "vibrant": "eq=saturation=1.2:contrast=1.05"
-        }
-        
-        lut = color_luts.get(style, color_luts["cinematic"])
-        
-        cmd = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", input_path,
-            "-vf", lut,
-            "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-b:v", "8M",
-            output_path
-        ]
-        
-        try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            return True
-        except:
-            shutil.copy(input_path, output_path)
-            return False
-    
-    @staticmethod
-    def add_micro_imperfections(input_path, output_path):
-        """Add subtle imperfections for realism"""
-        try:
-            # Add 0.15s black frame at the end
-            cmd = [
-                "ffmpeg", "-y", "-hwaccel", "cuda",
-                "-i", input_path,
-                "-vf", "fade=in:0:15,fade=out:st={duration}:d=15".format(
-                    duration=float(subprocess.check_output(
-                        ["ffprobe", "-v", "error", "-show_entries", "format=duration", 
-                         "-of", "default=noprint_wrappers=1:nokey=1", input_path]
-                    ).decode().strip()) - 0.15
-                ),
-                "-c:v", "h264_nvenc",
-                "-preset", "p4",
-                "-b:v", "8M",
-                output_path
-            ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            return True
-        except:
-            shutil.copy(input_path, output_path)
-            return False
-
-# ========================================== 
-# 6. FIXED CATEGORY LOCK SYSTEM
+# 8. CATEGORY ANALYSIS
 # ========================================== 
 
 def analyze_topic_for_category(topic, script):
@@ -452,7 +726,7 @@ def analyze_topic_for_category(topic, script):
         return "technology", ["technology", "digital"]
 
 # ========================================== 
-# 7. ENHANCED VISUAL DICTIONARY WITH CATEGORY FILTERING
+# 9. CATEGORY-FILTERED QUERIES
 # ========================================== 
 
 def get_category_filtered_queries(category, scene_analysis, sentence_text):
@@ -576,7 +850,86 @@ def get_category_filtered_queries(category, scene_analysis, sentence_text):
     return queries, emotion, intent
 
 # ========================================== 
-# 8. ENHANCED VIDEO PROCESSING WITH REALISM
+# 10. REALISM ENHANCEMENTS
+# ========================================== 
+
+class RealismEnhancer:
+    """Adds cinematic realism to videos"""
+    
+    @staticmethod
+    def add_camera_motion(input_path, output_path, motion_type="subtle_zoom"):
+        """Add subtle fake camera movement"""
+        motions = {
+            "subtle_zoom": "zoompan=z='min(zoom+0.0003,1.03)':d=125:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+            "slow_pan_right": "zoompan=z=1:x='if(lte(on,1),0,x+1)':y='0':d=125",
+            "gentle_float": "zoompan=z=1:x='iw/2-(iw/zoom/2)+sin(on/25)*5':y='ih/2-(ih/zoom/2)+cos(on/30)*3':d=125",
+            "micro_rotation": "rotate=angle=0.1*sin(2*PI*t/10):ow=hypot(iw,ih):oh=ow",
+            "subtle_shake": "crop=iw-10:ih-10:5+2*sin(2*PI*t):5+2*cos(2*PI*t)",
+            "slow_motion": "setpts=2.0*PTS",
+            "quick_cuts": "setpts=0.5*PTS",
+            "still": "null"  # No motion
+        }
+        
+        filter_complex = motions.get(motion_type, motions["subtle_zoom"])
+        
+        if filter_complex == "null":
+            # Just copy if no motion
+            shutil.copy(input_path, output_path)
+            return True
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-vf", filter_complex,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-b:v", "8M",
+            output_path
+        ]
+        
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return True
+        except:
+            # If filter fails, just copy
+            shutil.copy(input_path, output_path)
+            return False
+    
+    @staticmethod
+    def apply_color_unification(input_path, output_path, style="cinematic"):
+        """Apply consistent color grading"""
+        color_luts = {
+            "cinematic": "colorbalance=rs=0.05:gs=0:bs=-0.05,eq=saturation=1.05:contrast=1.05",
+            "warm_contrast": "colorbalance=rs=0.1:gs=0.05:bs=-0.1,eq=saturation=1.1:contrast=1.1",
+            "cool_moody": "colorbalance=rs=-0.05:gs=0:bs=0.05,eq=saturation=0.95:contrast=1.15",
+            "golden_hour": "colorbalance=rs=0.15:gs=0.1:bs=-0.1,eq=saturation=1.15:brightness=0.02",
+            "desaturated": "eq=saturation=0.8:contrast=1.1",
+            "vibrant": "eq=saturation=1.2:contrast=1.05",
+            "balanced": "eq=saturation=1.0:contrast=1.0",
+            "soft": "eq=saturation=0.9:contrast=0.95:brightness=0.02"
+        }
+        
+        lut = color_luts.get(style, color_luts["cinematic"])
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-vf", lut,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-b:v", "8M",
+            output_path
+        ]
+        
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return True
+        except:
+            shutil.copy(input_path, output_path)
+            return False
+
+# ========================================== 
+# 11. VISUAL PROCESSING WITH REALISM
 # ========================================== 
 
 def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, topic, full_script):
@@ -587,8 +940,6 @@ def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, top
     print(f"🎯 VIDEO CATEGORY LOCKED: {category.upper()}")
     print(f"   Keywords: {', '.join(category_keywords)}")
     
-    # Track previous clips for consistency
-    previous_clips = []
     processed_clips = []
     
     for i, sent in enumerate(sentences):
@@ -618,20 +969,12 @@ def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, top
             # Search Pexels
             if PEXELS_KEYS and PEXELS_KEYS[0]:
                 pexels_results = intelligent_video_search(query, 'pexels', PEXELS_KEYS)
-                for video in pexels_results:
-                    video['query'] = query
-                    video['emotion'] = emotion
-                    video['intent'] = intent
-                    all_candidates.append(video)
+                all_candidates.extend(pexels_results)
             
             # Search Pixabay
             if PIXABAY_KEYS and PIXABAY_KEYS[0]:
                 pixabay_results = intelligent_video_search(query, 'pixabay', PIXABAY_KEYS)
-                for video in pixabay_results:
-                    video['query'] = query
-                    video['emotion'] = emotion
-                    video['intent'] = intent
-                    all_candidates.append(video)
+                all_candidates.extend(pixabay_results)
             
             # Remove duplicates and used URLs
             unique_candidates = []
@@ -641,14 +984,9 @@ def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, top
                     seen_urls.add(vid['url'])
                     unique_candidates.append(vid)
             
-            # Cluster for consistency
-            clustered_candidates = StockVideoClustering.find_best_cluster(
-                unique_candidates, previous_clips
-            )
-            
-            if clustered_candidates:
-                # Select best candidate
-                best_video = clustered_candidates[0]
+            if unique_candidates:
+                # Select random candidate
+                best_video = random.choice(unique_candidates[:3])  # Pick from top 3
                 USED_VIDEO_URLS.add(best_video['url'])
                 
                 print(f"    ✅ Selected: {best_video.get('service', 'unknown')} "
@@ -676,12 +1014,12 @@ def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, top
                     # Trim to duration
                     final_clip = TEMP_DIR / f"clip_{i}.mp4"
                     cmd = [
-                        "ffmpeg", "-y", "-hwaccel", "cuda",
+                        "ffmpeg", "-y",
                         "-i", str(color_enhanced),
                         "-t", str(dur),
                         "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
-                        "-c:v", "h264_nvenc",
-                        "-preset", "p4",
+                        "-c:v", "libx264",
+                        "-preset", "medium",
                         "-b:v", "8M",
                         "-an",
                         str(final_clip)
@@ -689,13 +1027,6 @@ def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, top
                     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     
                     processed_clips.append(str(final_clip))
-                    previous_clips.append({
-                        'brightness': 0.5,
-                        'color_temp': 0.5,
-                        'motion_direction': motion_type,
-                        'duration': dur
-                    })
-                    
                     video_found = True
                     break
                     
@@ -713,7 +1044,12 @@ def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, top
                 "technology": ["0x1a1a2e:0x0f3460", "0x16213e:0x533483"],
                 "people": ["0x2c3e50:0x3498db", "0x2c3e50:0xe74c3c"],
                 "finance": ["0x27ae60:0x2ecc71", "0x2980b9:0x3498db"],
-                "business": ["0x2c3e50:0x34495e", "0x16a085:0x27ae60"]
+                "business": ["0x2c3e50:0x34495e", "0x16a085:0x27ae60"],
+                "science": ["0x1e3a5f:0x3498db", "0x2c3e50:0x1abc9c"],
+                "education": ["0x2c3e50:0x3498db", "0x2980b9:0x1abc9c"],
+                "health": ["0x27ae60:0x2ecc71", "0x16a085:0x1abc9c"],
+                "nature": ["0x27ae60:0x2ecc71", "0x16a085:0x27ae60"],
+                "art": ["0x8e44ad:0x9b59b6", "0x2c3e50:0x3498db"]
             }
             
             gradient = category_colors.get(category, ["0x1a1a2e:0x16213e"])[0]
@@ -724,8 +1060,8 @@ def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, top
                 "-f", "lavfi",
                 "-i", f"color=c={gradient.split(':')[0]}:s=1920x1080:d={dur}",
                 "-vf", f"gradients=s=1920x1080:x0=0:y0=0:x1=1920:y1=1080:c0={gradient.split(':')[0]}:c1={gradient.split(':')[1]},fade=in:0:30,fade=out:st={dur-1}:d=1",
-                "-c:v", "h264_nvenc",
-                "-preset", "p1",
+                "-c:v", "libx264",
+                "-preset", "medium",
                 "-t", str(dur),
                 str(fallback_clip)
             ]
@@ -736,7 +1072,7 @@ def process_visuals_with_realism(sentences, audio_path, ass_file, logo_path, top
     return processed_clips
 
 # ========================================== 
-# 9. DUAL OUTPUT RENDERER (with/without subtitles)
+# 12. DUAL OUTPUT RENDERER
 # ========================================== 
 
 def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
@@ -758,8 +1094,8 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
         "-f", "concat",
         "-safe", "0",
         "-i", str(concat_list),
-        "-c:v", "h264_nvenc",
-        "-preset", "p4",
+        "-c:v", "libx264",
+        "-preset", "medium",
         "-b:v", "10M",
         "-an",
         str(concatenated)
@@ -769,22 +1105,27 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
     # Get audio duration
     audio_duration = None
     try:
-        cmd = [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(audio_path)
-        ]
-        audio_duration = float(subprocess.check_output(cmd).decode().strip())
+        import wave
+        with wave.open(str(audio_path), 'rb') as wav_file:
+            audio_duration = wav_file.getnframes() / float(wav_file.getframerate())
     except:
-        pass
+        try:
+            cmd = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(audio_path)
+            ]
+            audio_duration = float(subprocess.check_output(cmd).decode().strip())
+        except:
+            audio_duration = None
     
     # Render Version 1: WITHOUT subtitles (just audio + logo)
     print("🎬 Rendering version 1 (no subtitles)...")
     final_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_no_subs.mp4"
     
     base_cmd = [
-        "ffmpeg", "-y", "-hwaccel", "cuda",
+        "ffmpeg", "-y",
         "-i", str(concatenated),
         "-i", str(audio_path),
     ]
@@ -809,8 +1150,8 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
         map_cmds = ["-map", "[v]", "-map", "1:a"]
     
     full_cmd = base_cmd + ["-filter_complex", ";".join(filter_complex)] + map_cmds + [
-        "-c:v", "h264_nvenc",
-        "-preset", "p4",
+        "-c:v", "libx264",
+        "-preset", "medium",
         "-b:v", "12M",
         "-c:a", "aac",
         "-b:a", "256k"
@@ -836,7 +1177,7 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
     ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
     
     base_cmd = [
-        "ffmpeg", "-y", "-hwaccel", "cuda",
+        "ffmpeg", "-y",
         "-i", str(concatenated),
         "-i", str(audio_path),
     ]
@@ -863,8 +1204,8 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
         map_cmds = ["-map", "[v]", "-map", "1:a"]
     
     full_cmd = base_cmd + ["-filter_complex", ";".join(filter_complex)] + map_cmds + [
-        "-c:v", "h264_nvenc",
-        "-preset", "p4",
+        "-c:v", "libx264",
+        "-preset", "medium",
         "-b:v", "12M",
         "-c:a", "aac",
         "-b:a", "256k"
@@ -885,87 +1226,23 @@ def render_dual_outputs(processed_clips, audio_path, ass_file, logo_path):
     return final_no_subs, final_with_subs
 
 # ========================================== 
-# 10. ENHANCED AUDIO REALISM
+# 13. AUDIO ENHANCEMENT
 # ========================================== 
 
 def enhance_audio_realism(audio_path, output_path):
-    """Add breath sounds and dynamic pacing"""
+    """Add subtle audio enhancements"""
     try:
-        # Add subtle breath sounds at natural breaks
-        temp_audio = TEMP_DIR / "enhanced_temp.wav"
-        
-        # First, extract audio duration
-        cmd_duration = [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(audio_path)
-        ]
-        duration = float(subprocess.check_output(cmd_duration).decode().strip())
-        
-        # Create silent breath track
-        breath_pattern = TEMP_DIR / "breath_pattern.wav"
-        cmd_breath = [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", "anoisesrc=d=0.3:c=brown:r=44100:a=0.03",
-            "-af", "highpass=80,lowpass=800,areverse,areverse",
-            str(breath_pattern)
-        ]
-        subprocess.run(cmd_breath, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # Create enhanced audio with breaths
-        concat_filter = []
-        
-        # Add breaths at natural intervals (every 8-12 seconds)
-        breath_positions = []
-        pos = 4.0  # First breath after 4 seconds
-        while pos < duration - 1.0:
-            breath_positions.append(pos)
-            pos += random.uniform(8.0, 12.0)
-        
-        # Build complex filter
-        filter_complex = f"[0:a]"
-        
-        # Insert breaths
-        for i, pos in enumerate(breath_positions):
-            filter_complex += f"atrim=start={pos}:end={pos+0.3},volume=0.2[br{i}];"
-        
-        filter_complex += f"[0:a]"
-        
-        # Merge breaths
-        for i, pos in enumerate(breath_positions):
-            filter_complex += f"[br{i}]"
-        
-        filter_complex += f"concat=n={1 + len(breath_positions)}:v=0:a=1[aout]"
-        
-        cmd_enhance = [
+        # Simple enhancement: normalize and add slight compression
+        cmd = [
             "ffmpeg", "-y",
             "-i", str(audio_path),
-            "-i", str(breath_pattern),
-            "-filter_complex", filter_complex,
-            "-map", "[aout]",
-            "-ar", "44100",
-            str(temp_audio)
-        ]
-        
-        subprocess.run(cmd_enhance, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # Add subtle noise floor
-        cmd_noise = [
-            "ffmpeg", "-y",
-            "-i", str(temp_audio),
-            "-f", "lavfi",
-            "-i", "anoisesrc=d={duration}:c=white:r=44100:a=0.001".format(duration=duration),
-            "-filter_complex", "[0:a][1:a]amix=inputs=2:weights=1 0.2",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11,compand=attacks=0.002:decays=0.050:points=-80/-80|-30/-10|0/0",
             "-ar", "44100",
             str(output_path)
         ]
-        
-        subprocess.run(cmd_noise, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("✅ Audio enhanced with breaths and noise floor")
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        print("✅ Audio enhanced")
         return True
-        
     except Exception as e:
         print(f"⚠️ Audio enhancement failed: {e}")
         # Fallback: copy original
@@ -973,71 +1250,104 @@ def enhance_audio_realism(audio_path, output_path):
         return False
 
 # ========================================== 
-# 11. FIXED SUBTITLE SYSTEM (Human-like)
+# 14. SCRIPT & AUDIO GENERATION
 # ========================================== 
 
-def create_human_subtitles(sentences, ass_file):
-    """Create human-like subtitles with proper timing"""
+def generate_script(topic, minutes):
+    words = int(minutes * 180)
+    print(f"Generating Script (~{words} words)...")
     
-    style_key = random.choice(list(SUBTITLE_STYLES.keys()))
-    style = SUBTITLE_STYLES[style_key]
+    if not GEMINI_KEYS:
+        print("❌ No Gemini API keys found")
+        return f"This is a sample script about {topic}. " * 50
     
-    print(f"✨ Using Subtitle Style: {style['name']}")
+    random.shuffle(GEMINI_KEYS)
     
-    with open(ass_file, "w", encoding="utf-8-sig") as f:
-        # Header
-        f.write("[Script Info]\n")
-        f.write("ScriptType: v4.00+\n")
-        f.write("PlayResX: 1920\n")
-        f.write("PlayResY: 1080\n")
-        f.write("WrapStyle: 2\n")
-        f.write("ScaledBorderAndShadow: yes\n\n")
+    base_instructions = """
+CRITICAL RULES:
+- Write ONLY spoken narration text
+- NO stage directions like [Music fades], [Intro], [Outro]
+- NO sound effects descriptions
+- NO [anything in brackets]
+- Start directly with the content
+- End directly with the conclusion
+- Pure voiceover script only
+"""
+    
+    prompt = f"{base_instructions}\nWrite a YouTube documentary script about '{topic}'. {words} words."
+    
+    for key in GEMINI_KEYS:
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content(prompt)
+            script = response.text.replace("*","").replace("#","").strip()
+            script = re.sub(r'\[.*?\]', '', script)
+            script = re.sub(r'\(.*?music.*?\)', '', script, flags=re.IGNORECASE)
+            return script
+        except Exception as e:
+            print(f"⚠️ Gemini API error with key: {str(e)[:50]}")
+            continue
+    
+    # Fallback
+    return f"This is a documentary about {topic}. " * 100
+
+def clone_voice_robust(text, ref_audio, out_path):
+    print("🎤 Synthesizing Audio...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    try:
+        from chatterbox.tts import ChatterboxTTS
+        model = ChatterboxTTS.from_pretrained(device=device)
         
-        # Styles
-        f.write("[V4+ Styles]\n")
-        f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-        f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},25,25,{style['margin_v']},1\n\n")
+        clean = re.sub(r'\[.*?\]', '', text)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean) if len(s.strip()) > 2]
         
-        # Events
-        f.write("[Events]\n")
-        f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+        print(f"📝 Processing {len(sentences)} sentences...")
+        all_wavs = []
         
-        for s in sentences:
-            # Human-like timing: appear slightly before, disappear before end
-            start_time = max(0, s['start'] - 0.15)  # Appear 150ms early
-            end_time = s['end'] - 0.3  # Disappear 300ms early
+        for i, chunk in enumerate(sentences):
+            if i % 10 == 0:
+                update_status(20 + int((i/len(sentences))*30), f"Voice Gen {i}/{len(sentences)}")
             
-            text = s['text'].strip()
-            text = re.sub(r'[\[\]]', '', text)
-            
-            # Human reading speed: 3-4 words per line
-            words = text.split()
-            lines = []
-            current_line = []
-            char_count = 0
-            
-            for word in words:
-                if char_count + len(word) + 1 > 35 or len(current_line) >= 4:
-                    lines.append(' '.join(current_line))
-                    current_line = [word]
-                    char_count = len(word)
-                else:
-                    current_line.append(word)
-                    char_count += len(word) + 1
-            
-            if current_line:
-                lines.append(' '.join(current_line))
-            
-            # Uppercase for certain styles
-            if style_key in ["mrbeast_yellow", "hormozi_green", "tiktok_white"]:
-                lines = [line.upper() for line in lines]
-            
-            formatted_text = '\\N'.join(lines)
-            
-            f.write(f"Dialogue: 0,{format_ass_time(start_time)},{format_ass_time(end_time)},Default,,0,0,0,,{formatted_text}\n")
+            try:
+                with torch.no_grad():
+                    chunk_clean = chunk.replace('"', '').replace('"', '').replace('"', '')
+                    if chunk_clean.endswith('.'):
+                        chunk_clean = chunk_clean + ' '
+                    wav = model.generate(
+                        text=chunk_clean,
+                        audio_prompt_path=str(ref_audio),
+                        exaggeration=0.5
+                    )
+                    all_wavs.append(wav.cpu())
+                
+                if i % 20 == 0 and device == "cuda":
+                    torch.cuda.empty_cache()
+                    gc.collect()
+            except Exception as e:
+                print(f"⚠️ Skipping sentence {i}: {str(e)[:50]}")
+                continue
+        
+        if not all_wavs:
+            print("❌ No audio generated")
+            return False
+        
+        full_audio = torch.cat(all_wavs, dim=1)
+        silence_samples = int(2.0 * 24000)
+        silence = torch.zeros((full_audio.shape[0], silence_samples))
+        full_audio_padded = torch.cat([full_audio, silence], dim=1)
+        
+        torchaudio.save(out_path, full_audio_padded, 24000)
+        audio_duration = full_audio_padded.shape[1] / 24000
+        print(f"✅ Audio generated: {audio_duration:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ Audio synthesis failed: {e}")
+        return False
 
 # ========================================== 
-# 12. MAIN EXECUTION (UPDATED)
+# 15. MAIN EXECUTION
 # ========================================== 
 
 print("--- 🚀 START (CINEMATIC REALISM EDITION) ---")
@@ -1089,78 +1399,27 @@ if clone_voice_robust(text, ref_voice, raw_audio):
     
     update_status(30, "Creating human-like subtitles...")
     
-    # Transcribe for subtitles
-    if ASSEMBLY_KEY:
-        try:
-            aai.settings.api_key = ASSEMBLY_KEY
-            transcriber = aai.Transcriber()
-            print("📝 Transcribing audio...")
-            transcript = transcriber.transcribe(str(audio_out))
-            
-            if transcript.status == aai.TranscriptStatus.completed:
-                sentences = []
-                for sentence in transcript.get_sentences():
-                    sentences.append({
-                        "text": sentence.text,
-                        "start": sentence.start / 1000,
-                        "end": sentence.end / 1000
-                    })
-                if sentences:
-                    sentences[-1]['end'] += 1.0
-                print(f"✅ Transcription complete: {len(sentences)} sentences")
-            else:
-                raise Exception("Transcription failed")
-        except Exception as e:
-            print(f"⚠️ AssemblyAI failed: {e}. Using fallback...")
-            # Fallback timing
-            words = text.split()
-            import wave
-            with wave.open(str(audio_out), 'rb') as wav_file:
-                total_duration = wav_file.getnframes() / float(wav_file.getframerate())
-            
-            words_per_second = len(words) / total_duration
-            sentences = []
-            current_time = 0
-            words_per_sentence = random.randint(8, 12)  # Varied for realism
-            
-            for i in range(0, len(words), words_per_sentence):
-                chunk = words[i:i + words_per_sentence]
-                sentence_duration = len(chunk) / words_per_second
-                sentences.append({
-                    "text": ' '.join(chunk),
-                    "start": current_time,
-                    "end": current_time + sentence_duration
-                })
-                current_time += sentence_duration
-                words_per_sentence = random.randint(8, 12)  # Change pace
-            
-            if sentences:
-                sentences[-1]['end'] += 1.5
-    else:
-        # Fallback if no AssemblyAI
-        words = text.split()
-        import wave
-        with wave.open(str(audio_out), 'rb') as wav_file:
-            total_duration = wav_file.getnframes() / float(wav_file.getframerate())
-        
-        words_per_second = len(words) / total_duration
-        sentences = []
-        current_time = 0
+    # Create sentence timing (simplified)
+    words = text.split()
+    total_duration = len(words) / 2.5  # Rough estimate: 2.5 words per second
+    
+    sentences = []
+    current_time = 0
+    words_per_sentence = random.randint(8, 12)
+    
+    for i in range(0, len(words), words_per_sentence):
+        chunk = words[i:i + words_per_sentence]
+        sentence_duration = len(chunk) / 2.5
+        sentences.append({
+            "text": ' '.join(chunk),
+            "start": current_time,
+            "end": current_time + sentence_duration
+        })
+        current_time += sentence_duration
         words_per_sentence = random.randint(8, 12)
-        
-        for i in range(0, len(words), words_per_sentence):
-            chunk = words[i:i + words_per_sentence]
-            sentence_duration = len(chunk) / words_per_second
-            sentences.append({
-                "text": ' '.join(chunk),
-                "start": current_time,
-                "end": current_time + sentence_duration
-            })
-            current_time += sentence_duration
-            words_per_sentence = random.randint(8, 12)
-        
-        if sentences:
-            sentences[-1]['end'] += 1.5
+    
+    if sentences:
+        sentences[-1]['end'] += 1.5
     
     # Create ASS subtitles with human timing
     ass_file = TEMP_DIR / "subtitles.ass"
