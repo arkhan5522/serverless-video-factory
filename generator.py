@@ -1,14 +1,4 @@
-"""
-AI VIDEO GENERATOR WITH GOOGLE DRIVE UPLOAD
-============================================
-FIXED VERSION WITH IMPROVEMENTS:
-1. Islamic content filtering
-2. Context-aware queries using sentence transformers
-3. Universal topic support (not just tech/motivation)
-4. Dual video output (with/without subtitles)
-5. Enhanced audio controls
-6. Improved realism with cinematic effects
-"""
+
 
 import os
 import subprocess
@@ -2114,4 +2104,4 @@ for temp_file in ["concat_list.txt", "visual_base.mp4"]:
         except:
             pass
 
-print("--- ✅ ISLAMIC-COMPLIANT PROCESS COMPLETE ---")
+print("--- ✅ PROCESS COMPLETE ---")
