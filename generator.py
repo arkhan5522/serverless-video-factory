@@ -495,13 +495,65 @@ class AudioGenerator:
         try:
             print("🎤 Generating audio with ChatterBox TTS...")
             
-            # Import ChatterBox
-            from chatterbox import Synthesizer
+            # Debug: Check what's in chatterbox
+            import chatterbox
+            print(f"🔍 ChatterBox module contents: {dir(chatterbox)}")
+            
+            # Try multiple import methods
+            Synthesizer = None
+            
+            # Method 1: Direct import
+            try:
+                from chatterbox import Synthesizer
+                print("✅ Synthesizer imported directly")
+            except ImportError:
+                # Method 2: From tts submodule
+                try:
+                    from chatterbox.tts import Synthesizer
+                    print("✅ Synthesizer imported from tts submodule")
+                except ImportError:
+                    # Method 3: Check module attributes
+                    if hasattr(chatterbox, 'Synthesizer'):
+                        Synthesizer = chatterbox.Synthesizer
+                        print("✅ Synthesizer found as module attribute")
+                    elif hasattr(chatterbox, 'tts') and hasattr(chatterbox.tts, 'Synthesizer'):
+                        Synthesizer = chatterbox.tts.Synthesizer
+                        print("✅ Synthesizer found in tts submodule")
+                    elif hasattr(chatterbox, 'synthesize'):
+                        # Maybe it's a function, not a class
+                        print("⚠️ Found 'synthesize' function instead of Synthesizer class")
+                        # Try function-based approach
+                        audio = chatterbox.synthesize(
+                            text=self.text,
+                            speaker_ref=str(self.voice_path),
+                            language='en'
+                        )
+                        
+                        if audio is not None:
+                            if isinstance(audio, np.ndarray):
+                                audio = torch.from_numpy(audio)
+                            if audio.dim() == 1:
+                                audio = audio.unsqueeze(0)
+                            
+                            torchaudio.save(str(self.output_path), audio, sample_rate=24000)
+                            
+                            if os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 10000:
+                                self.success = True
+                                print(f"✅ Audio generated via function: {os.path.getsize(self.output_path)/(1024*1024):.1f}MB")
+                                self.completed = True
+                                return
+                    else:
+                        raise ImportError(f"Cannot find Synthesizer. Available: {dir(chatterbox)}")
+            
+            if Synthesizer is None:
+                raise ImportError("Could not import Synthesizer")
             
             # Initialize synthesizer
+            print("🔧 Initializing synthesizer...")
             synth = Synthesizer()
             
-            # Generate audio
+            # Generate audio with error handling
+            print("🎵 Generating audio...")
             audio = synth.tts(
                 text=self.text,
                 speaker_ref_audio=str(self.voice_path),
@@ -510,9 +562,17 @@ class AudioGenerator:
             
             # Save audio
             if audio is not None:
+                print("💾 Saving audio...")
+                # Handle both tensor and numpy array
+                if isinstance(audio, np.ndarray):
+                    audio = torch.from_numpy(audio)
+                
+                if audio.dim() == 1:
+                    audio = audio.unsqueeze(0)
+                
                 torchaudio.save(
                     str(self.output_path),
-                    audio.unsqueeze(0),
+                    audio,
                     sample_rate=24000
                 )
                 
@@ -527,6 +587,8 @@ class AudioGenerator:
         except Exception as e:
             self.error = str(e)
             print(f"❌ Audio generation failed: {e}")
+            print(f"📋 Full error details: {type(e).__name__}: {e}")
+                
         finally:
             self.completed = True
 
