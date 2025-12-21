@@ -480,7 +480,7 @@ class IslamicContentFilter:
 # ========================================== 
 
 class AudioGenerator:
-    """Generate TTS audio with ChatterBox"""
+    """Generate TTS audio with ChatterBox - FIXED VERSION"""
     
     def __init__(self, text, voice_path, output_path):
         self.text = text
@@ -491,106 +491,106 @@ class AudioGenerator:
         self.error = None
     
     def generate_in_background(self):
-        """Generate audio in background thread"""
+        """Generate audio in background thread - Using working ChatterboxTTS method"""
         try:
             print("🎤 Generating audio with ChatterBox TTS...")
             
-            # Debug: Check what's in chatterbox
-            import chatterbox
-            print(f"🔍 ChatterBox module contents: {dir(chatterbox)}")
+            # Use the correct ChatterboxTTS class
+            from chatterbox.tts import ChatterboxTTS
             
-            # Try multiple import methods
-            Synthesizer = None
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"🔧 Using device: {device}")
             
-            # Method 1: Direct import
-            try:
-                from chatterbox import Synthesizer
-                print("✅ Synthesizer imported directly")
-            except ImportError:
-                # Method 2: From tts submodule
+            # Initialize model
+            print("🔧 Loading ChatterboxTTS model...")
+            model = ChatterboxTTS.from_pretrained(device=device)
+            
+            # Clean text - remove any stage directions or brackets
+            clean_text = re.sub(r'\[.*?\]', '', self.text)
+            clean_text = re.sub(r'\(.*?music.*?\)', '', clean_text, flags=re.IGNORECASE)
+            clean_text = clean_text.strip()
+            
+            # Split into sentences for better processing
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean_text) if len(s.strip()) > 2]
+            
+            print(f"📝 Processing {len(sentences)} sentences...")
+            all_wavs = []
+            
+            for i, sentence in enumerate(sentences):
+                if i % 10 == 0:
+                    print(f"   Processing sentence {i+1}/{len(sentences)}...")
+                
                 try:
-                    from chatterbox.tts import Synthesizer
-                    print("✅ Synthesizer imported from tts submodule")
-                except ImportError:
-                    # Method 3: Check module attributes
-                    if hasattr(chatterbox, 'Synthesizer'):
-                        Synthesizer = chatterbox.Synthesizer
-                        print("✅ Synthesizer found as module attribute")
-                    elif hasattr(chatterbox, 'tts') and hasattr(chatterbox.tts, 'Synthesizer'):
-                        Synthesizer = chatterbox.tts.Synthesizer
-                        print("✅ Synthesizer found in tts submodule")
-                    elif hasattr(chatterbox, 'synthesize'):
-                        # Maybe it's a function, not a class
-                        print("⚠️ Found 'synthesize' function instead of Synthesizer class")
-                        # Try function-based approach
-                        audio = chatterbox.synthesize(
-                            text=self.text,
-                            speaker_ref=str(self.voice_path),
-                            language='en'
+                    with torch.no_grad():
+                        # Clean sentence
+                        sentence_clean = sentence.replace('"', '').replace('"', '').replace('"', '')
+                        
+                        # Ensure sentence ends with proper punctuation
+                        if not sentence_clean.endswith(('.', '!', '?')):
+                            sentence_clean = sentence_clean + '.'
+                        
+                        # Add slight pause after sentence
+                        sentence_clean = sentence_clean + ' '
+                        
+                        # Generate audio for this sentence
+                        wav = model.generate(
+                            text=sentence_clean,
+                            audio_prompt_path=str(self.voice_path),
+                            exaggeration=0.5  # Natural voice variation
                         )
                         
-                        if audio is not None:
-                            if isinstance(audio, np.ndarray):
-                                audio = torch.from_numpy(audio)
-                            if audio.dim() == 1:
-                                audio = audio.unsqueeze(0)
-                            
-                            torchaudio.save(str(self.output_path), audio, sample_rate=24000)
-                            
-                            if os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 10000:
-                                self.success = True
-                                print(f"✅ Audio generated via function: {os.path.getsize(self.output_path)/(1024*1024):.1f}MB")
-                                self.completed = True
-                                return
-                    else:
-                        raise ImportError(f"Cannot find Synthesizer. Available: {dir(chatterbox)}")
+                        all_wavs.append(wav.cpu())
+                    
+                    # Clear GPU cache periodically
+                    if i % 20 == 0 and device == "cuda":
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                
+                except Exception as e:
+                    print(f"⚠️ Skipping sentence {i+1}: {str(e)[:50]}")
+                    continue
             
-            if Synthesizer is None:
-                raise ImportError("Could not import Synthesizer")
+            if not all_wavs:
+                self.error = "No audio segments generated"
+                print("❌ No audio segments were generated")
+                return
             
-            # Initialize synthesizer
-            print("🔧 Initializing synthesizer...")
-            synth = Synthesizer()
+            # Concatenate all audio segments
+            print("🔗 Concatenating audio segments...")
+            full_audio = torch.cat(all_wavs, dim=1)
             
-            # Generate audio with error handling
-            print("🎵 Generating audio...")
-            audio = synth.tts(
-                text=self.text,
-                speaker_ref_audio=str(self.voice_path),
-                language='en'
-            )
+            # Add ending silence (2 seconds)
+            silence_samples = int(2.0 * 24000)
+            silence = torch.zeros((full_audio.shape[0], silence_samples))
+            full_audio_padded = torch.cat([full_audio, silence], dim=1)
             
             # Save audio
-            if audio is not None:
-                print("💾 Saving audio...")
-                # Handle both tensor and numpy array
-                if isinstance(audio, np.ndarray):
-                    audio = torch.from_numpy(audio)
-                
-                if audio.dim() == 1:
-                    audio = audio.unsqueeze(0)
-                
-                torchaudio.save(
-                    str(self.output_path),
-                    audio,
-                    sample_rate=24000
-                )
-                
-                if os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 10000:
-                    self.success = True
-                    print(f"✅ Audio generated: {os.path.getsize(self.output_path)/(1024*1024):.1f}MB")
-                else:
-                    self.error = "Audio file too small"
+            print("💾 Saving audio file...")
+            torchaudio.save(str(self.output_path), full_audio_padded, 24000)
+            
+            # Verify file was created
+            if os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 10000:
+                audio_duration = full_audio_padded.shape[1] / 24000
+                self.success = True
+                print(f"✅ Audio generated successfully: {audio_duration:.1f} seconds ({os.path.getsize(self.output_path)/(1024*1024):.1f}MB)")
             else:
-                self.error = "ChatterBox returned None"
-                
+                self.error = "Audio file too small or not created"
+                print("❌ Audio file validation failed")
+        
         except Exception as e:
             self.error = str(e)
             print(f"❌ Audio generation failed: {e}")
-            print(f"📋 Full error details: {type(e).__name__}: {e}")
-                
+            print(f"📋 Full error: {type(e).__name__}: {e}")
+        
         finally:
             self.completed = True
+            # Final cleanup
+            if device == "cuda":
+                try:
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                except:
+                    pass
 
 # ========================================== 
 # 7. SCRIPT GENERATOR
