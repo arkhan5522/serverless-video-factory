@@ -111,45 +111,22 @@ except Exception as e:
     CLIP_AVAILABLE = False
 
 # ========================================== 
-# 4. ISLAMIC CONTENT FILTER
+# 4. BASIC CONTENT FILTER (Light filtering only)
 # ========================================== 
 
-ISLAMIC_FORBIDDEN_TERMS = [
-    # Alcohol & Intoxicants
-    'alcohol', 'beer', 'wine', 'vodka', 'whiskey', 'champagne', 'cocktail', 
-    'drunk', 'intoxicated', 'bar', 'pub', 'brewery', 'liquor', 'rum', 'gin',
-    
-    # Nudity & Inappropriate Content
-    'nude', 'nudity', 'naked', 'bikini', 'lingerie', 'underwear', 'sexy', 
-    'erotic', 'adult content', 'pornography', 'sexual', 'seductive',
-    'provocative', 'revealing', 'hot girl', 'swimsuit model',
-    
-    # Gambling
-    'casino', 'gambling', 'poker', 'slot machine', 'betting', 'lottery',
-    'roulette', 'blackjack', 'gamble',
-    
-    # War & Violence (excessive)
-    'war crime', 'massacre', 'genocide', 'torture', 'brutal killing',
-    'execution', 'terrorist attack', 'bombing civilian',
-    
-    # Pork
-    'pork', 'bacon', 'ham', 'sausage pork', 'pig meat',
-    
-    # Idolatry & False Worship
-    'idol worship', 'pagan ritual', 'false god', 'polytheism',
-    
-    # Inappropriate Dating/Relationships
-    'dating app hookup', 'one night stand', 'affair', 'adultery',
-    'nightclub party', 'strip club'
+BLACKLIST_TERMS = [
+    # Only block explicit inappropriate content
+    'nude', 'nudity', 'naked', 'pornography', 'explicit sexual',
+    'xxx', 'adult xxx', 'erotic xxx'
 ]
 
-def is_content_halal(text):
-    """Check if content is appropriate according to Islamic guidelines"""
+def is_content_appropriate(text):
+    """Light content filter - only blocks explicit inappropriate content"""
     text_lower = text.lower()
     
-    for term in ISLAMIC_FORBIDDEN_TERMS:
+    for term in BLACKLIST_TERMS:
         if term in text_lower:
-            print(f"      🚫 BLOCKED: Islamic filter - '{term}' detected")
+            print(f"      🚫 BLOCKED: Inappropriate term '{term}'")
             return False
     
     return True
@@ -182,9 +159,9 @@ def generate_smart_query_t5(script_text):
         decoded_output = t5_tokenizer.batch_decode(output, skip_special_tokens=True)[0]
         tags = list(set(decoded_output.strip().split(", ")))
         
-        # Return first halal tag
+        # Return first appropriate tag
         for tag in tags:
-            if is_content_halal(tag):
+            if is_content_appropriate(tag):
                 return tag
         
         return "background"
@@ -617,9 +594,9 @@ def search_videos_smart(script_text, sentence_index):
                                 best_file = random.choice(hd_files)
                                 video_url = best_file['link']
                                 
-                                # Islamic content check
+                                # Light content check
                                 video_title = video.get('user', {}).get('name', '')
-                                if not is_content_halal(video_title + " " + query):
+                                if not is_content_appropriate(video_title + " " + query):
                                     continue
                                 
                                 if video_url not in USED_VIDEO_URLS:
@@ -652,9 +629,9 @@ def search_videos_smart(script_text, sentence_index):
                         if 'large' in videos_dict:
                             video_url = videos_dict['large']['url']
                             
-                            # Islamic content check
+                            # Light content check
                             video_tags = video.get('tags', '')
-                            if not is_content_halal(video_tags + " " + query):
+                            if not is_content_appropriate(video_tags + " " + query):
                                 continue
                             
                             if video_url not in USED_VIDEO_URLS:
@@ -889,39 +866,74 @@ def clone_voice(text, ref_audio, out_path):
     return False
 
 # ========================================== 
-# 13. VISUAL PROCESSING
+# 13. VISUAL PROCESSING WITH PARALLEL PROCESSING
 # ========================================== 
 
-def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
-    print("🎬 Processing Visuals with T5 + CLIP...")
+def process_single_clip(args):
+    """Process a single clip - used for parallel processing"""
+    i, sent, sentences_count = args
     
-    clips = []
-    for i, sent in enumerate(sentences):
-        update_status(60 + int((i/len(sentences))*25), f"Clip {i+1}/{len(sentences)}")
+    duration = max(3.5, sent['end'] - sent['start'])
+    
+    print(f"  🔍 Clip {i+1}/{sentences_count}: '{sent['text'][:50]}...'")
+    
+    # Search with T5
+    results = search_videos_smart(sent['text'], i)
+    
+    if results:
+        # Download & rank with CLIP
+        clip_path = download_and_rank_videos(results, sent['text'], duration, i)
+        if clip_path:
+            return (i, clip_path)
+    
+    # Fallback gradient
+    out = TEMP_DIR / f"fallback_{i}.mp4"
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=0x1a1a2e:s=1920x1080:d={duration}",
+        "-c:v", "h264_nvenc", "-preset", "p1", str(out)
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return (i, str(out))
+
+def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
+    print("🎬 Processing Visuals with T5 + CLIP + PARALLEL PROCESSING...")
+    print(f"⚡ Processing {min(5, len(sentences))} clips in parallel...")
+    
+    # Prepare arguments for parallel processing
+    clip_args = [(i, sent, len(sentences)) for i, sent in enumerate(sentences)]
+    
+    # Process clips in parallel (5 at a time)
+    clips = [None] * len(sentences)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Submit all tasks
+        future_to_index = {
+            executor.submit(process_single_clip, arg): arg[0] 
+            for arg in clip_args
+        }
         
-        duration = max(3.5, sent['end'] - sent['start'])
-        
-        # Search with T5
-        results = search_videos_smart(sent['text'], i)
-        
-        if results:
-            # Download & rank with CLIP
-            clip_path = download_and_rank_videos(results, sent['text'], duration, i)
-            if clip_path:
-                clips.append(clip_path)
-                continue
-        
-        # Fallback gradient
-        out = TEMP_DIR / f"fallback_{i}.mp4"
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=0x1a1a2e:s=1920x1080:d={duration}",
-            "-c:v", "h264_nvenc", "-preset", "p1", str(out)
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        clips.append(str(out))
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_index):
+            try:
+                index, clip_path = future.result()
+                clips[index] = clip_path
+                completed += 1
+                update_status(60 + int((completed/len(sentences))*25), f"Completed {completed}/{len(sentences)} clips")
+            except Exception as e:
+                print(f"❌ Clip processing error: {e}")
+    
+    # Filter out None values
+    clips = [c for c in clips if c is not None]
+    
+    if not clips:
+        print("❌ No clips generated")
+        return False
+    
+    print(f"✅ Generated {len(clips)} clips")
     
     # Concatenate
+    print("🔗 Concatenating clips...")
     with open("list.txt", "w") as f:
         for c in clips:
             if os.path.exists(c):
@@ -932,8 +944,13 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     
+    if not os.path.exists("visual.mp4"):
+        print("❌ Concatenation failed")
+        return False
+    
     # === VERSION 1: NO SUBTITLES ===
     print("📹 Rendering Version 1: Without Subtitles...")
+    update_status(85, "Rendering without subtitles...")
     
     if logo_path and os.path.exists(logo_path):
         filter_v1 = "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[v]"
@@ -956,10 +973,14 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             str(output_no_subs)
         ]
     
-    subprocess.run(cmd_v1, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run(cmd_v1, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"❌ Version 1 failed: {result.stderr[:200]}")
+        return False
     
     # === VERSION 2: WITH SUBTITLES ===
     print("📹 Rendering Version 2: With Subtitles...")
+    update_status(90, "Rendering with subtitles...")
     
     ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
     
@@ -986,7 +1007,10 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             str(output_with_subs)
         ]
     
-    subprocess.run(cmd_v2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run(cmd_v2, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"❌ Version 2 failed: {result.stderr[:200]}")
+        return False
     
     return os.path.exists(output_no_subs) and os.path.exists(output_with_subs)
 
