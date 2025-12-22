@@ -2114,6 +2114,10 @@ def process_visuals_dual_output(sentences, audio_path, ass_file, logo_path, outp
 # 16. MAIN EXECUTION
 # ========================================== 
 
+# ========================================== 
+# 16. MAIN EXECUTION - FIXED MODE HANDLING
+# ========================================== 
+
 def main():
     """Main execution with dual output"""
     update_status(0, "Starting AI Video Generator...")
@@ -2128,221 +2132,224 @@ def main():
         except:
             pass
     
-    # Load audio if provided
-    if os.path.exists(VOICE_PATH) and VOICE_PATH.lower().endswith(('.mp3', '.wav', '.m4a', '.flac')):
-        print(f"🎤 Using provided voice: {VOICE_PATH}")
-        audio_path = TEMP_DIR / "audio.wav"
-        subprocess.run([
-            "ffmpeg", "-y", "-i", VOICE_PATH,
-            "-ar", "24000", "-ac", "1",
-            str(audio_path)
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        print("❌ No valid voice file provided")
-        audio_path = None
-    
     # Process based on mode
-    if MODE == "text_only":
-        print(f"📝 Mode: Text Only (Topic: {TOPIC}, Duration: {DURATION_MINS} min)")
-        update_status(5, "Generating script...")
+    if MODE == "topic":
+        print(f"📝 Mode: Generate from Topic (Topic: {TOPIC}, Duration: {DURATION_MINS} min)")
+        update_status(5, "Generating script from topic...")
         
-        # Generate script
+        # Generate script from topic
         script = generate_script(TOPIC, DURATION_MINS)
         
-        if not script:
+        if not script or len(script) < 100:
             update_status(100, "Script generation failed", "failed")
+            print("❌ Script generation failed")
             return
         
-        print(f"📄 Script generated ({len(script)} chars)")
+        print(f"📄 Script generated from topic ({len(script.split())} words)")
         
-        # Save script
-        script_path = OUTPUT_DIR / f"script_{JOB_ID}.txt"
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script)
+    elif MODE == "script":
+        print(f"📝 Mode: Use Provided Script")
+        update_status(5, "Processing provided script...")
         
-        update_status(50, "Script saved", "complete")
-        print(f"✅ Script saved to: {script_path}")
-        
-        # Upload script to Google Drive
-        if os.environ.get("OAUTH_CLIENT_ID"):
-            drive_link = upload_to_google_drive(script_path, f"script_{JOB_ID}.txt")
-            if drive_link:
-                update_status(100, "Script uploaded to Drive", "complete", drive_link)
-        
-        return
-        
-    elif MODE == "generate":
-        print(f"🎬 Mode: Generate Video (Topic: {TOPIC}, Duration: {DURATION_MINS} min)")
-        
-        # Step 1: Generate script
-        update_status(5, "Generating script...")
-        script = generate_script(TOPIC, DURATION_MINS)
-        
-        if not script:
-            update_status(100, "Script generation failed", "failed")
+        if not SCRIPT_TEXT or len(SCRIPT_TEXT.strip()) < 100:
+            update_status(100, "Script text is too short or empty", "failed")
+            print("❌ Script text is too short")
             return
         
-        print(f"📄 Script generated ({len(script)} chars)")
-        
-        # Step 2: Clone voice
-        update_status(20, "Cloning voice...")
-        audio_path = TEMP_DIR / "audio.wav"
-        
-        if VOICE_PATH and os.path.exists(VOICE_PATH):
-            success = clone_voice_robust(script, VOICE_PATH, audio_path)
-            if not success:
-                print("⚠️ Voice cloning failed, using fallback TTS")
-                # Fallback to basic TTS here if needed
-        else:
-            print("❌ No voice reference provided")
-            update_status(100, "Voice reference missing", "failed")
-            return
-        
-        if not os.path.exists(audio_path):
-            print("❌ Audio file not created")
-            update_status(100, "Audio creation failed", "failed")
-            return
-        
-        # Step 3: Transcribe audio for timing
-        update_status(52, "Transcribing audio for timing...")
-        aai.settings.api_key = ASSEMBLY_KEY
-        
-        try:
-            transcriber = aai.Transcriber()
-            transcript = transcriber.transcribe(str(audio_path))
-            
-            # Get sentences with timestamps
-            sentences = []
-            for utterance in transcript.utterances:
-                sentences.append({
-                    'text': utterance.text,
-                    'start': utterance.start / 1000.0,  # Convert to seconds
-                    'end': utterance.end / 1000.0
-                })
-            
-            # If no utterances, create artificial timing
-            if not sentences:
-                total_duration = DURATION_MINS * 60
-                avg_sentence_duration = 5.0
-                words = script.split()
-                words_per_sentence = 15
-                
-                for i in range(0, len(words), words_per_sentence):
-                    sentence_words = words[i:i+words_per_sentence]
-                    if sentence_words:
-                        start = i / len(words) * total_duration
-                        end = min(start + avg_sentence_duration, total_duration)
-                        sentences.append({
-                            'text': ' '.join(sentence_words),
-                            'start': start,
-                            'end': end
-                        })
-        except Exception as e:
-            print(f"⚠️ Transcription failed: {e}")
-            # Create artificial timing
-            total_duration = DURATION_MINS * 60
-            avg_sentence_duration = 5.0
-            script_sentences = re.split(r'(?<=[.!?])\s+', script)
-            
-            for i, text in enumerate(script_sentences):
-                if text.strip():
-                    start = i * avg_sentence_duration
-                    end = min(start + avg_sentence_duration, total_duration)
-                    sentences.append({
-                        'text': text.strip(),
-                        'start': start,
-                        'end': end
-                    })
-        
-        print(f"⏱️  {len(sentences)} sentences with timing")
-        
-        # Step 4: Create subtitles
-        update_status(55, "Creating subtitle file...")
-        ass_file = TEMP_DIR / "subtitles.ass"
-        create_ass_file(sentences, ass_file)
-        
-        # Step 5: Process visuals (dual output)
-        output_no_subs = OUTPUT_DIR / f"video_{JOB_ID}_no_subs.mp4"
-        output_with_subs = OUTPUT_DIR / f"video_{JOB_ID}_with_subs.mp4"
-        
-        success_no_subs, success_with_subs = process_visuals_dual_output(
-            sentences, audio_path, ass_file, LOGO_PATH, 
-            output_no_subs, output_with_subs, script, TOPIC
-        )
-        
-        # Step 6: Upload to Google Drive
-        drive_link_no_subs = None
-        drive_link_with_subs = None
-        
-        if success_no_subs and os.environ.get("OAUTH_CLIENT_ID"):
-            update_status(95, "Uploading video without subtitles...")
-            drive_link_no_subs = upload_to_google_drive(
-                output_no_subs, 
-                f"{TOPIC.replace(' ', '_')}_no_subs_{JOB_ID}.mp4"
-            )
-        
-        if success_with_subs and os.environ.get("OAUTH_CLIENT_ID"):
-            update_status(97, "Uploading video with subtitles...")
-            drive_link_with_subs = upload_to_google_drive(
-                output_with_subs,
-                f"{TOPIC.replace(' ', '_')}_with_subs_{JOB_ID}.mp4"
-            )
-        
-        # Step 7: Final status
-        if success_no_subs or success_with_subs:
-            update_status(
-                100, 
-                "Video generation complete!", 
-                "complete",
-                drive_link_with_subs if drive_link_with_subs else drive_link_no_subs,
-                drive_link_no_subs
-            )
-            print("\n" + "="*50)
-            print("🎉 VIDEO GENERATION COMPLETE!")
-            print("="*50)
-            
-            if success_no_subs:
-                print(f"📹 Video WITHOUT subtitles: {output_no_subs}")
-                if drive_link_no_subs:
-                    print(f"☁️  Drive link (no subs): {drive_link_no_subs}")
-            
-            if success_with_subs:
-                print(f"📹 Video WITH subtitles: {output_with_subs}")
-                if drive_link_with_subs:
-                    print(f"☁️  Drive link (with subs): {drive_link_with_subs}")
-            
-            # Get file sizes
-            if os.path.exists(output_no_subs):
-                size_mb = os.path.getsize(output_no_subs) / (1024*1024)
-                print(f"📦 File size (no subs): {size_mb:.1f} MB")
-            
-            if os.path.exists(output_with_subs):
-                size_mb = os.path.getsize(output_with_subs) / (1024*1024)
-                print(f"📦 File size (with subs): {size_mb:.1f} MB")
-        else:
-            update_status(100, "Video generation failed", "failed")
-            print("❌ Video generation failed")
-    
-    elif MODE == "audio_only":
-        print(f"🎵 Mode: Audio Only (Using provided audio)")
-        
-        if not audio_path:
-            update_status(100, "No audio file found", "failed")
-            return
-        
-        # Upload audio to Google Drive
-        if os.environ.get("OAUTH_CLIENT_ID"):
-            drive_link = upload_to_google_drive(
-                audio_path, 
-                f"audio_{JOB_ID}.wav"
-            )
-            update_status(100, "Audio uploaded to Drive", "complete", drive_link)
-        else:
-            update_status(100, "Audio ready", "complete")
+        script = SCRIPT_TEXT
+        print(f"📄 Using provided script ({len(script.split())} words)")
     
     else:
         print(f"❌ Unknown mode: {MODE}")
         update_status(100, f"Unknown mode: {MODE}", "failed")
+        return
+    
+    # Now continue with voice cloning and video generation
+    # Step 1: Clone voice
+    update_status(20, "Cloning voice...")
+    audio_path = TEMP_DIR / "audio.wav"
+    
+    # Check if voice file exists
+    if not VOICE_PATH or not os.path.exists(VOICE_PATH):
+        print("❌ Voice file not found or not provided")
+        
+        # Try to download from GitHub if it's a path
+        if VOICE_PATH and ("/" in VOICE_PATH or "\\" in VOICE_PATH):
+            print(f"🔄 Trying to download voice file: {VOICE_PATH}")
+            voice_downloaded = TEMP_DIR / "voice_reference.mp3"
+            if download_asset(VOICE_PATH, voice_downloaded):
+                VOICE_PATH = str(voice_downloaded)
+                print(f"✅ Voice file downloaded from GitHub")
+            else:
+                update_status(100, "Voice reference missing", "failed")
+                return
+        else:
+            update_status(100, "Voice reference missing", "failed")
+            return
+    
+    # Clone voice
+    if os.path.exists(VOICE_PATH):
+        success = clone_voice_robust(script, VOICE_PATH, audio_path)
+        if not success:
+            print("⚠️ Voice cloning failed")
+            update_status(100, "Voice cloning failed", "failed")
+            return
+    else:
+        print("❌ Voice file not found after download attempt")
+        update_status(100, "Voice reference missing", "failed")
+        return
+    
+    if not os.path.exists(audio_path):
+        print("❌ Audio file not created")
+        update_status(100, "Audio creation failed", "failed")
+        return
+    
+    # Step 2: Transcribe audio for timing
+    update_status(52, "Transcribing audio for timing...")
+    
+    # Try AssemblyAI first
+    sentences = []
+    if ASSEMBLY_KEY:
+        try:
+            aai.settings.api_key = ASSEMBLY_KEY
+            transcriber = aai.Transcriber()
+            print("📝 Transcribing audio...")
+            transcript = transcriber.transcribe(str(audio_path))
+            
+            if transcript.status == aai.TranscriptStatus.completed:
+                for utterance in transcript.utterances:
+                    sentences.append({
+                        'text': utterance.text,
+                        'start': utterance.start / 1000.0,
+                        'end': utterance.end / 1000.0
+                    })
+                print(f"✅ Transcription complete: {len(sentences)} sentences")
+            else:
+                raise Exception("Transcription failed")
+        except Exception as e:
+            print(f"⚠️ AssemblyAI failed: {e}. Using fallback...")
+            sentences = []
+    
+    # Fallback if no sentences from AssemblyAI
+    if not sentences:
+        # Fallback timing logic
+        words = script.split()
+        try:
+            import wave
+            with wave.open(str(audio_path), 'rb') as wav_file:
+                total_duration = wav_file.getnframes() / float(wav_file.getframerate())
+            
+            words_per_second = len(words) / total_duration
+            words_per_sentence = 12
+            
+            for i in range(0, len(words), words_per_sentence):
+                chunk = words[i:i + words_per_sentence]
+                sentence_duration = len(chunk) / words_per_second
+                start_time = i / len(words) * total_duration
+                end_time = min(start_time + sentence_duration, total_duration)
+                sentences.append({
+                    "text": ' '.join(chunk),
+                    "start": start_time,
+                    "end": end_time
+                })
+            
+            if sentences:
+                sentences[-1]['end'] += 1.5
+        except:
+            # Ultimate fallback
+            script_sentences = re.split(r'(?<=[.!?])\s+', script)
+            avg_duration = len(script) / len(script_sentences) / 10
+            for i, sent_text in enumerate(script_sentences):
+                if sent_text.strip():
+                    sentences.append({
+                        "text": sent_text.strip(),
+                        "start": i * 5.0,
+                        "end": (i + 1) * 5.0
+                    })
+    
+    print(f"⏱️  {len(sentences)} sentences with timing")
+    
+    # Step 3: Create subtitles
+    update_status(55, "Creating subtitle file...")
+    ass_file = TEMP_DIR / "subtitles.ass"
+    create_ass_file(sentences, ass_file)
+    
+    # Step 4: Process visuals (dual output)
+    output_no_subs = OUTPUT_DIR / f"video_{JOB_ID}_no_subs.mp4"
+    output_with_subs = OUTPUT_DIR / f"video_{JOB_ID}_with_subs.mp4"
+    
+    # Check for logo
+    logo_path = None
+    if LOGO_PATH and LOGO_PATH.strip() not in ["", "None", "null", "undefined"]:
+        if os.path.exists(LOGO_PATH):
+            logo_path = LOGO_PATH
+        else:
+            # Try to download from GitHub
+            logo_downloaded = TEMP_DIR / "logo.png"
+            if download_asset(LOGO_PATH, logo_downloaded):
+                logo_path = str(logo_downloaded)
+                print(f"✅ Logo downloaded from GitHub")
+            else:
+                print(f"⚠️ Logo not found: {LOGO_PATH}")
+    
+    # Call the process_visuals_dual_output function (make sure it exists!)
+    success_no_subs, success_with_subs = process_visuals_dual_output(
+        sentences, audio_path, ass_file, logo_path, 
+        output_no_subs, output_with_subs, script, TOPIC
+    )
+    
+    # Step 5: Upload to Google Drive
+    drive_link_no_subs = None
+    drive_link_with_subs = None
+    
+    if success_no_subs and os.environ.get("OAUTH_CLIENT_ID"):
+        update_status(95, "Uploading video without subtitles...")
+        drive_link_no_subs = upload_to_google_drive(
+            output_no_subs, 
+            f"{TOPIC.replace(' ', '_')}_no_subs_{JOB_ID}.mp4"
+        )
+    
+    if success_with_subs and os.environ.get("OAUTH_CLIENT_ID"):
+        update_status(97, "Uploading video with subtitles...")
+        drive_link_with_subs = upload_to_google_drive(
+            output_with_subs,
+            f"{TOPIC.replace(' ', '_')}_with_subs_{JOB_ID}.mp4"
+        )
+    
+    # Step 6: Final status
+    if success_no_subs or success_with_subs:
+        update_status(
+            100, 
+            "Video generation complete!", 
+            "complete",
+            drive_link_with_subs if drive_link_with_subs else drive_link_no_subs,
+            drive_link_no_subs
+        )
+        print("\n" + "="*50)
+        print("🎉 VIDEO GENERATION COMPLETE!")
+        print("="*50)
+        
+        if success_no_subs:
+            print(f"📹 Video WITHOUT subtitles: {output_no_subs}")
+            if drive_link_no_subs:
+                print(f"☁️  Drive link (no subs): {drive_link_no_subs}")
+        
+        if success_with_subs:
+            print(f"📹 Video WITH subtitles: {output_with_subs}")
+            if drive_link_with_subs:
+                print(f"☁️  Drive link (with subs): {drive_link_with_subs}")
+        
+        # Get file sizes
+        if os.path.exists(output_no_subs):
+            size_mb = os.path.getsize(output_no_subs) / (1024*1024)
+            print(f"📦 File size (no subs): {size_mb:.1f} MB")
+        
+        if os.path.exists(output_with_subs):
+            size_mb = os.path.getsize(output_with_subs) / (1024*1024)
+            print(f"📦 File size (with subs): {size_mb:.1f} MB")
+    else:
+        update_status(100, "Video generation failed", "failed")
+        print("❌ Video generation failed")
     
     # Cleanup
     print("\n🧹 Cleaning up temporary files...")
@@ -2363,16 +2370,3 @@ def main():
     
     gc.collect()
     print("✅ Cleanup complete")
-
-# ========================================== 
-# 17. ENTRY POINT
-# ========================================== 
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-        update_status(100, f"Error: {str(e)[:100]}", "failed")
