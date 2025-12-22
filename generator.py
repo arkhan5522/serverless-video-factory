@@ -1,12 +1,12 @@
 """
 AI VIDEO GENERATOR WITH GOOGLE DRIVE UPLOAD
 ============================================
-STABLE VERSION - FIXED IMPORT ERRORS & PROTOBUF ISSUES
-Core Updates:
-1. Fixed protobuf version conflicts
-2. Added error handling for model loading failures
-3. Fallback to simpler keyword extraction when AI models fail
-4. Two-stage video processing maintained
+ENHANCED VERSION:
+1. T5 Transformers for Smart Query Generation
+2. CLIP Model for Exact Visual Matching
+3. Dual Output: With & Without Subtitles
+4. Islamic Content Filtering
+5. Subtitle Design Implementation (ASS format)
 """
 
 import os
@@ -23,33 +23,26 @@ import gc
 from pathlib import Path
 
 # ========================================== 
-# 0. FIXED INSTALLATION (Protobuf Version Fix)
+# 1. INSTALLATION
 # ========================================== 
 
-print("--- 🔧 Installing Dependencies with Protobuf Fix ---")
+print("--- 🔧 Installing Dependencies ---")
 try:
-    # First, fix protobuf version if it's causing issues
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "protobuf==3.20.3", "--quiet"])
-    
-    # Core dependencies (with version pinning to avoid conflicts)
-    core_libs = [
-        "chatterbox-tts==0.1.0",
+    libs = [
+        "chatterbox-tts",
         "torchaudio", 
         "assemblyai",
         "google-generativeai",
-        "requests==2.31.0",
+        "requests",
         "beautifulsoup4",
         "pydub",
-        "numpy==1.24.3",
+        "numpy",
+        "transformers",
         "pillow",
-        "opencv-python-headless",
-        "transformers==4.36.0",  # Stable version
-        "ftfy",
-        "timm",
-        "sentencepiece",
+        "opencv-python",
         "--quiet"
     ]
-    subprocess.check_call([sys.executable, "-m", "pip", "install"] + core_libs)
+    subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
 except Exception as e:
     print(f"Install Warning: {e}")
@@ -58,9 +51,12 @@ import torch
 import torchaudio
 import assemblyai as aai
 import google.generativeai as genai
+import cv2
+from PIL import Image
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, CLIPProcessor, CLIPModel
 
 # ========================================== 
-# 1. CONFIGURATION
+# 2. CONFIGURATION
 # ========================================== 
 
 MODE = """{{MODE_PLACEHOLDER}}"""
@@ -87,67 +83,195 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ========================================== 
-# 2. SIMPLIFIED SMART QUERY GENERATOR (No T5/CLIP)
+# 3. LOAD AI MODELS (T5 + CLIP)
 # ========================================== 
 
-def generate_smart_search_query(script_segment, fallback_topic):
-    """
-    SIMPLIFIED VERSION: Uses keyword extraction instead of T5 model
-    This avoids the protobuf/transformers import errors
-    """
-    # Extract meaningful words (nouns, verbs, adjectives)
-    words = re.findall(r'\b\w{4,}\b', script_segment.lower())
-    
-    # Remove common stop words
-    stop_words = {
-        'that', 'this', 'with', 'from', 'about', 'when', 'were', 'have', 'been',
-        'they', 'their', 'there', 'would', 'could', 'should', 'which', 'what',
-        'where', 'while', 'after', 'before', 'under', 'above', 'below'
-    }
-    
-    filtered_words = [w for w in words if w not in stop_words]
-    
-    # Prioritize longer, more descriptive words
-    if filtered_words:
-        # Sort by length (longer words are usually more descriptive)
-        filtered_words.sort(key=len, reverse=True)
-        primary_word = filtered_words[0]
-        
-        # Combine with topic for better search
-        primary_query = f"{primary_word} {fallback_topic} 4k cinematic"
-        
-        # Additional keywords for fallback
-        additional_words = filtered_words[1:4] if len(filtered_words) > 1 else [fallback_topic]
-        
-        return primary_query, [primary_word] + additional_words
-    else:
-        # Fallback to topic-based query
-        primary_query = f"{fallback_topic} 4k cinematic"
-        return primary_query, [fallback_topic]
+print("--- 🤖 Loading AI Models ---")
 
-def contains_prohibited_content(video_title, video_description):
-    """Checks video metadata against Islamic blacklist."""
-    STRONG_CONTENT_BLACKLIST = [
-        # Islamic Prohibitions
-        'alcohol', 'wine', 'beer', 'liquor', 'drunk', 'intoxicated',
-        'nudity', 'nude', 'topless', 'bikini', 'swimsuit', 'lingerie', 'underwear',
-        'pork', 'bacon', 'ham', 'haram',
-        # Violence & Conflict
-        'war', 'battle', 'gun', 'weapon', 'blood', 'gore', 'violence', 'fight',
-        'terror', 'attack', 'murder', 'kill',
-        # Negative/Explicit
-        'sexy', 'hot girl', 'fashion model', 'erotic', 'porn', 'xxx', 'adult',
-    ]
-    
-    text = (video_title + ' ' + video_description).lower()
-    for term in STRONG_CONTENT_BLACKLIST:
-        if term in text:
-            print(f"    🚫 BLOCKED: Found prohibited term '{term}'")
-            return True
-    return False
+# T5 for Smart Query Generation
+print("Loading T5 Model for Query Generation...")
+try:
+    t5_tokenizer = AutoTokenizer.from_pretrained("fabiochiu/t5-base-tag-generation")
+    t5_model = AutoModelForSeq2SeqLM.from_pretrained("fabiochiu/t5-base-tag-generation")
+    T5_AVAILABLE = True
+    print("✅ T5 Model loaded")
+except Exception as e:
+    print(f"⚠️ T5 Model failed to load: {e}")
+    T5_AVAILABLE = False
+
+# CLIP for Visual Matching
+print("Loading CLIP Model for Visual Matching...")
+try:
+    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    CLIP_AVAILABLE = True
+    print("✅ CLIP Model loaded")
+except Exception as e:
+    print(f"⚠️ CLIP Model failed to load: {e}")
+    CLIP_AVAILABLE = False
 
 # ========================================== 
-# 3. FIXED SUBTITLE STYLES
+# 4. ISLAMIC CONTENT FILTER
+# ========================================== 
+
+ISLAMIC_FORBIDDEN_TERMS = [
+    # Alcohol & Intoxicants
+    'alcohol', 'beer', 'wine', 'vodka', 'whiskey', 'champagne', 'cocktail', 
+    'drunk', 'intoxicated', 'bar', 'pub', 'brewery', 'liquor', 'rum', 'gin',
+    
+    # Nudity & Inappropriate Content
+    'nude', 'nudity', 'naked', 'bikini', 'lingerie', 'underwear', 'sexy', 
+    'erotic', 'adult content', 'pornography', 'sexual', 'seductive',
+    'provocative', 'revealing', 'hot girl', 'swimsuit model',
+    
+    # Gambling
+    'casino', 'gambling', 'poker', 'slot machine', 'betting', 'lottery',
+    'roulette', 'blackjack', 'gamble',
+    
+    # War & Violence (excessive)
+    'war crime', 'massacre', 'genocide', 'torture', 'brutal killing',
+    'execution', 'terrorist attack', 'bombing civilian',
+    
+    # Pork
+    'pork', 'bacon', 'ham', 'sausage pork', 'pig meat',
+    
+    # Idolatry & False Worship
+    'idol worship', 'pagan ritual', 'false god', 'polytheism',
+    
+    # Inappropriate Dating/Relationships
+    'dating app hookup', 'one night stand', 'affair', 'adultery',
+    'nightclub party', 'strip club'
+]
+
+def is_content_halal(text):
+    """Check if content is appropriate according to Islamic guidelines"""
+    text_lower = text.lower()
+    
+    for term in ISLAMIC_FORBIDDEN_TERMS:
+        if term in text_lower:
+            print(f"      🚫 BLOCKED: Islamic filter - '{term}' detected")
+            return False
+    
+    return True
+
+# ========================================== 
+# 5. T5 SMART QUERY GENERATION
+# ========================================== 
+
+def generate_smart_query_t5(script_text):
+    """Generate intelligent search queries using T5 transformer"""
+    if not T5_AVAILABLE:
+        # Fallback to keyword extraction
+        words = re.findall(r'\b\w{5,}\b', script_text.lower())
+        return words[0] if words else "background"
+    
+    try:
+        # Prepare input
+        inputs = t5_tokenizer([script_text], max_length=512, truncation=True, return_tensors="pt")
+        
+        # Generate tags
+        output = t5_model.generate(
+            **inputs,
+            max_length=50,
+            num_beams=5,
+            early_stopping=True,
+            no_repeat_ngram_size=2
+        )
+        
+        # Decode
+        decoded_output = t5_tokenizer.batch_decode(output, skip_special_tokens=True)[0]
+        tags = list(set(decoded_output.strip().split(", ")))
+        
+        # Return first halal tag
+        for tag in tags:
+            if is_content_halal(tag):
+                return tag
+        
+        return "background"
+        
+    except Exception as e:
+        print(f"    T5 Error: {e}")
+        words = re.findall(r'\b\w{5,}\b', script_text.lower())
+        return words[0] if words else "background"
+
+# ========================================== 
+# 6. CLIP VISUAL MATCHING
+# ========================================== 
+
+def get_middle_frame(video_path):
+    """Extract middle frame from video"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+        
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
+        
+        ret, frame = cap.read()
+        cap.release()
+        
+        if ret:
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return None
+    except:
+        return None
+
+def calculate_clip_score(video_path, script_text):
+    """Use CLIP to calculate visual-text similarity"""
+    if not CLIP_AVAILABLE:
+        return 50  # Default score if CLIP unavailable
+    
+    try:
+        frame = get_middle_frame(video_path)
+        if frame is None:
+            return 0
+        
+        image = Image.fromarray(frame)
+        
+        inputs = clip_processor(
+            text=[script_text],
+            images=[image],
+            return_tensors="pt",
+            padding=True
+        )
+        
+        with torch.no_grad():
+            outputs = clip_model(**inputs)
+        
+        logits_per_image = outputs.logits_per_image
+        probs = logits_per_image.softmax(dim=0)
+        confidence = probs[0].item() * 100
+        
+        return confidence
+        
+    except Exception as e:
+        print(f"    CLIP Error: {e}")
+        return 50
+
+def rank_videos_with_clip(video_paths, script_text):
+    """Rank downloaded videos using CLIP similarity"""
+    if not CLIP_AVAILABLE or not video_paths:
+        return video_paths
+    
+    print(f"    🎯 Ranking {len(video_paths)} videos with CLIP...")
+    
+    scored_videos = []
+    for video_path in video_paths:
+        if os.path.exists(video_path):
+            score = calculate_clip_score(video_path, script_text)
+            scored_videos.append((video_path, score))
+    
+    # Sort by score descending
+    scored_videos.sort(key=lambda x: x[1], reverse=True)
+    
+    if scored_videos:
+        print(f"    ✓ Best match: {os.path.basename(scored_videos[0][0])} (CLIP: {scored_videos[0][1]:.1f}%)")
+    
+    return [v[0] for v in scored_videos]
+
+# ========================================== 
+# 7. SUBTITLE STYLES
 # ========================================== 
 
 SUBTITLE_STYLES = {
@@ -155,9 +279,9 @@ SUBTITLE_STYLES = {
         "name": "MrBeast Yellow (3D Pop)",
         "fontname": "Arial Black",
         "fontsize": 60,
-        "primary_colour": "&H0000FFFF",  # Yellow
-        "back_colour": "&H00000000",      # Black
-        "outline_colour": "&H00000000",   # Black
+        "primary_colour": "&H0000FFFF",
+        "back_colour": "&H00000000",
+        "outline_colour": "&H00000000",
         "bold": -1,
         "italic": 0,
         "border_style": 1,
@@ -171,7 +295,7 @@ SUBTITLE_STYLES = {
         "name": "Hormozi Green (High Contrast)",
         "fontname": "Arial Black",
         "fontsize": 60,
-        "primary_colour": "&H0000FF00",  # Green
+        "primary_colour": "&H0000FF00",
         "back_colour": "&H80000000",
         "outline_colour": "&H00000000",
         "bold": -1,
@@ -187,9 +311,9 @@ SUBTITLE_STYLES = {
         "name": "Finance Blue (Neon Glow)",
         "fontname": "Arial",
         "fontsize": 80,
-        "primary_colour": "&H00FFFFFF",  # White
+        "primary_colour": "&H00FFFFFF",
         "back_colour": "&H00000000",
-        "outline_colour": "&H00FF9900",  # Orange for glow effect
+        "outline_colour": "&H00FF9900",
         "bold": -1,
         "italic": 0,
         "border_style": 1,
@@ -198,18 +322,49 @@ SUBTITLE_STYLES = {
         "margin_v": 50,
         "alignment": 2,
         "spacing": 2
+    },
+    "netflix_box": {
+        "name": "Netflix Modern",
+        "fontname": "Roboto",
+        "fontsize": 80,
+        "primary_colour": "&H00FFFFFF",
+        "back_colour": "&H90000000",
+        "outline_colour": "&H00000000",
+        "bold": 0,
+        "italic": 0,
+        "border_style": 3,
+        "outline": 0,
+        "shadow": 0,
+        "margin_v": 35,
+        "alignment": 2,
+        "spacing": 0.5
+    },
+    "tiktok_white": {
+        "name": "TikTok White (Ultra Bold)",
+        "fontname": "Arial Black",
+        "fontsize": 65,
+        "primary_colour": "&H00FFFFFF",
+        "back_colour": "&H60000000",
+        "outline_colour": "&H00000000",
+        "bold": -1,
+        "italic": 0,
+        "border_style": 1,
+        "outline": 4.5,
+        "shadow": 2,
+        "margin_v": 40,
+        "alignment": 2,
+        "spacing": -0.5
     }
 }
 
 def create_ass_file(sentences, ass_file):
-    """Create ASS subtitle file with proper format encoding"""
+    """Create ASS subtitle file with proper format"""
     style_key = random.choice(list(SUBTITLE_STYLES.keys()))
     style = SUBTITLE_STYLES[style_key]
     
     print(f"✨ Using Subtitle Style: {style['name']}")
     
     with open(ass_file, "w", encoding="utf-8-sig") as f:
-        # Header
         f.write("[Script Info]\n")
         f.write("ScriptType: v4.00+\n")
         f.write("PlayResX: 1920\n")
@@ -217,13 +372,11 @@ def create_ass_file(sentences, ass_file):
         f.write("WrapStyle: 2\n")
         f.write("ScaledBorderAndShadow: yes\n\n")
         
-        # Style Definition
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
         
         f.write(f"Style: Default,{style['fontname']},{style['fontsize']},{style['primary_colour']},&H000000FF,{style['outline_colour']},{style['back_colour']},{style['bold']},{style['italic']},0,0,100,100,{style['spacing']},0,{style['border_style']},{style['outline']},{style['shadow']},{style['alignment']},25,25,{style['margin_v']},1\n\n")
         
-        # Events
         f.write("[Events]\n")
         f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
         
@@ -231,19 +384,17 @@ def create_ass_file(sentences, ass_file):
             start_time = format_ass_time(s['start'])
             end_time = format_ass_time(s['end'])
             
-            # Clean text
             text = s['text'].strip()
             text = text.replace('\\', '\\\\').replace('\n', ' ')
             
-            # Remove trailing punctuation
-            if text.endswith('.') or text.endswith(','):
+            if text.endswith('.'):
+                text = text[:-1]
+            if text.endswith(','):
                 text = text[:-1]
             
-            # Force uppercase for viral styles
             if "mrbeast" in style_key or "hormozi" in style_key:
                 text = text.upper()
             
-            # Smart text wrapping
             MAX_CHARS = 35
             words = text.split()
             lines = []
@@ -265,11 +416,10 @@ def create_ass_file(sentences, ass_file):
             
             formatted_text = '\\N'.join(lines)
             
-            # Write dialogue line
             f.write(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{formatted_text}\n")
 
 def format_ass_time(seconds):
-    """Format seconds to ASS timestamp (H:MM:SS.CS)"""
+    """Format seconds to ASS timestamp"""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
@@ -277,16 +427,16 @@ def format_ass_time(seconds):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 # ========================================== 
-# 4. GOOGLE DRIVE UPLOAD
+# 8. GOOGLE DRIVE UPLOAD
 # ========================================== 
 
 def upload_to_google_drive(file_path):
-    """Uploads using OAuth 2.0 Refresh Token"""
+    """Upload file to Google Drive"""
     if not os.path.exists(file_path):
-        print(f"❌ Error: File not found: {file_path}")
+        print(f"❌ File not found: {file_path}")
         return None
     
-    print(f"🔑 Authenticating via OAuth for {os.path.basename(file_path)}...")
+    print(f"☁️ Uploading {os.path.basename(file_path)}...")
     
     client_id = os.environ.get("OAUTH_CLIENT_ID")
     client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
@@ -294,10 +444,10 @@ def upload_to_google_drive(file_path):
     folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
     
     if not all([client_id, client_secret, refresh_token]):
-        print("❌ Error: Missing OAuth Secrets")
+        print("❌ Missing OAuth credentials")
         return None
     
-    # Get Access Token
+    # Get access token
     token_url = "https://oauth2.googleapis.com/token"
     data = {
         "client_id": client_id,
@@ -307,12 +457,11 @@ def upload_to_google_drive(file_path):
     }
     
     try:
-        r = requests.post(token_url, data=data, timeout=30)
+        r = requests.post(token_url, data=data)
         r.raise_for_status()
         access_token = r.json()['access_token']
-        print("✅ Access Token refreshed")
     except Exception as e:
-        print(f"❌ Failed to refresh token: {e}")
+        print(f"❌ Token refresh failed: {e}")
         return None
     
     # Upload
@@ -331,415 +480,263 @@ def upload_to_google_drive(file_path):
         "X-Upload-Content-Length": str(file_size)
     }
     
-    try:
-        response = requests.post(upload_url, headers=headers, json=metadata, timeout=30)
-        if response.status_code != 200:
-            print(f"❌ Init failed: {response.text[:100]}")
-            return None
-    except Exception as e:
-        print(f"❌ Upload init error: {e}")
+    response = requests.post(upload_url, headers=headers, json=metadata)
+    if response.status_code != 200:
+        print(f"❌ Init failed: {response.text}")
         return None
     
     session_uri = response.headers.get("Location")
     
-    print(f"☁️ Uploading {filename} ({file_size / (1024*1024):.1f} MB)...")
-    try:
-        with open(file_path, "rb") as f:
-            upload_headers = {"Content-Length": str(file_size)}
-            upload_resp = requests.put(session_uri, headers=upload_headers, data=f, timeout=120)
+    with open(file_path, "rb") as f:
+        upload_headers = {"Content-Length": str(file_size)}
+        upload_resp = requests.put(session_uri, headers=upload_headers, data=f)
+    
+    if upload_resp.status_code in [200, 201]:
+        file_data = upload_resp.json()
+        file_id = file_data.get('id')
         
-        if upload_resp.status_code in [200, 201]:
-            file_data = upload_resp.json()
-            file_id = file_data.get('id')
-            print(f"✅ Upload Success! File ID: {file_id}")
-            
-            # Make public
-            try:
-                perm_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
-                requests.post(
-                    perm_url,
-                    headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-                    json={'role': 'reader', 'type': 'anyone'},
-                    timeout=30
-                )
-            except:
-                print("⚠️ Could not make file public (but upload succeeded)")
-            
-            link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
-            print(f"🔗 Link: {link}")
-            return link
-        else:
-            print(f"❌ Upload Failed: {upload_resp.text[:100]}")
-            return None
-    except Exception as e:
-        print(f"❌ Upload error: {e}")
+        # Make public
+        perm_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
+        requests.post(
+            perm_url,
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={'role': 'reader', 'type': 'anyone'}
+        )
+        
+        link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+        print(f"✅ Uploaded: {link}")
+        return link
+    else:
+        print(f"❌ Upload failed: {upload_resp.text}")
         return None
 
 # ========================================== 
-# 5. ENHANCED VISUAL PROCESSING
+# 9. VISUAL DICTIONARY (ENHANCED)
 # ========================================== 
 
 VISUAL_MAP = {
-    "tech": ["server room", "circuit board", "hologram display", "coding screen", "data center"],
-    "technology": ["innovation lab", "tech startup", "hardware engineering", "quantum computer"],
-    "ai": ["artificial intelligence", "neural network", "machine learning", "digital brain"],
-    "business": ["business meeting", "office skyscraper", "corporate presentation", "team collaboration"],
-    "finance": ["stock market", "financial charts", "trading floor", "investment"],
-    "nature": ["waterfall drone shot", "forest aerial", "mountain landscape", "natural wonder"],
-    "science": ["laboratory", "scientist research", "microscope", "chemical reaction"],
-    "education": ["classroom", "university", "graduation", "learning", "teacher"],
-    "health": ["hospital", "doctor examining", "medical equipment", "fitness"],
-    "travel": ["traveling", "adventure", "journey", "tourist", "exploration"],
-    "food": ["delicious food", "gourmet meal", "food preparation", "restaurant dish"],
-    "sport": ["sports action", "athletic competition", "stadium", "sports event"],
-    "music": ["musical instruments", "concert", "recording studio", "musician performing"],
-    "art": ["art gallery", "painting", "sculpture", "artistic creation"],
+    "tech": ["server room", "circuit board", "hologram", "robot", "coding", "data center"],
+    "technology": ["innovation lab", "tech startup", "silicon valley", "hardware"],
+    "ai": ["artificial intelligence", "neural network", "machine learning", "robot"],
+    "business": ["meeting", "handshake", "office", "corporate", "team"],
+    "nature": ["waterfall", "forest", "mountain", "wildlife", "ocean"],
+    "science": ["laboratory", "scientist", "microscope", "experiment", "research"],
+    "space": ["galaxy", "planet", "astronaut", "rocket", "stars"],
+    "city": ["skyline", "urban", "street", "building", "traffic"],
+    "education": ["classroom", "university", "student", "learning", "library"],
+    "health": ["fitness", "yoga", "meditation", "healthy food", "exercise"],
 }
 
 VIDEO_CATEGORY = None
-CATEGORY_KEYWORDS = []
-USED_VIDEO_URLS = set()
 
-def analyze_script_and_set_category(script, topic):
-    """Determine the primary category for the video."""
-    global VIDEO_CATEGORY, CATEGORY_KEYWORDS
-    
-    print("\n🔍 Analyzing script to determine video category...")
+def analyze_script_category(script, topic):
+    """Determine video category from script"""
+    global VIDEO_CATEGORY
     
     full_text = (script + " " + topic).lower()
+    words = re.findall(r'\b\w{4,}\b', full_text)
     
-    # Simple category detection
     category_scores = {}
     for category, terms in VISUAL_MAP.items():
         score = 0
         if category in full_text:
             score += 10
-        
         for term in terms:
-            if any(word in full_text for word in term.split()):
-                score += 3
-        
+            for word in words:
+                if word in term:
+                    score += 3
         if score > 0:
             category_scores[category] = score
     
     if category_scores:
-        VIDEO_CATEGORY = max(category_scores.items(), key=lambda x: x[1])[0]
-        CATEGORY_KEYWORDS = [VIDEO_CATEGORY]
-        
-        # Add related terms
-        for term in VISUAL_MAP[VIDEO_CATEGORY][:3]:
-            CATEGORY_KEYWORDS.extend(term.split())
-        
-        print(f"✅ VIDEO CATEGORY: '{VIDEO_CATEGORY}'")
+        VIDEO_CATEGORY = max(category_scores, key=category_scores.get)
     else:
         VIDEO_CATEGORY = "technology"
-        CATEGORY_KEYWORDS = ["technology", "digital", "innovation"]
-        print(f"⚠️ Using default category: '{VIDEO_CATEGORY}'")
     
-    return VIDEO_CATEGORY, CATEGORY_KEYWORDS
+    print(f"✅ Video Category: {VIDEO_CATEGORY}")
+    return VIDEO_CATEGORY
 
-def intelligent_video_search(query, service, keys, page=1):
-    """Search for videos using Pexels or Pixabay"""
+# ========================================== 
+# 10. VIDEO SEARCH WITH T5 & CLIP
+# ========================================== 
+
+USED_VIDEO_URLS = set()
+
+def search_videos_smart(script_text, sentence_index):
+    """Search videos using T5 query generation"""
+    
+    # Generate smart query using T5
+    if T5_AVAILABLE:
+        primary_query = generate_smart_query_t5(script_text)
+        print(f"    🧠 T5 Query: '{primary_query}'")
+    else:
+        # Fallback: extract keywords
+        words = re.findall(r'\b\w{5,}\b', script_text.lower())
+        primary_query = words[0] if words else "background"
+    
+    # Add category context
+    if VIDEO_CATEGORY:
+        primary_query = f"{primary_query} {VIDEO_CATEGORY}"
+    
+    primary_query += " 4k cinematic"
+    
+    # Fallback queries
+    fallback_queries = [
+        f"{VIDEO_CATEGORY} abstract 4k" if VIDEO_CATEGORY else "abstract 4k",
+        f"{VIDEO_CATEGORY} landscape" if VIDEO_CATEGORY else "nature landscape",
+        "background cinematic 4k"
+    ]
+    
+    all_queries = [primary_query] + fallback_queries
+    
+    # Search Pexels & Pixabay
     all_results = []
     
-    if service == 'pexels' and keys:
-        try:
-            key = random.choice([k for k in keys if k])
-            print(f"    Searching Pexels: {query}")
-            url = "https://api.pexels.com/videos/search"
-            headers = {"Authorization": key}
-            params = {
-                "query": query,
-                "per_page": 15,
-                "page": page,
-                "orientation": "landscape",
-                "size": "medium"
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                for video in data.get('videos', []):
-                    video_files = video.get('video_files', [])
-                    if video_files:
-                        # Find best quality
-                        best_file = None
-                        for quality in ['hd', 'large', 'medium']:
-                            quality_files = [f for f in video_files if f.get('quality') == quality]
-                            if quality_files:
-                                best_file = random.choice(quality_files)
-                                break
-                        
-                        if best_file:
-                            all_results.append({
-                                'url': best_file['link'],
-                                'title': video.get('user', {}).get('name', query),
-                                'description': f"Pexels video",
-                                'duration': video.get('duration', 0),
-                                'service': 'pexels',
-                                'quality': best_file.get('quality', 'medium'),
-                                'width': best_file.get('width', 0),
-                                'height': best_file.get('height', 0),
-                            })
-        except Exception as e:
-            print(f"    Pexels error: {str(e)[:50]}")
-    
-    elif service == 'pixabay' and keys:
-        try:
-            key = random.choice([k for k in keys if k])
-            print(f"    Searching Pixabay: {query}")
-            url = "https://pixabay.com/api/videos/"
-            params = {
-                "key": key,
-                "q": query,
-                "per_page": 15,
-                "page": page,
-                "orientation": "horizontal",
-                "video_type": "film",
-            }
-            
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                for video in data.get('hits', []):
-                    videos_dict = video.get('videos', {})
-                    
-                    # Get best quality
-                    best_quality = None
-                    for quality in ['large', 'medium', 'small']:
-                        if quality in videos_dict:
-                            best_quality = videos_dict[quality]
-                            break
-                    
-                    if best_quality:
-                        all_results.append({
-                            'url': best_quality['url'],
-                            'title': video.get('tags', query),
-                            'description': f"Pixabay video",
-                            'duration': video.get('duration', 0),
-                            'service': 'pixabay',
-                            'quality': quality,
-                            'width': best_quality.get('width', 0),
-                            'height': best_quality.get('height', 0),
-                        })
-        except Exception as e:
-            print(f"    Pixabay error: {str(e)[:50]}")
+    for query in all_queries[:2]:  # Try first 2 queries
+        # Pexels
+        if PEXELS_KEYS and PEXELS_KEYS[0]:
+            try:
+                key = random.choice([k for k in PEXELS_KEYS if k])
+                url = "https://api.pexels.com/videos/search"
+                headers = {"Authorization": key}
+                params = {
+                    "query": query,
+                    "per_page": 15,
+                    "page": random.randint(1, 3),
+                    "orientation": "landscape"
+                }
+                
+                response = requests.get(url, headers=headers, params=params, timeout=15)
+                if response.status_code == 200:
+                    data = response.json()
+                    for video in data.get('videos', []):
+                        video_files = video.get('video_files', [])
+                        if video_files:
+                            hd_files = [f for f in video_files if f.get('quality') == 'hd']
+                            if hd_files:
+                                best_file = random.choice(hd_files)
+                                video_url = best_file['link']
+                                
+                                # Islamic content check
+                                video_title = video.get('user', {}).get('name', '')
+                                if not is_content_halal(video_title + " " + query):
+                                    continue
+                                
+                                if video_url not in USED_VIDEO_URLS:
+                                    all_results.append({
+                                        'url': video_url,
+                                        'service': 'pexels',
+                                        'duration': video.get('duration', 0)
+                                    })
+            except Exception as e:
+                print(f"    Pexels error: {str(e)[:50]}")
+        
+        # Pixabay
+        if PIXABAY_KEYS and PIXABAY_KEYS[0]:
+            try:
+                key = random.choice([k for k in PIXABAY_KEYS if k])
+                url = "https://pixabay.com/api/videos/"
+                params = {
+                    "key": key,
+                    "q": query,
+                    "per_page": 15,
+                    "page": random.randint(1, 3),
+                    "orientation": "horizontal"
+                }
+                
+                response = requests.get(url, params=params, timeout=15)
+                if response.status_code == 200:
+                    data = response.json()
+                    for video in data.get('hits', []):
+                        videos_dict = video.get('videos', {})
+                        if 'large' in videos_dict:
+                            video_url = videos_dict['large']['url']
+                            
+                            # Islamic content check
+                            video_tags = video.get('tags', '')
+                            if not is_content_halal(video_tags + " " + query):
+                                continue
+                            
+                            if video_url not in USED_VIDEO_URLS:
+                                all_results.append({
+                                    'url': video_url,
+                                    'service': 'pixabay',
+                                    'duration': video.get('duration', 0)
+                                })
+            except Exception as e:
+                print(f"    Pixabay error: {str(e)[:50]}")
+        
+        if len(all_results) >= 5:
+            break
     
     return all_results
 
-def get_clip_for_sentence(i, sent, max_retries=3):
-    """Get a video clip for a sentence."""
-    dur = max(3.5, sent['end'] - sent['start'])
+def download_and_rank_videos(results, script_text, target_duration, clip_index):
+    """Download videos and rank using CLIP"""
     
-    print(f"  📹 Clip {i+1}: '{sent['text'][:50]}...'")
+    downloaded_paths = []
     
-    # Generate smart query
-    primary_query, keywords = generate_smart_search_query(sent['text'], TOPIC)
-    print(f"    🔍 Query: '{primary_query}'")
-    
-    for attempt in range(max_retries):
-        out = TEMP_DIR / f"s_{i}_attempt{attempt}.mp4"
-        
-        # Try different queries
-        if attempt == 0:
-            query = primary_query
-        elif attempt == 1:
-            query = f"{keywords[0]} {VIDEO_CATEGORY} 4k" if VIDEO_CATEGORY else primary_query
-        else:
-            query = f"{VIDEO_CATEGORY} abstract 4k" if VIDEO_CATEGORY else "abstract technology 4k"
-        
-        # Search both services
-        all_results = []
-        
-        if PEXELS_KEYS and PEXELS_KEYS[0]:
-            pexels_results = intelligent_video_search(query, 'pexels', PEXELS_KEYS)
-            all_results.extend(pexels_results)
-        
-        if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-            pixabay_results = intelligent_video_search(query, 'pixabay', PIXABAY_KEYS)
-            all_results.extend(pixabay_results)
-        
-        # Filter results
-        filtered_results = []
-        for vid in all_results:
-            if vid['url'] in USED_VIDEO_URLS:
-                continue
-            if contains_prohibited_content(vid.get('title', ''), vid.get('description', '')):
-                continue
-            filtered_results.append(vid)
-        
-        if not filtered_results:
-            print(f"    ⚠️ Attempt {attempt+1}: No videos found")
-            continue
-        
-        # Select a video
-        selected_video = random.choice(filtered_results)
-        USED_VIDEO_URLS.add(selected_video['url'])
-        
+    for i, result in enumerate(results[:5]):  # Download top 5
         try:
-            raw = TEMP_DIR / f"r_{i}.mp4"
-            response = requests.get(selected_video['url'], timeout=30, stream=True)
+            raw_path = TEMP_DIR / f"raw_{clip_index}_{i}.mp4"
+            response = requests.get(result['url'], timeout=30, stream=True)
             
-            with open(raw, "wb") as f:
+            with open(raw_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
             
-            # Process video
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", str(raw),
-                "-t", str(dur),
-                "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-b:v", "8M",
-                "-an",
-                str(out)
-            ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            
-            print(f"    ✅ {selected_video['service']} - {selected_video.get('title', '')[:30]}")
-            return str(out)
-            
+            if os.path.exists(raw_path):
+                downloaded_paths.append(str(raw_path))
+                USED_VIDEO_URLS.add(result['url'])
         except Exception as e:
-            print(f"    ✗ Download failed: {str(e)[:50]}")
+            print(f"    Download error: {str(e)[:50]}")
             continue
     
-    # Fallback gradient
-    print(f"  → Using gradient fallback")
-    return create_gradient_fallback_clip(i, dur)
-
-def create_gradient_fallback_clip(clip_index, duration):
-    """Create gradient video as fallback."""
-    gradient = "0x1a1a2e:0x16213e"
-    out = TEMP_DIR / f"s_{clip_index}_fallback.mp4"
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi",
-        "-i", f"color=c={gradient.split(':')[0]}:s=1920x1080:d={duration}",
-        "-vf", f"fade=in:0:30,fade=out:st={duration-1}:d=1",
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-t", str(duration),
-        str(out)
-    ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return str(out)
-
-# ========================================== 
-# 6. DUAL-OUTPUT VIDEO RENDERING
-# ========================================== 
-
-def render_final_videos(concatenated_video_path, audio_path, ass_file, logo_path, job_id):
-    """
-    Creates two final videos:
-    1. base_{JOB_ID}.mp4: Visuals + Audio + Logo (NO subtitles)
-    2. final_{JOB_ID}.mp4: Visuals + Audio + Logo + BURNED-IN Subtitles
-    """
-    print("🎬 Starting Two-Stage Final Render...")
+    if not downloaded_paths:
+        return None
     
-    # --- STAGE 1: Base video (NO subtitles) ---
-    print("  📹 Stage 1: Rendering base video (without subtitles)...")
-    base_output = OUTPUT_DIR / f"base_{job_id}.mp4"
+    # Rank with CLIP
+    ranked_paths = rank_videos_with_clip(downloaded_paths, script_text)
     
-    if logo_path and os.path.exists(logo_path):
-        filter_complex = (
-            "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];"
-            "[1:v]scale=230:-1[logo];"
-            "[bg][logo]overlay=30:30[v]"
-        )
+    # Process best match
+    if ranked_paths:
+        best_path = ranked_paths[0]
+        output_path = TEMP_DIR / f"clip_{clip_index}.mp4"
+        
         cmd = [
-            "ffmpeg", "-y",
-            "-i", str(concatenated_video_path),
-            "-i", str(logo_path),
-            "-i", str(audio_path),
-            "-filter_complex", filter_complex,
-            "-map", "[v]",
-            "-map", "2:a",
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-b:v", "12M",
-            "-c:a", "aac",
-            "-b:a", "256k",
-            str(base_output)
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", best_path,
+            "-t", str(target_duration),
+            "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30",
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-b:v", "8M",
+            "-an",
+            str(output_path)
         ]
-    else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(concatenated_video_path),
-            "-i", str(audio_path),
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-b:v", "12M",
-            "-c:a", "aac",
-            "-b:a", "256k",
-            str(base_output)
-        ]
+        
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Cleanup raw files
+        for path in downloaded_paths:
+            try:
+                os.remove(path)
+            except:
+                pass
+        
+        return str(output_path)
     
-    subprocess.run(cmd, capture_output=True, check=True)
-    print(f"    ✅ Base video rendered: {base_output}")
-    
-    # --- STAGE 2: Final video (WITH subtitles) ---
-    print("  📼 Stage 2: Rendering final video (with burned subtitles)...")
-    final_output = OUTPUT_DIR / f"final_{job_id}.mp4"
-    
-    ass_path_escaped = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
-    
-    if logo_path and os.path.exists(logo_path):
-        filter_complex = (
-            "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];"
-            "[1:v]scale=230:-1[logo];"
-            "[bg][logo]overlay=30:30[withlogo];"
-            f"[withlogo]ass='{ass_path_escaped}'[v]"
-        )
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(concatenated_video_path),
-            "-i", str(logo_path),
-            "-i", str(audio_path),
-            "-filter_complex", filter_complex,
-            "-map", "[v]",
-            "-map", "2:a",
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-b:v", "12M",
-            "-c:a", "aac",
-            "-b:a", "256k",
-            str(final_output)
-        ]
-    else:
-        filter_complex = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[bg];[bg]ass='{ass_path_escaped}'[v]"
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(concatenated_video_path),
-            "-i", str(audio_path),
-            "-filter_complex", filter_complex,
-            "-map", "[v]",
-            "-map", "1:a",
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-b:v", "12M",
-            "-c:a", "aac",
-            "-b:a", "256k",
-            str(final_output)
-        ]
-    
-    subprocess.run(cmd, capture_output=True, check=True)
-    print(f"    ✅ Final video with subtitles rendered: {final_output}")
-    
-    return str(base_output), str(final_output)
+    return None
 
 # ========================================== 
-# 7. UTILS (Status Updates)
+# 11. STATUS UPDATES
 # ========================================== 
 
 LOG_BUFFER = []
 
 def update_status(progress, message, status="processing", file_url=None):
-    """Updates status.json for HTML frontend"""
+    """Update status for HTML frontend"""
     timestamp = time.strftime("%H:%M:%S")
     log_entry = f"[{timestamp}] {message}"
     print(f"--- {progress}% | {message} ---")
@@ -748,64 +745,58 @@ def update_status(progress, message, status="processing", file_url=None):
     if len(LOG_BUFFER) > 30:
         LOG_BUFFER.pop(0)
     
-    # GitHub status update (simplified)
     repo = os.environ.get('GITHUB_REPOSITORY')
     token = os.environ.get('GITHUB_TOKEN')
     
     if not repo or not token:
         return
     
+    path = f"status/status_{JOB_ID}.json"
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    
+    data = {
+        "progress": progress,
+        "message": message,
+        "status": status,
+        "logs": "\n".join(LOG_BUFFER),
+        "timestamp": time.time()
+    }
+    
+    if file_url:
+        data["file_io_url"] = file_url
+    
+    import base64
+    content_json = json.dumps(data)
+    content_b64 = base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
+    
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
     try:
-        import base64
-        path = f"status/status_{JOB_ID}.json"
-        url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        
-        data = {
-            "progress": progress,
-            "message": message,
-            "status": status,
-            "logs": "\n".join(LOG_BUFFER),
-            "timestamp": time.time()
-        }
-        
-        if file_url:
-            data["file_io_url"] = file_url
-        
-        content_json = json.dumps(data)
-        content_b64 = base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
-        
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        # Try to get existing file
         get_req = requests.get(url, headers=headers)
         sha = get_req.json().get("sha") if get_req.status_code == 200 else None
         
         payload = {
-            "message": f"Update status: {progress}%",
+            "message": f"Update {progress}%",
             "content": content_b64,
             "branch": "main"
         }
         if sha:
             payload["sha"] = sha
         
-        requests.put(url, headers=headers, json=payload, timeout=10)
-    except Exception as e:
-        print(f"⚠️ Failed to update HTML status: {e}")
+        requests.put(url, headers=headers, json=payload)
+    except:
+        pass
 
 def download_asset(path, local):
-    """Download asset from GitHub"""
     try:
         repo = os.environ.get('GITHUB_REPOSITORY')
         token = os.environ.get('GITHUB_TOKEN')
-        if not repo or not token:
-            return False
-            
         url = f"https://api.github.com/repos/{repo}/contents/{path}"
         headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3.raw"}
-        r = requests.get(url, headers=headers, timeout=30)
+        r = requests.get(url, headers=headers)
         if r.status_code == 200:
             with open(local, "wb") as f:
                 f.write(r.content)
@@ -815,177 +806,195 @@ def download_asset(path, local):
     return False
 
 # ========================================== 
-# 8. SCRIPT & AUDIO GENERATION
+# 12. SCRIPT & AUDIO GENERATION
 # ========================================== 
 
 def generate_script(topic, minutes):
-    """Generate script using Gemini"""
     words = int(minutes * 180)
     print(f"Generating Script (~{words} words)...")
+    random.shuffle(GEMINI_KEYS)
     
     base_instructions = """
 CRITICAL RULES:
 - Write ONLY spoken narration text
-- NO stage directions like [Music fades], [Intro], [Outro]
-- NO sound effects descriptions
-- NO [anything in brackets]
-- Start directly with the content
-- End directly with the conclusion
-- Pure voiceover script only
-- Family-friendly content only
+- NO stage directions, sound effects, or [brackets]
+- Start directly with content
+- Islamic content guidelines: No mention of alcohol, inappropriate relationships, gambling, or pork
+- Family-friendly and educational tone
 """
     
-    prompt = f"{base_instructions}\nWrite a YouTube documentary script about '{topic}'. {words} words."
+    if minutes > 15:
+        chunks = int(minutes / 5)
+        full_script = []
+        for i in range(chunks):
+            update_status(5+i, f"Writing Part {i+1}/{chunks}...")
+            context = full_script[-1][-200:] if full_script else 'Start'
+            prompt = f"{base_instructions}\nWrite Part {i+1}/{chunks} about '{topic}'. Context: {context}. Length: 700 words."
+            full_script.append(call_gemini(prompt))
+        script = " ".join(full_script)
+    else:
+        prompt = f"{base_instructions}\nWrite a documentary script about '{topic}'. {words} words."
+        script = call_gemini(prompt)
     
-    # Try Gemini keys
+    script = re.sub(r'\[.*?\]', '', script)
+    return script.strip()
+
+def call_gemini(prompt):
     for key in GEMINI_KEYS:
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-pro')
-            result = model.generate_content(prompt)
-            script = result.text.replace("*", "").replace("#", "").strip()
-            
-            # Clean up
-            script = re.sub(r'\[.*?\]', '', script)
-            script = re.sub(r'\(.*?\)', '', script)
-            
-            if len(script.split()) >= words * 0.7:  # At least 70% of target
-                return script
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            return model.generate_content(prompt).text.replace("*","").replace("#","").strip()
         except:
             continue
-    
-    # Fallback if all Gemini keys fail
-    fallback_script = f"""
-    Welcome to our documentary about {topic}. Today we'll explore this fascinating subject in detail.
-    
-    {topic} is an important topic that affects many aspects of our lives. Understanding it can help us 
-    make better decisions and see the world from a new perspective.
-    
-    Throughout history, {topic} has evolved significantly. What started as a simple concept has grown 
-    into something much more complex and impactful.
-    
-    Modern approaches to {topic} involve new technologies and methodologies. These innovations have 
-    revolutionized how we think about and interact with this subject.
-    
-    Looking to the future, {topic} will continue to evolve. New discoveries and advancements will 
-    shape its development in exciting ways.
-    
-    In conclusion, {topic} remains a vital area of study and practice. Thank you for joining us 
-    on this exploration.
-    """
-    
-    # Adjust length
-    words_needed = words - len(fallback_script.split())
-    if words_needed > 100:
-        additional_text = f"""
-        There are many aspects of {topic} worth considering. Each perspective offers unique insights 
-        and understanding. The diversity of approaches to {topic} enriches our comprehension.
-        
-        Practical applications of {topic} can be found in various fields. From everyday life to 
-        specialized industries, its influence is widespread. Learning about {topic} provides 
-        valuable knowledge that can be applied in multiple contexts.
-        
-        The community surrounding {topic} continues to grow. Experts and enthusiasts alike 
-        contribute to its development. This collaborative effort drives progress and innovation.
-        """
-        fallback_script += additional_text
-    
-    return fallback_script
+    return "Script generation failed."
 
-def clone_voice_robust(text, ref_audio, out_path):
-    """Clone voice using chatterbox-tts with error handling"""
+def clone_voice(text, ref_audio, out_path):
     print("🎤 Synthesizing Audio...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     
     try:
-        # Try to import chatterbox with fallback
-        try:
-            from chatterbox.tts import ChatterboxTTS
-        except ImportError as e:
-            print(f"⚠️ Chatterbox import failed: {e}")
-            # Create a silent audio file as fallback
-            import wave
-            duration = len(text.split()) / 3  # Approximate 3 words per second
-            with wave.open(str(out_path), 'w') as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(24000)
-                # Create silent audio
-                wav_file.writeframes(b'\x00' * int(24000 * duration * 2))
-            print(f"⚠️ Created silent audio fallback ({duration:.1f}s)")
-            return True
-        
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        from chatterbox.tts import ChatterboxTTS
         model = ChatterboxTTS.from_pretrained(device=device)
         
-        clean = re.sub(r'\[.*?\]', '', text)
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean) if len(s.strip()) > 2]
-        
-        print(f"📝 Processing {len(sentences)} sentences...")
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip()) > 2]
         all_wavs = []
         
         for i, chunk in enumerate(sentences):
             if i % 10 == 0:
-                print(f"  Processing sentence {i+1}/{len(sentences)}...")
+                update_status(20 + int((i/len(sentences))*30), f"Voice {i}/{len(sentences)}")
             
             try:
                 with torch.no_grad():
-                    chunk_clean = chunk.replace('"', '').replace('"', '').replace('"', '')
-                    if chunk_clean.endswith('.'):
-                        chunk_clean = chunk_clean + ' '
                     wav = model.generate(
-                        text=chunk_clean,
+                        text=chunk.replace('"', ''),
                         audio_prompt_path=str(ref_audio),
                         exaggeration=0.5
                     )
                     all_wavs.append(wav.cpu())
                 
-                if i % 20 == 0 and device == "cuda":
+                if i % 20 == 0:
                     torch.cuda.empty_cache()
-                    gc.collect()
-            except Exception as e:
-                print(f"⚠️ Skipping sentence {i}: {str(e)[:50]}")
+            except:
                 continue
         
-        if not all_wavs:
-            print("❌ No audio generated, creating fallback...")
-            # Create silent audio
-            import wave
-            with wave.open(str(out_path), 'w') as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(24000)
-                wav_file.writeframes(b'\x00' * 48000)  # 1 second of silence
+        if all_wavs:
+            full_audio = torch.cat(all_wavs, dim=1)
+            silence = torch.zeros((full_audio.shape[0], int(2.0 * 24000)))
+            full_audio_padded = torch.cat([full_audio, silence], dim=1)
+            torchaudio.save(out_path, full_audio_padded, 24000)
             return True
-        
-        full_audio = torch.cat(all_wavs, dim=1)
-        silence_samples = int(2.0 * 24000)
-        silence = torch.zeros((full_audio.shape[0], silence_samples))
-        full_audio_padded = torch.cat([full_audio, silence], dim=1)
-        
-        torchaudio.save(out_path, full_audio_padded, 24000)
-        audio_duration = full_audio_padded.shape[1] / 24000
-        print(f"✅ Audio generated: {audio_duration:.1f} seconds")
-        return True
     except Exception as e:
-        print(f"❌ Audio synthesis failed: {e}")
-        # Final fallback
-        try:
-            import wave
-            with wave.open(str(out_path), 'w') as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(24000)
-                wav_file.writeframes(b'\x00' * 240000)  # 10 seconds
-            print("⚠️ Created minimal audio fallback")
-            return True
-        except:
-            return False
+        print(f"❌ Audio failed: {e}")
+    return False
 
 # ========================================== 
-# 9. MAIN EXECUTION
+# 13. VISUAL PROCESSING
 # ========================================== 
 
-print("--- 🚀 START (STABLE VERSION - SIMPLIFIED) ---")
+def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
+    print("🎬 Processing Visuals with T5 + CLIP...")
+    
+    clips = []
+    for i, sent in enumerate(sentences):
+        update_status(60 + int((i/len(sentences))*25), f"Clip {i+1}/{len(sentences)}")
+        
+        duration = max(3.5, sent['end'] - sent['start'])
+        
+        # Search with T5
+        results = search_videos_smart(sent['text'], i)
+        
+        if results:
+            # Download & rank with CLIP
+            clip_path = download_and_rank_videos(results, sent['text'], duration, i)
+            if clip_path:
+                clips.append(clip_path)
+                continue
+        
+        # Fallback gradient
+        out = TEMP_DIR / f"fallback_{i}.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=c=0x1a1a2e:s=1920x1080:d={duration}",
+            "-c:v", "h264_nvenc", "-preset", "p1", str(out)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        clips.append(str(out))
+    
+    # Concatenate
+    with open("list.txt", "w") as f:
+        for c in clips:
+            if os.path.exists(c):
+                f.write(f"file '{c}'\n")
+    
+    subprocess.run(
+        "ffmpeg -y -f concat -safe 0 -i list.txt -c:v h264_nvenc -preset p1 visual.mp4",
+        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    
+    # === VERSION 1: NO SUBTITLES ===
+    print("📹 Rendering Version 1: Without Subtitles...")
+    
+    if logo_path and os.path.exists(logo_path):
+        filter_v1 = "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[v]"
+        cmd_v1 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
+            "-filter_complex", filter_v1,
+            "-map", "[v]", "-map", "2:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            str(output_no_subs)
+        ]
+    else:
+        cmd_v1 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
+            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            str(output_no_subs)
+        ]
+    
+    subprocess.run(cmd_v1, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    # === VERSION 2: WITH SUBTITLES ===
+    print("📹 Rendering Version 2: With Subtitles...")
+    
+    ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
+    
+    if logo_path and os.path.exists(logo_path):
+        filter_v2 = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[withlogo];[withlogo]subtitles='{ass_path}'[v]"
+        cmd_v2 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
+            "-filter_complex", filter_v2,
+            "-map", "[v]", "-map", "2:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            str(output_with_subs)
+        ]
+    else:
+        filter_v2 = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_path}'[v]"
+        cmd_v2 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
+            "-filter_complex", filter_v2,
+            "-map", "[v]", "-map", "1:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            str(output_with_subs)
+        ]
+    
+    subprocess.run(cmd_v2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    return os.path.exists(output_no_subs) and os.path.exists(output_with_subs)
+
+# ========================================== 
+# 14. MAIN EXECUTION
+# ========================================== 
+
+print("--- 🚀 START: Enhanced T5 + CLIP Version ---")
 update_status(1, "Initializing...")
 
 # Download assets
@@ -993,18 +1002,13 @@ ref_voice = TEMP_DIR / "voice.mp3"
 ref_logo = TEMP_DIR / "logo.png"
 
 if not download_asset(VOICE_PATH, ref_voice):
-    update_status(0, "Voice asset download failed", "failed")
+    update_status(0, "Voice download failed", "failed")
     exit(1)
-
-print(f"✅ Voice reference downloaded")
 
 if LOGO_PATH and LOGO_PATH != "None":
     download_asset(LOGO_PATH, ref_logo)
-    if os.path.exists(ref_logo):
-        print(f"✅ Logo downloaded")
-    else:
+    if not os.path.exists(ref_logo):
         ref_logo = None
-        print(f"⚠️ Logo download failed, continuing without logo")
 else:
     ref_logo = None
 
@@ -1015,121 +1019,112 @@ if MODE == "topic":
 else:
     text = SCRIPT_TEXT
 
-if not text or len(text) < 100:
-    print("❌ Script too short")
-    update_status(0, "Script generation failed", "failed")
+if len(text) < 100:
+    update_status(0, "Script too short", "failed")
     exit(1)
 
-print(f"✅ Script generated ({len(text.split())} words)")
+# Analyze category
+analyze_script_category(text, TOPIC)
 
 # Generate audio
 update_status(20, "Audio Synthesis...")
-audio_out = TEMP_DIR / "out.wav"
+audio_out = TEMP_DIR / "audio.wav"
 
-if clone_voice_robust(text, ref_voice, audio_out):
+if clone_voice(text, ref_voice, audio_out):
     update_status(50, "Creating Subtitles...")
     
-    # Create sentence timing (simple fallback)
-    words = text.split()
-    words_per_second = 3  # Average speaking rate
-    total_duration = len(words) / words_per_second
+    # Transcribe
+    if ASSEMBLY_KEY:
+        try:
+            aai.settings.api_key = ASSEMBLY_KEY
+            transcriber = aai.Transcriber()
+            transcript = transcriber.transcribe(str(audio_out))
+            
+            sentences = []
+            for sentence in transcript.get_sentences():
+                sentences.append({
+                    "text": sentence.text,
+                    "start": sentence.start / 1000,
+                    "end": sentence.end / 1000
+                })
+            if sentences:
+                sentences[-1]['end'] += 1.0
+        except:
+            # Fallback timing
+            words = text.split()
+            import wave
+            with wave.open(str(audio_out), 'rb') as wav:
+                total_dur = wav.getnframes() / float(wav.getframerate())
+            
+            words_per_sec = len(words) / total_dur
+            sentences = []
+            current_time = 0
+            
+            for i in range(0, len(words), 12):
+                chunk = words[i:i+12]
+                dur = len(chunk) / words_per_sec
+                sentences.append({
+                    "text": ' '.join(chunk),
+                    "start": current_time,
+                    "end": current_time + dur
+                })
+                current_time += dur
+    else:
+        # Fallback
+        words = text.split()
+        import wave
+        with wave.open(str(audio_out), 'rb') as wav:
+            total_dur = wav.getnframes() / float(wav.getframerate())
+        
+        words_per_sec = len(words) / total_dur
+        sentences = []
+        current_time = 0
+        
+        for i in range(0, len(words), 12):
+            chunk = words[i:i+12]
+            dur = len(chunk) / words_per_sec
+            sentences.append({
+                "text": ' '.join(chunk),
+                "start": current_time,
+                "end": current_time + dur
+            })
+            current_time += dur
     
-    sentences = []
-    current_time = 0
-    words_per_sentence = 10
-    
-    for i in range(0, len(words), words_per_sentence):
-        chunk = words[i:i + words_per_sentence]
-        sentence_duration = len(chunk) / words_per_second
-        sentences.append({
-            "text": ' '.join(chunk),
-            "start": current_time,
-            "end": current_time + sentence_duration
-        })
-        current_time += sentence_duration
-    
-    if sentences:
-        sentences[-1]['end'] += 2.0
-    
-    print(f"✅ Created {len(sentences)} sentence timings")
-    
-    # Create ASS subtitles
-    ass_file = TEMP_DIR / "subtitles.ass"
+    # Create subtitles
+    ass_file = TEMP_DIR / "subs.ass"
     create_ass_file(sentences, ass_file)
     
-    # Analyze script category
-    analyze_script_and_set_category(text, TOPIC)
+    # Process visuals - TWO OUTPUTS
+    update_status(60, "Processing Visuals...")
+    output_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_NO_SUBS.mp4"
+    output_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_WITH_SUBS.mp4"
     
-    # Process visuals
-    update_status(60, "Gathering Visuals...")
-    print(f"\n📥 Downloading {len(sentences)} clips...")
-    
-    clips = []
-    for i, sent in enumerate(sentences):
-        update_status(60 + int((i/len(sentences))*25), f"Processing clip {i+1}/{len(sentences)}...")
-        clip_path = get_clip_for_sentence(i, sent)
-        clips.append(clip_path)
-    
-    # Concatenate clips
-    print("🔗 Concatenating video clips...")
-    concat_list_path = TEMP_DIR / "concat_list.txt"
-    with open(concat_list_path, "w") as f:
-        for c in clips:
-            if os.path.exists(c):
-                f.write(f"file '{os.path.abspath(c)}'\n")
-    
-    concatenated_video_path = TEMP_DIR / "all_visuals.mp4"
-    subprocess.run(
-        f"ffmpeg -y -f concat -safe 0 -i {concat_list_path} -c:v libx264 -preset medium -b:v 10M {concatenated_video_path}",
-        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    
-    # Render two videos
-    base_video_path, final_video_path = render_final_videos(
-        concatenated_video_path, audio_out, ass_file, ref_logo, JOB_ID
-    )
-    
-    # Upload to Google Drive
-    drive_links = []
-    if base_video_path and os.path.exists(base_video_path):
-        update_status(95, "Uploading Base Video to Google Drive...")
-        base_link = upload_to_google_drive(base_video_path)
-        if base_link:
-            drive_links.append(("Base Video (No Subtitles)", base_link))
-    
-    if final_video_path and os.path.exists(final_video_path):
-        update_status(98, "Uploading Final Video (With Subtitles) to Google Drive...")
-        final_link = upload_to_google_drive(final_video_path)
-        if final_link:
-            drive_links.append(("Final Video (With Subtitles)", final_link))
-    
-    if drive_links:
-        update_status(100, "Success! Both videos uploaded.", "completed")
-        print("🎉 Google Drive Links:")
-        for title, link in drive_links:
-            print(f"   • {title}: {link}")
+    if process_visuals(sentences, audio_out, ass_file, ref_logo, output_no_subs, output_with_subs):
+        # Upload both versions
+        update_status(90, "Uploading Version 1 (No Subs)...")
+        link1 = upload_to_google_drive(output_no_subs)
+        
+        update_status(95, "Uploading Version 2 (With Subs)...")
+        link2 = upload_to_google_drive(output_with_subs)
+        
+        final_message = "✅ Success!\n"
+        if link1:
+            final_message += f"No Subs: {link1}\n"
+        if link2:
+            final_message += f"With Subs: {link2}"
+        
+        update_status(100, final_message, "completed", link1 or link2)
+        print(f"🎉 {final_message}")
     else:
-        update_status(100, "Processing Complete (Check output folder)", "completed")
-        if os.path.exists(base_video_path):
-            print(f"📁 Base video saved locally: {base_video_path}")
-        if os.path.exists(final_video_path):
-            print(f"📁 Final video saved locally: {final_video_path}")
+        update_status(0, "Processing failed", "failed")
 else:
-    update_status(0, "Audio Synthesis Failed", "failed")
+    update_status(0, "Audio failed", "failed")
 
 # Cleanup
-print("Cleaning up...")
 if TEMP_DIR.exists():
-    try:
-        shutil.rmtree(TEMP_DIR)
-    except:
-        pass
+    shutil.rmtree(TEMP_DIR)
+for f in ["visual.mp4", "list.txt"]:
+    if os.path.exists(f):
+        os.remove(f)
 
-for temp_file in ["all_visuals.mp4", "concat_list.txt"]:
-    if os.path.exists(temp_file):
-        try:
-            os.remove(temp_file)
-        except:
-            pass
-
-print("--- ✅ PROCESS COMPLETE ---")
+print("--- ✅ COMPLETE ---")
