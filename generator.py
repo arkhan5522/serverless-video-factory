@@ -869,6 +869,8 @@ def search_videos_by_query(query, sentence_index, page=None):
     return all_results
 
 def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
+    """Process visuals with T5 smart queries and GPU-accelerated encoding"""
+    
     print("🎬 Processing Visuals with T5 + PARALLEL PROCESSING...")
     print(f"⚡ Processing {min(5, len(sentences))} clips in parallel...")
     print("🎥 GPU-accelerated rendering with size optimization!")
@@ -925,7 +927,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     if len(valid_clips) < len(sentences) * 0.5:
         print(f"⚠️ WARNING: Only {len(valid_clips)} out of {len(sentences)} clips generated")
     
-    # Concatenate
+    # Concatenate clips
     print("🔗 Concatenating clips...")
     with open("list.txt", "w") as f:
         for c in valid_clips:
@@ -1057,156 +1059,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     file_size_v2_mb = file_size_v2 / (1024*1024)
     print(f"✅ Version 2 Complete: {file_size_v2_gb:.3f}GB ({file_size_v2_mb:.1f}MB)")
     
-    return Truedef process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
-    print("🎬 Processing Visuals with T5 + CLIP + PARALLEL PROCESSING...")
-    print(f"⚡ Processing {min(5, len(sentences))} clips in parallel...")
-    print("🎥 NO GRADIENTS - Will search until real videos are found!")
-    
-    # Prepare arguments for parallel processing
-    clip_args = [(i, sent, len(sentences)) for i, sent in enumerate(sentences)]
-    
-    # Process clips in parallel (5 at a time)
-    clips = [None] * len(sentences)
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        # Submit all tasks
-        future_to_index = {
-            executor.submit(process_single_clip, arg): arg[0] 
-            for arg in clip_args
-        }
-        
-        completed = 0
-        failed_clips = []
-        
-        for future in concurrent.futures.as_completed(future_to_index):
-            try:
-                index, clip_path = future.result()
-                
-                if clip_path and os.path.exists(clip_path):
-                    clips[index] = clip_path
-                    completed += 1
-                    print(f"✅ Clip {index+1} completed successfully")
-                else:
-                    failed_clips.append(index)
-                    print(f"❌ Clip {index+1} FAILED after all attempts")
-                
-                update_status(60 + int((completed/len(sentences))*25), f"Completed {completed}/{len(sentences)} clips")
-                
-            except Exception as e:
-                index = future_to_index[future]
-                failed_clips.append(index)
-                print(f"❌ Clip {index+1} error: {e}")
-    
-    # Handle failed clips
-    if failed_clips:
-        print(f"\n⚠️ WARNING: {len(failed_clips)} clips failed to download")
-        print(f"Failed clip indices: {failed_clips}")
-        print("This might indicate:")
-        print("  - API keys are invalid or expired")
-        print("  - Rate limits reached")
-        print("  - Network connectivity issues")
-        print("  - All search results were filtered out")
-    
-    # Filter out None values
-    valid_clips = [c for c in clips if c is not None and os.path.exists(c)]
-    
-    if not valid_clips:
-        print("❌ No clips generated - cannot create video")
-        return False
-    
-    print(f"✅ Generated {len(valid_clips)}/{len(sentences)} clips")
-    
-    if len(valid_clips) < len(sentences) * 0.5:  # Less than 50% success
-        print(f"⚠️ WARNING: Only {len(valid_clips)} out of {len(sentences)} clips generated")
-        print("Video will have gaps or be shorter than expected")
-    
-    # Concatenate
-    print("🔗 Concatenating clips...")
-    with open("list.txt", "w") as f:
-        for c in valid_clips:
-            if os.path.exists(c):
-                f.write(f"file '{c}'\n")
-    
-    result = subprocess.run(
-        "ffmpeg -y -f concat -safe 0 -i list.txt -c:v h264_nvenc -preset p1 visual.mp4",
-        shell=True, 
-        capture_output=True,
-        text=True
-    )
-    
-    if result.returncode != 0:
-        print(f"❌ Concatenation failed: {result.stderr[:200]}")
-        return False
-    
-    if not os.path.exists("visual.mp4"):
-        print("❌ visual.mp4 not created")
-        return False
-    
-    # === VERSION 1: NO SUBTITLES ===
-    print("📹 Rendering Version 1: Without Subtitles...")
-    update_status(85, "Rendering without subtitles...")
-    
-    if logo_path and os.path.exists(logo_path):
-        filter_v1 = "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[v]"
-        cmd_v1 = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
-            "-filter_complex", filter_v1,
-            "-map", "[v]", "-map", "2:a",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k",
-            str(output_no_subs)
-        ]
-    else:
-        cmd_v1 = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", "visual.mp4", "-i", str(audio_path),
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k",
-            str(output_no_subs)
-        ]
-    
-    result = subprocess.run(cmd_v1, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"❌ Version 1 failed: {result.stderr[:200]}")
-        return False
-    
-    # === VERSION 2: WITH SUBTITLES ===
-    print("📹 Rendering Version 2: With Subtitles...")
-    update_status(90, "Rendering with subtitles...")
-    
-    ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
-    
-    if logo_path and os.path.exists(logo_path):
-        filter_v2 = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[withlogo];[withlogo]subtitles='{ass_path}'[v]"
-        cmd_v2 = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
-            "-filter_complex", filter_v2,
-            "-map", "[v]", "-map", "2:a",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k",
-            str(output_with_subs)
-        ]
-    else:
-        filter_v2 = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_path}'[v]"
-        cmd_v2 = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", "visual.mp4", "-i", str(audio_path),
-            "-filter_complex", filter_v2,
-            "-map", "[v]", "-map", "1:a",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k",
-            str(output_with_subs)
-        ]
-    
-    result = subprocess.run(cmd_v2, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"❌ Version 2 failed: {result.stderr[:200]}")
-        return False
-    
-    return os.path.exists(output_no_subs) and os.path.exists(output_with_subs)
+    return True
     # 14. MAIN EXECUTION
 # ========================================== 
 
