@@ -29,16 +29,18 @@ from pathlib import Path
 print("--- 🔧 Installing Dependencies ---")
 try:
     libs = [
-        "chatterbox-tts",
-        "torchaudio", 
-        "assemblyai",
-        "google-generativeai",
-        "requests",
-        "beautifulsoup4",
-        "pydub",
-        "numpy",
-        "transformers",
-        "--quiet"
+    "chatterbox-tts",
+    "torchaudio", 
+    "assemblyai",
+    "google-generativeai",
+    "requests",
+    "beautifulsoup4",
+    "pydub",
+    "numpy",
+    "transformers",
+    "sentencepiece",      # Required for Flan-T5
+    "protobuf",           # Required for Flan-T5
+    "--quiet"
     ]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
@@ -84,16 +86,31 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 print("--- 🤖 Loading AI Models ---")
 
-# T5 for Smart Query Generation
-print("Loading T5 Model for Query Generation...")
+# Flan-T5 for Smart Query Generation (UPGRADED)
+print("Loading Flan-T5 Model for Query Generation...")
 try:
-    t5_tokenizer = AutoTokenizer.from_pretrained("fabiochiu/t5-base-tag-generation")
-    t5_model = AutoModelForSeq2SeqLM.from_pretrained("fabiochiu/t5-base-tag-generation")
+    from transformers import AutoTokenizer, T5ForConditionalGeneration
+    
+    # Use base for speed, or large for better quality
+    # Uncomment one:
+    model_name = "google/flan-t5-base"   # 248M params - Fast, good quality
+    # model_name = "google/flan-t5-large"  # 783M params - Slower, best quality
+    
+    t5_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    t5_model = T5ForConditionalGeneration.from_pretrained(model_name)
+    
+    # Move to GPU if available
+    if torch.cuda.is_available():
+        t5_model = t5_model.cuda()
+        print("✅ Flan-T5 Model loaded on GPU")
+    else:
+        print("✅ Flan-T5 Model loaded on CPU")
+    
     T5_AVAILABLE = True
-    print("✅ T5 Model loaded")
 except Exception as e:
-    print(f"⚠️ T5 Model failed to load: {e}")
+    print(f"⚠️ Flan-T5 Model failed to load: {e}")
     T5_AVAILABLE = False
+
 
 # ========================================== 
 # 4. CONTENT FILTERS (Separate categories)
@@ -162,38 +179,87 @@ def is_content_appropriate(text):
 # ========================================== 
 
 def generate_smart_query_t5(script_text):
-    """Generate intelligent search queries using T5 transformer"""
+    """
+    Generate intelligent search queries using Flan-T5 transformer
+    Now with instruction-tuned understanding
+    """
     if not T5_AVAILABLE:
         # Fallback to keyword extraction
         words = re.findall(r'\b\w{5,}\b', script_text.lower())
         return words[0] if words else "background"
     
     try:
-        # Prepare input
-        inputs = t5_tokenizer([script_text], max_length=512, truncation=True, return_tensors="pt")
+        # Truncate script if too long
+        script_snippet = script_text[:400] if len(script_text) > 400 else script_text
         
-        # Generate tags
-        output = t5_model.generate(
-            **inputs,
-            max_length=50,
-            num_beams=5,
-            early_stopping=True,
-            no_repeat_ngram_size=2
+        # Instruction-based prompt (Flan-T5 understands instructions)
+        prompt = f"""Extract 2-3 visual search keywords for finding stock video footage. 
+Focus on concrete, visual elements (not abstract concepts). 
+Avoid religious terms, inappropriate content, and abstract ideas.
+Only output keywords separated by spaces, nothing else.
+
+Text: {script_snippet}
+
+Keywords:"""
+        
+        # Tokenize
+        inputs = t5_tokenizer(
+            prompt,
+            return_tensors="pt",
+            max_length=512,
+            truncation=True,
+            padding=True
         )
         
+        # Move to GPU if model is on GPU
+        if torch.cuda.is_available() and next(t5_model.parameters()).is_cuda:
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+        
+        # Generate with better parameters
+        with torch.no_grad():
+            outputs = t5_model.generate(
+                **inputs,
+                max_length=30,           # Shorter output
+                num_beams=5,             # Beam search for quality
+                temperature=0.7,         # Some creativity
+                do_sample=True,          # Enable sampling
+                top_p=0.9,              # Nucleus sampling
+                no_repeat_ngram_size=2,  # Avoid repetition
+                early_stopping=True
+            )
+        
         # Decode
-        decoded_output = t5_tokenizer.batch_decode(output, skip_special_tokens=True)[0]
-        tags = list(set(decoded_output.strip().split(", ")))
+        generated_text = t5_tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Return first appropriate tag
-        for tag in tags:
-            if is_content_appropriate(tag):
-                return tag
+        # Clean up the output
+        keywords = generated_text.strip().lower()
         
-        return "background"
+        # Remove common filler words
+        filler_words = ['keywords:', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to']
+        words = keywords.split()
+        words = [w for w in words if w not in filler_words]
+        
+        # Take first 2-3 meaningful words
+        if len(words) > 3:
+            keywords = ' '.join(words[:3])
+        else:
+            keywords = ' '.join(words)
+        
+        # Content filtering
+        if keywords and is_content_appropriate(keywords):
+            print(f"    🧠 Flan-T5 Query: '{keywords}'")
+            return keywords
+        
+        # If filtered out, try to extract safe keywords
+        safe_words = [w for w in words if is_content_appropriate(w)]
+        if safe_words:
+            return safe_words[0]
+        
+        return "cinematic background"
         
     except Exception as e:
-        print(f"    T5 Error: {e}")
+        print(f"    Flan-T5 Error: {e}")
+        # Fallback: extract keywords manually
         words = re.findall(r'\b\w{5,}\b', script_text.lower())
         return words[0] if words else "background"
 
@@ -474,22 +540,23 @@ def analyze_script_category(script, topic):
 USED_VIDEO_URLS = set()
 
 def search_videos_smart(script_text, sentence_index):
-    """Search videos using T5 query generation"""
+    """Search videos using Flan-T5 query generation"""
     
-    # Generate smart query using T5
-    if T5_AVAILABLE:
+    # Use hybrid approach for best results
+    if T5_AVAILABLE and VIDEO_CATEGORY:
+        primary_query = generate_smart_query_hybrid(script_text, VIDEO_CATEGORY)
+        print(f"    🧠 Hybrid Query: '{primary_query}'")
+    elif T5_AVAILABLE:
         primary_query = generate_smart_query_t5(script_text)
-        print(f"    🧠 T5 Query: '{primary_query}'")
+        print(f"    🧠 Flan-T5 Query: '{primary_query}'")
     else:
         # Fallback: extract keywords
         words = re.findall(r'\b\w{5,}\b', script_text.lower())
         primary_query = words[0] if words else "background"
-    
-    # Add category context
-    if VIDEO_CATEGORY:
-        primary_query = f"{primary_query} {VIDEO_CATEGORY}"
-    
-    primary_query += " 4k cinematic"
+        if VIDEO_CATEGORY:
+            primary_query = f"{primary_query} {VIDEO_CATEGORY}"
+        primary_query += " 4k cinematic"
+        print(f"    📝 Fallback Query: '{primary_query}'")
     
     # Use the generic search function
     return search_videos_by_query(primary_query, sentence_index)
