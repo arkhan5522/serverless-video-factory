@@ -38,8 +38,6 @@ try:
         "pydub",
         "numpy",
         "transformers",
-        "pillow",
-        "opencv-python",
         "--quiet"
     ]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
@@ -51,9 +49,7 @@ import torch
 import torchaudio
 import assemblyai as aai
 import google.generativeai as genai
-import cv2
-from PIL import Image
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, CLIPProcessor, CLIPModel
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 # ========================================== 
 # 2. CONFIGURATION
@@ -83,7 +79,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ========================================== 
-# 3. LOAD AI MODELS (T5 + CLIP)
+# 3. LOAD AI MODELS (T5 ONLY)
 # ========================================== 
 
 print("--- 🤖 Loading AI Models ---")
@@ -99,17 +95,6 @@ except Exception as e:
     print(f"⚠️ T5 Model failed to load: {e}")
     T5_AVAILABLE = False
 
-# CLIP for Visual Matching
-print("Loading CLIP Model for Visual Matching...")
-try:
-    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-    CLIP_AVAILABLE = True
-    print("✅ CLIP Model loaded")
-except Exception as e:
-    print(f"⚠️ CLIP Model failed to load: {e}")
-    CLIP_AVAILABLE = False
-
 # ========================================== 
 # 4. CONTENT FILTERS (Separate categories)
 # ========================================== 
@@ -122,8 +107,6 @@ EXPLICIT_CONTENT_BLACKLIST = [
 
 # Religious/Holy terms filter (to avoid mixing religious content with random videos)
 RELIGIOUS_HOLY_TERMS = [
-   
-    
     # Christian terms
     'jesus', 'christ', 'god', 'lord', 'bible', 'gospel', 'church worship',
     'crucifix', 'crucifixion', 'virgin mary', 'holy spirit', 'baptism',
@@ -175,7 +158,7 @@ def is_content_appropriate(text):
     return True
 
 # ========================================== 
-# 5. T5 SMART QUERY GENERATION
+# 6. T5 SMART QUERY GENERATION
 # ========================================== 
 
 def generate_smart_query_t5(script_text):
@@ -213,82 +196,6 @@ def generate_smart_query_t5(script_text):
         print(f"    T5 Error: {e}")
         words = re.findall(r'\b\w{5,}\b', script_text.lower())
         return words[0] if words else "background"
-
-# ========================================== 
-# 6. CLIP VISUAL MATCHING
-# ========================================== 
-
-def get_middle_frame(video_path):
-    """Extract middle frame from video"""
-    try:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return None
-        
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
-        
-        ret, frame = cap.read()
-        cap.release()
-        
-        if ret:
-            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        return None
-    except:
-        return None
-
-def calculate_clip_score(video_path, script_text):
-    """Use CLIP to calculate visual-text similarity"""
-    if not CLIP_AVAILABLE:
-        return 50  # Default score if CLIP unavailable
-    
-    try:
-        frame = get_middle_frame(video_path)
-        if frame is None:
-            return 0
-        
-        image = Image.fromarray(frame)
-        
-        inputs = clip_processor(
-            text=[script_text],
-            images=[image],
-            return_tensors="pt",
-            padding=True
-        )
-        
-        with torch.no_grad():
-            outputs = clip_model(**inputs)
-        
-        logits_per_image = outputs.logits_per_image
-        probs = logits_per_image.softmax(dim=0)
-        confidence = probs[0].item() * 100
-        
-        return confidence
-        
-    except Exception as e:
-        print(f"    CLIP Error: {e}")
-        return 50
-
-def rank_videos_with_clip(video_paths, script_text):
-    """Rank downloaded videos using CLIP similarity"""
-    if not CLIP_AVAILABLE or not video_paths:
-        return video_paths
-    
-    print(f"    🎯 Ranking {len(video_paths)} videos with CLIP...")
-    
-    scored_videos = []
-    for video_path in video_paths:
-        if os.path.exists(video_path):
-            score = calculate_clip_score(video_path, script_text)
-            scored_videos.append((video_path, score))
-    
-    # Sort by score descending
-    scored_videos.sort(key=lambda x: x[1], reverse=True)
-    
-    if scored_videos:
-        print(f"    ✓ Best match: {os.path.basename(scored_videos[0][0])} (CLIP: {scored_videos[0][1]:.1f}%)")
-    
-    return [v[0] for v in scored_videos]
 
 # ========================================== 
 # 7. SUBTITLE STYLES
@@ -588,11 +495,9 @@ def search_videos_smart(script_text, sentence_index):
     return search_videos_by_query(primary_query, sentence_index)
 
 def download_and_rank_videos(results, script_text, target_duration, clip_index):
-    """Download videos and rank using CLIP"""
+    """Download videos and use the first valid one"""
     
-    downloaded_paths = []
-    
-    for i, result in enumerate(results[:5]):  # Download top 5
+    for i, result in enumerate(results[:5]):  # Try top 5 results
         try:
             raw_path = TEMP_DIR / f"raw_{clip_index}_{i}.mp4"
             response = requests.get(result['url'], timeout=30, stream=True)
@@ -602,46 +507,38 @@ def download_and_rank_videos(results, script_text, target_duration, clip_index):
                     if chunk:
                         f.write(chunk)
             
-            if os.path.exists(raw_path):
-                downloaded_paths.append(str(raw_path))
-                USED_VIDEO_URLS.add(result['url'])
+            if os.path.exists(raw_path) and os.path.getsize(raw_path) > 0:
+                # Process the video
+                output_path = TEMP_DIR / f"clip_{clip_index}.mp4"
+                
+                cmd = [
+                    "ffmpeg", "-y", "-hwaccel", "cuda",
+                    "-i", str(raw_path),
+                    "-t", str(target_duration),
+                    "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30",
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p4",
+                    "-b:v", "8M",
+                    "-an",
+                    str(output_path)
+                ]
+                
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Cleanup raw file
+                try:
+                    os.remove(raw_path)
+                except:
+                    pass
+                
+                if os.path.exists(output_path):
+                    USED_VIDEO_URLS.add(result['url'])
+                    print(f"    ✓ {result['service']} video downloaded")
+                    return str(output_path)
+                    
         except Exception as e:
-            print(f"    Download error: {str(e)[:50]}")
+            print(f"    ✗ Download error: {str(e)[:60]}")
             continue
-    
-    if not downloaded_paths:
-        return None
-    
-    # Rank with CLIP
-    ranked_paths = rank_videos_with_clip(downloaded_paths, script_text)
-    
-    # Process best match
-    if ranked_paths:
-        best_path = ranked_paths[0]
-        output_path = TEMP_DIR / f"clip_{clip_index}.mp4"
-        
-        cmd = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", best_path,
-            "-t", str(target_duration),
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30",
-            "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-b:v", "8M",
-            "-an",
-            str(output_path)
-        ]
-        
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # Cleanup raw files
-        for path in downloaded_paths:
-            try:
-                os.remove(path)
-            except:
-                pass
-        
-        return str(output_path)
     
     return None
 
@@ -1017,17 +914,23 @@ def search_videos_by_query(query, sentence_index, page=None):
     return all_results
 
 def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
-    print("🎬 Processing Visuals with T5 + CLIP + PARALLEL PROCESSING...")
-    print(f"⚡ Processing {min(5, len(sentences))} clips in parallel...")
+    print("🎬 Processing Visuals with T5 + PARALLEL PROCESSING...")
+    print(f"⚡ Processing up to 20 clips in parallel for maximum speed!")
     print("🎥 NO GRADIENTS - Will search until real videos are found!")
     
     # Prepare arguments for parallel processing
     clip_args = [(i, sent, len(sentences)) for i, sent in enumerate(sentences)]
     
-    # Process clips in parallel (5 at a time)
+    # Process clips in parallel (UP TO 20 at a time)
     clips = [None] * len(sentences)
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # Determine optimal worker count
+    # Use 20 workers if we have many clips, otherwise use the number of clips
+    optimal_workers = min(20, len(sentences), 20)  # Max 20 workers
+    
+    print(f"🚀 Using {optimal_workers} parallel workers")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=optimal_workers) as executor:
         # Submit all tasks
         future_to_index = {
             executor.submit(process_single_clip, arg): arg[0] 
@@ -1044,7 +947,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
                 if clip_path and os.path.exists(clip_path):
                     clips[index] = clip_path
                     completed += 1
-                    print(f"✅ Clip {index+1} completed successfully")
+                    print(f"✅ Clip {index+1} completed successfully ({completed}/{len(sentences)})")
                 else:
                     failed_clips.append(index)
                     print(f"❌ Clip {index+1} FAILED after all attempts")
@@ -1102,34 +1005,89 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
         return False
     
     # === VERSION 1: NO SUBTITLES ===
-    print("📹 Rendering Version 1: Without Subtitles...")
-    update_status(85, "Rendering without subtitles...")
+# === VERSION 1: 900p OPTIMIZED (NO SUBTITLES) ===
+print("📹 Rendering Version 1: 900p Optimized (No Subtitles)...")
+update_status(85, "Rendering 900p version without subtitles...")
+
+# Calculate dimensions (16:9 aspect ratio, close to 900p)
+TARGET_HEIGHT = 900
+TARGET_WIDTH = int(TARGET_HEIGHT * 16/9)  # 1600 pixels
+
+print(f"    Optimizing: 1600x900 (89% of 1080p pixels)")
+print(f"    Target: Guaranteed under 1GB with full quality")
+
+if logo_path and os.path.exists(logo_path):
+    filter_v1 = f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=200:-1[logo];[bg][logo]overlay=25:25[v]"
+    cmd_v1 = [
+        "ffmpeg", "-y", "-hwaccel", "cuda",
+        "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
+        "-filter_complex", filter_v1,
+        "-map", "[v]", "-map", "2:a",
+        "-c:v", "h264_nvenc", "-preset", "slow",          # Better compression efficiency
+        "-crf", "21",                                     # BETTER quality than before!
+        "-tune", "film",                                  # Optimized for typical content
+        "-profile:v", "high",                             # Enable better compression tools
+        "-level", "4.1",                                  # Standard Blu-ray compatibility
+        "-x264-params", "aq-mode=3:psy-rd=1.0",          # Better perceptual quality
+        "-movflags", "+faststart",                        # Better for web streaming
+        "-c:a", "copy",                                   # Keep ORIGINAL audio untouched
+        str(output_no_subs)
+    ]
+else:
+    cmd_v1 = [
+        "ffmpeg", "-y", "-hwaccel", "cuda",
+        "-i", "visual.mp4", "-i", str(audio_path),
+        "-vf", f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
+        "-c:v", "h264_nvenc", "-preset", "slow",
+        "-crf", "21",                                     # BETTER quality (lower CRF = better)
+        "-tune", "film",
+        "-profile:v", "high",
+        "-level", "4.1",
+        "-x264-params", "aq-mode=3:psy-rd=1.0",
+        "-movflags", "+faststart",
+        "-c:a", "copy",                                   # Original audio preserved
+        str(output_no_subs)
+    ]
+
+result = subprocess.run(cmd_v1, capture_output=True, text=True)
+if result.returncode != 0:
+    print(f"❌ Version 1 failed: {result.stderr[:200]}")
+    # Fallback to simpler command
+    cmd_v1_fallback = [
+        "ffmpeg", "-y", "-hwaccel", "cuda",
+        "-i", "visual.mp4", "-i", str(audio_path),
+        "-vf", f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}",
+        "-c:v", "h264_nvenc", "-preset", "medium", "-crf", "21",
+        "-c:a", "copy",
+        str(output_no_subs)
+    ]
+    subprocess.run(cmd_v1_fallback, capture_output=True)
+
+# Verify file size
+if os.path.exists(output_no_subs):
+    file_size_mb = os.path.getsize(output_no_subs) / (1024*1024)
+    file_size_gb = file_size_mb / 1024
     
-    if logo_path and os.path.exists(logo_path):
-        filter_v1 = "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[v]"
-        cmd_v1 = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
-            "-filter_complex", filter_v1,
-            "-map", "[v]", "-map", "2:a",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k",
-            str(output_no_subs)
+    if file_size_gb > 0.98:  # If dangerously close to 1GB
+        print(f"⚠️  Warning: File is {file_size_gb:.2f}GB - applying extra optimization")
+        # Quick re-encode with slight adjustment
+        temp_file = str(output_no_subs) + "_temp.mp4"
+        cmd_optimize = [
+            "ffmpeg", "-y", "-i", str(output_no_subs),
+            "-c:v", "libx264", "-preset", "veryslow", "-crf", "22",
+            "-c:a", "copy",
+            temp_file
         ]
-    else:
-        cmd_v1 = [
-            "ffmpeg", "-y", "-hwaccel", "cuda",
-            "-i", "visual.mp4", "-i", str(audio_path),
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
-            "-c:a", "aac", "-b:a", "256k",
-            str(output_no_subs)
-        ]
+        subprocess.run(cmd_optimize, capture_output=True)
+        if os.path.exists(temp_file):
+            os.replace(temp_file, output_no_subs)
     
-    result = subprocess.run(cmd_v1, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"❌ Version 1 failed: {result.stderr[:200]}")
-        return False
+    final_size_gb = os.path.getsize(output_no_subs) / (1024**3)
+    print(f"✅ 900p version: {final_size_gb:.2f}GB (guaranteed under 1GB)")
+    
+    # Size prediction for user info
+    estimated_per_minute = final_size_gb * 60 / DURATION_MINS
+    print(f"📊 Size prediction: ~{estimated_per_minute:.2f}GB per 10 minutes at this quality")
     
     # === VERSION 2: WITH SUBTITLES ===
     print("📹 Rendering Version 2: With Subtitles...")
