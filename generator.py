@@ -1209,3 +1209,137 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     print(f"✅ Version 2 Complete: {file_size_v2_gb:.3f}GB ({file_size_v2_mb:.1f}MB)")
     
     return True
+    # 14. MAIN EXECUTION
+# ========================================== 
+
+print("--- 🚀 START: Enhanced T5 ONLY Version ---")
+update_status(1, "Initializing...")
+
+# Download assets
+ref_voice = TEMP_DIR / "voice.mp3"
+ref_logo = TEMP_DIR / "logo.png"
+
+if not download_asset(VOICE_PATH, ref_voice):
+    update_status(0, "Voice download failed", "failed")
+    exit(1)
+
+if LOGO_PATH and LOGO_PATH != "None":
+    download_asset(LOGO_PATH, ref_logo)
+    if not os.path.exists(ref_logo):
+        ref_logo = None
+else:
+    ref_logo = None
+
+# Generate script
+update_status(10, "Scripting...")
+if MODE == "topic":
+    text = generate_script(TOPIC, DURATION_MINS)
+else:
+    text = SCRIPT_TEXT
+
+if len(text) < 100:
+    update_status(0, "Script too short", "failed")
+    exit(1)
+
+# Generate audio
+update_status(20, "Audio Synthesis...")
+audio_out = TEMP_DIR / "audio.wav"
+
+if clone_voice(text, ref_voice, audio_out):
+    update_status(50, "Creating Subtitles...")
+    
+    # Transcribe
+    if ASSEMBLY_KEY:
+        try:
+            aai.settings.api_key = ASSEMBLY_KEY
+            transcriber = aai.Transcriber()
+            transcript = transcriber.transcribe(str(audio_out))
+            
+            sentences = []
+            for sentence in transcript.get_sentences():
+                sentences.append({
+                    "text": sentence.text,
+                    "start": sentence.start / 1000,
+                    "end": sentence.end / 1000
+                })
+            if sentences:
+                sentences[-1]['end'] += 1.0
+        except:
+            # Fallback timing
+            words = text.split()
+            import wave
+            with wave.open(str(audio_out), 'rb') as wav:
+                total_dur = wav.getnframes() / float(wav.getframerate())
+            
+            words_per_sec = len(words) / total_dur
+            sentences = []
+            current_time = 0
+            
+            for i in range(0, len(words), 12):
+                chunk = words[i:i+12]
+                dur = len(chunk) / words_per_sec
+                sentences.append({
+                    "text": ' '.join(chunk),
+                    "start": current_time,
+                    "end": current_time + dur
+                })
+                current_time += dur
+    else:
+        # Fallback
+        words = text.split()
+        import wave
+        with wave.open(str(audio_out), 'rb') as wav:
+            total_dur = wav.getnframes() / float(wav.getframerate())
+        
+        words_per_sec = len(words) / total_dur
+        sentences = []
+        current_time = 0
+        
+        for i in range(0, len(words), 12):
+            chunk = words[i:i+12]
+            dur = len(chunk) / words_per_sec
+            sentences.append({
+                "text": ' '.join(chunk),
+                "start": current_time,
+                "end": current_time + dur
+            })
+            current_time += dur
+    
+    # Create subtitles
+    ass_file = TEMP_DIR / "subs.ass"
+    create_ass_file(sentences, ass_file)
+    
+    # Process visuals - TWO OUTPUTS
+    update_status(60, "Processing Visuals...")
+    output_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_NO_SUBS.mp4"
+    output_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_WITH_SUBS.mp4"
+    
+    if process_visuals(sentences, audio_out, ass_file, ref_logo, output_no_subs, output_with_subs):
+        # Upload both versions
+        update_status(90, "Uploading Version 1 (No Subs)...")
+        link1 = upload_to_google_drive(output_no_subs)
+        
+        update_status(95, "Uploading Version 2 (With Subs)...")
+        link2 = upload_to_google_drive(output_with_subs)
+        
+        final_message = "✅ Success!\n"
+        if link1:
+            final_message += f"No Subs: {link1}\n"
+        if link2:
+            final_message += f"With Subs: {link2}"
+        
+        update_status(100, final_message, "completed", link1 or link2)
+        print(f"🎉 {final_message}")
+    else:
+        update_status(0, "Processing failed", "failed")
+else:
+    update_status(0, "Audio failed", "failed")
+
+# Cleanup
+if TEMP_DIR.exists():
+    shutil.rmtree(TEMP_DIR)
+for f in ["visual.mp4", "list.txt"]:
+    if os.path.exists(f):
+        os.remove(f)
+
+print("--- ✅ COMPLETE ---")
