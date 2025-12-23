@@ -109,7 +109,7 @@ except Exception as e:
 # Explicit inappropriate content filter
 EXPLICIT_CONTENT_BLACKLIST = [
     'nude', 'nudity', 'naked', 'pornography', 'explicit sexual',
-    'xxx', 'adult xxx', 'erotic xxx', 'nsfw'
+    'xxx', 'adult xxx', 'erotic xxx', 'nsfw','lgbtq','LGBTQ','war','pork','bikini','swim','violence','drugs','terror','gun','gambling'
 ]
 
 # Religious/Holy terms filter (to avoid mixing religious content with random videos)
