@@ -150,18 +150,25 @@ def is_content_appropriate(text):
     Light content filter with two separate checks:
     1. Block explicit inappropriate content
     2. Block religious/holy terms to avoid conflicts
+    
+    Uses word boundary matching to avoid false positives
+    (e.g., "drama" won't be blocked when "rama" is in the list)
     """
     text_lower = text.lower()
     
-    # Check 1: Explicit content
+    # Check 1: Explicit content (word boundary matching)
     for term in EXPLICIT_CONTENT_BLACKLIST:
-        if term in text_lower:
+        # Use word boundary regex to match whole words only
+        pattern = r'\b' + re.escape(term) + r'\b'
+        if re.search(pattern, text_lower):
             print(f"      🚫 BLOCKED: Inappropriate content - '{term}'")
             return False
     
-    # Check 2: Religious/Holy terms (separate reason)
+    # Check 2: Religious/Holy terms (word boundary matching)
     for term in RELIGIOUS_HOLY_TERMS:
-        if term in text_lower:
+        # Use word boundary regex to match whole words only
+        pattern = r'\b' + re.escape(term) + r'\b'
+        if re.search(pattern, text_lower):
             print(f"      🚫 BLOCKED: Religious content - '{term}' (avoiding religious conflicts)")
             return False
     
