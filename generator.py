@@ -488,73 +488,22 @@ def upload_to_google_drive(file_path):
         return None
 
 # ========================================== 
-# 9. VISUAL DICTIONARY (ENHANCED)
-# ========================================== 
-
-VISUAL_MAP = {
-    "tech": ["server room", "circuit board", "hologram", "robot", "coding", "data center"],
-    "technology": ["innovation lab", "tech startup", "silicon valley", "hardware"],
-    "ai": ["artificial intelligence", "neural network", "machine learning", "robot"],
-    "business": ["meeting", "handshake", "office", "corporate", "team"],
-    "nature": ["waterfall", "forest", "mountain", "wildlife", "ocean"],
-    "science": ["laboratory", "scientist", "microscope", "experiment", "research"],
-    "space": ["galaxy", "planet", "astronaut", "rocket", "stars"],
-    "city": ["skyline", "urban", "street", "building", "traffic"],
-    "education": ["classroom", "university", "student", "learning", "library"],
-    "health": ["fitness", "yoga", "meditation", "healthy food", "exercise"],
-}
-
-VIDEO_CATEGORY = None
-
-def analyze_script_category(script, topic):
-    """Determine video category from script"""
-    global VIDEO_CATEGORY
-    
-    full_text = (script + " " + topic).lower()
-    words = re.findall(r'\b\w{4,}\b', full_text)
-    
-    category_scores = {}
-    for category, terms in VISUAL_MAP.items():
-        score = 0
-        if category in full_text:
-            score += 10
-        for term in terms:
-            for word in words:
-                if word in term:
-                    score += 3
-        if score > 0:
-            category_scores[category] = score
-    
-    if category_scores:
-        VIDEO_CATEGORY = max(category_scores, key=category_scores.get)
-    else:
-        VIDEO_CATEGORY = "technology"
-    
-    print(f"✅ Video Category: {VIDEO_CATEGORY}")
-    return VIDEO_CATEGORY
-
-# ========================================== 
-# 10. VIDEO SEARCH WITH T5 & CLIP
+# 10. VIDEO SEARCH WITH T5
 # ========================================== 
 
 USED_VIDEO_URLS = set()
 
 def search_videos_smart(script_text, sentence_index):
-    """Search videos using Flan-T5 query generation"""
+    """Search videos using Flan-T5 query generation only"""
     
-    # Use hybrid approach for best results
-    if T5_AVAILABLE and VIDEO_CATEGORY:
-        primary_query = generate_smart_query_hybrid(script_text, VIDEO_CATEGORY)
-        print(f"    🧠 Hybrid Query: '{primary_query}'")
-    elif T5_AVAILABLE:
+    # Use only T5 for query generation
+    if T5_AVAILABLE:
         primary_query = generate_smart_query_t5(script_text)
         print(f"    🧠 Flan-T5 Query: '{primary_query}'")
     else:
         # Fallback: extract keywords
         words = re.findall(r'\b\w{5,}\b', script_text.lower())
         primary_query = words[0] if words else "background"
-        if VIDEO_CATEGORY:
-            primary_query = f"{primary_query} {VIDEO_CATEGORY}"
         primary_query += " 4k cinematic"
         print(f"    📝 Fallback Query: '{primary_query}'")
     
@@ -797,74 +746,71 @@ def process_single_clip(args):
             print(f"    Attempt {attempt}: Keyword Extraction")
             words = re.findall(r'\b\w{5,}\b', sent['text'].lower())
             if words:
-                query = f"{words[0]} {VIDEO_CATEGORY if VIDEO_CATEGORY else ''} 4k"
+                query = f"{words[0]} cinematic 4k"
                 results = search_videos_by_query(query, i)
             else:
                 results = []
         
         elif attempt == 3:
-            # Tertiary: Use category-specific terms
-            print(f"    Attempt {attempt}: Category Terms")
-            if VIDEO_CATEGORY and VIDEO_CATEGORY in VISUAL_MAP:
-                term = random.choice(VISUAL_MAP[VIDEO_CATEGORY])
-                query = f"{term} cinematic 4k"
-                results = search_videos_by_query(query, i)
-            else:
-                results = []
+            # Tertiary: Generic visual terms
+            print(f"    Attempt {attempt}: Visual Terms")
+            visual_terms = ['cinematic', 'motion', 'animation', 'stock footage', 
+                           'background video', 'b-roll', 'visual effects']
+            query = f"{random.choice(visual_terms)} hd"
+            results = search_videos_by_query(query, i)
         
         elif attempt == 4:
-            # Fourth: Generic category search
-            print(f"    Attempt {attempt}: Generic Category")
-            if VIDEO_CATEGORY:
-                query = f"{VIDEO_CATEGORY} background 4k"
-                results = search_videos_by_query(query, i)
-            else:
-                results = []
+            # Fourth: Nature/landscape
+            print(f"    Attempt {attempt}: Nature/Landscape")
+            nature_terms = ['nature', 'landscape', 'scenery', 'outdoors',
+                          'mountain', 'ocean', 'forest', 'sky']
+            query = f"{random.choice(nature_terms)} cinematic"
+            results = search_videos_by_query(query, i)
         
         elif attempt == 5:
-            # Fifth: Abstract concepts
-            print(f"    Attempt {attempt}: Abstract Concepts")
-            abstract_terms = ['abstract motion', 'geometric patterns', 'digital background', 
-                            'flowing particles', 'light rays', 'bokeh lights']
+            # Fifth: Abstract/patterns
+            print(f"    Attempt {attempt}: Abstract Patterns")
+            abstract_terms = ['abstract', 'pattern', 'geometric', 'light',
+                            'particles', 'flow', 'motion graphics']
             query = f"{random.choice(abstract_terms)} 4k"
             results = search_videos_by_query(query, i)
         
         elif attempt == 6:
-            # Sixth: Nature/landscape
-            print(f"    Attempt {attempt}: Nature/Landscape")
-            nature_terms = ['mountain landscape', 'ocean waves', 'forest aerial', 
-                          'desert sunset', 'northern lights', 'waterfall']
-            query = f"{random.choice(nature_terms)} cinematic"
+            # Sixth: City/urban
+            print(f"    Attempt {attempt}: City/Urban")
+            urban_terms = ['city', 'urban', 'architecture', 'building',
+                          'skyline', 'street', 'traffic', 'lights']
+            query = f"{random.choice(urban_terms)} time lapse"
             results = search_videos_by_query(query, i)
         
         elif attempt == 7:
-            # Seventh: Technology/modern
-            print(f"    Attempt {attempt}: Technology/Modern")
-            tech_terms = ['modern city', 'technology innovation', 'digital network',
-                        'circuit board', 'data visualization', 'futuristic']
-            query = f"{random.choice(tech_terms)} 4k"
+            # Seventh: Technology
+            print(f"    Attempt {attempt}: Technology")
+            tech_terms = ['technology', 'digital', 'futuristic', 'innovation',
+                         'data', 'network', 'circuit', 'code']
+            query = f"{random.choice(tech_terms)} background"
             results = search_videos_by_query(query, i)
         
         elif attempt == 8:
             # Eighth: Time-lapse/motion
             print(f"    Attempt {attempt}: Time-lapse")
-            motion_terms = ['time lapse clouds', 'traffic time lapse', 'city lights night',
-                          'sunrise time lapse', 'stars moving', 'flowing water']
+            motion_terms = ['time lapse', 'slow motion', 'hyperlapse',
+                          'drone footage', 'aerial view', 'moving']
             query = f"{random.choice(motion_terms)}"
             results = search_videos_by_query(query, i)
         
         elif attempt == 9:
             # Ninth: Generic safe terms
             print(f"    Attempt {attempt}: Generic Safe Terms")
-            safe_terms = ['background video', 'stock footage', 'b-roll footage',
-                        'cinematic shot', 'drone footage', 'aerial view']
+            safe_terms = ['background', 'video', 'footage', 'stock',
+                         'cinematic', 'shot', 'scene', 'view']
             query = f"{random.choice(safe_terms)} hd"
             results = search_videos_by_query(query, i)
         
         else:
             # Final attempt: Completely random page from broad search
             print(f"    Attempt {attempt}: Random Broad Search")
-            broad_terms = ['nature', 'city', 'space', 'ocean', 'mountain', 'sky', 
+            broad_terms = ['background', 'cinematic', 'nature', 'city', 
                          'technology', 'abstract', 'motion', 'light']
             query = random.choice(broad_terms)
             results = search_videos_by_query(query, i, page=random.randint(1, 10))
@@ -983,9 +929,9 @@ def search_videos_by_query(query, sentence_index, page=None):
 def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
     """Optimized for Kaggle P100 GPU - Fixed version"""
     
-    print("🎬 Processing Visuals with T5 + PARALLEL PROCESSING...")
+    print("🎬 Processing Visuals with T5 ONLY + PARALLEL PROCESSING...")
     print(f"⚡ Processing up to 20 clips in parallel for maximum speed!")
-    print("🎥 NO GRADIENTS - Will search until real videos are found!")
+    print("🎥 NO CATEGORY LOCK - Using pure T5 queries only!")
     
     # Prepare arguments for parallel processing
     clip_args = [(i, sent, len(sentences)) for i, sent in enumerate(sentences)]
@@ -1307,7 +1253,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
 # 14. MAIN EXECUTION
 # ========================================== 
 
-print("--- 🚀 START: Enhanced T5 + CLIP Version ---")
+print("--- 🚀 START: Enhanced T5 ONLY Version ---")
 update_status(1, "Initializing...")
 
 # Download assets
@@ -1335,9 +1281,6 @@ else:
 if len(text) < 100:
     update_status(0, "Script too short", "failed")
     exit(1)
-
-# Analyze category
-analyze_script_category(text, TOPIC)
 
 # Generate audio
 update_status(20, "Audio Synthesis...")
