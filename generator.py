@@ -122,6 +122,8 @@ EXPLICIT_CONTENT_BLACKLIST = [
 
 # Religious/Holy terms filter (to avoid mixing religious content with random videos)
 RELIGIOUS_HOLY_TERMS = [
+   
+    
     # Christian terms
     'jesus', 'christ', 'god', 'lord', 'bible', 'gospel', 'church worship',
     'crucifix', 'crucifixion', 'virgin mary', 'holy spirit', 'baptism',
@@ -350,7 +352,6 @@ SUBTITLE_STYLES = {
         "alignment": 2,
         "spacing": 0.5
     },
-    }
 }
 
 def create_ass_file(sentences, ass_file):
@@ -576,96 +577,8 @@ def search_videos_smart(script_text, sentence_index):
     
     primary_query += " 4k cinematic"
     
-    # Fallback queries
-    fallback_queries = [
-        f"{VIDEO_CATEGORY} abstract 4k" if VIDEO_CATEGORY else "abstract 4k",
-        f"{VIDEO_CATEGORY} landscape" if VIDEO_CATEGORY else "nature landscape",
-        "background cinematic 4k"
-    ]
-    
-    all_queries = [primary_query] + fallback_queries
-    
-    # Search Pexels & Pixabay
-    all_results = []
-    
-    for query in all_queries[:2]:  # Try first 2 queries
-        # Pexels
-        if PEXELS_KEYS and PEXELS_KEYS[0]:
-            try:
-                key = random.choice([k for k in PEXELS_KEYS if k])
-                url = "https://api.pexels.com/videos/search"
-                headers = {"Authorization": key}
-                params = {
-                    "query": query,
-                    "per_page": 15,
-                    "page": random.randint(1, 3),
-                    "orientation": "landscape"
-                }
-                
-                response = requests.get(url, headers=headers, params=params, timeout=15)
-                if response.status_code == 200:
-                    data = response.json()
-                    for video in data.get('videos', []):
-                        video_files = video.get('video_files', [])
-                        if video_files:
-                            hd_files = [f for f in video_files if f.get('quality') == 'hd']
-                            if hd_files:
-                                best_file = random.choice(hd_files)
-                                video_url = best_file['link']
-                                
-                                # Light content check
-                                video_title = video.get('user', {}).get('name', '')
-                                if not is_content_appropriate(video_title + " " + query):
-                                    continue
-                                
-                                if video_url not in USED_VIDEO_URLS:
-                                    all_results.append({
-                                        'url': video_url,
-                                        'service': 'pexels',
-                                        'duration': video.get('duration', 0)
-                                    })
-            except Exception as e:
-                print(f"    Pexels error: {str(e)[:50]}")
-        
-        # Pixabay
-        if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-            try:
-                key = random.choice([k for k in PIXABAY_KEYS if k])
-                url = "https://pixabay.com/api/videos/"
-                params = {
-                    "key": key,
-                    "q": query,
-                    "per_page": 15,
-                    "page": random.randint(1, 3),
-                    "orientation": "horizontal"
-                }
-                
-                response = requests.get(url, params=params, timeout=15)
-                if response.status_code == 200:
-                    data = response.json()
-                    for video in data.get('hits', []):
-                        videos_dict = video.get('videos', {})
-                        if 'large' in videos_dict:
-                            video_url = videos_dict['large']['url']
-                            
-                            # Light content check
-                            video_tags = video.get('tags', '')
-                            if not is_content_appropriate(video_tags + " " + query):
-                                continue
-                            
-                            if video_url not in USED_VIDEO_URLS:
-                                all_results.append({
-                                    'url': video_url,
-                                    'service': 'pixabay',
-                                    'duration': video.get('duration', 0)
-                                })
-            except Exception as e:
-                print(f"    Pixabay error: {str(e)[:50]}")
-        
-        if len(all_results) >= 5:
-            break
-    
-    return all_results
+    # Use the generic search function
+    return search_videos_by_query(primary_query, sentence_index)
 
 def download_and_rank_videos(results, script_text, target_duration, clip_index):
     """Download videos and rank using CLIP"""
