@@ -1006,88 +1006,89 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     
     # === VERSION 1: NO SUBTITLES ===
 # === VERSION 1: 900p OPTIMIZED (NO SUBTITLES) ===
-print("📹 Rendering Version 1: 900p Optimized (No Subtitles)...")
-update_status(85, "Rendering 900p version without subtitles...")
+# === VERSION 1: 900p OPTIMIZED (NO SUBTITLES) ===
+    print("📹 Rendering Version 1: 900p Optimized (No Subtitles)...")
+    update_status(85, "Rendering 900p version without subtitles...")
 
-# Calculate dimensions (16:9 aspect ratio, close to 900p)
-TARGET_HEIGHT = 900
-TARGET_WIDTH = int(TARGET_HEIGHT * 16/9)  # 1600 pixels
+    # Calculate dimensions (16:9 aspect ratio, close to 900p)
+    TARGET_HEIGHT = 900
+    TARGET_WIDTH = int(TARGET_HEIGHT * 16/9)  # 1600 pixels
 
-print(f"    Optimizing: 1600x900 (89% of 1080p pixels)")
-print(f"    Target: Guaranteed under 1GB with full quality")
+    print(f"    Optimizing: 1600x900 (89% of 1080p pixels)")
+    print(f"    Target: Guaranteed under 1GB with full quality")
 
-if logo_path and os.path.exists(logo_path):
-    filter_v1 = f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=200:-1[logo];[bg][logo]overlay=25:25[v]"
-    cmd_v1 = [
-        "ffmpeg", "-y", "-hwaccel", "cuda",
-        "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
-        "-filter_complex", filter_v1,
-        "-map", "[v]", "-map", "2:a",
-        "-c:v", "h264_nvenc", "-preset", "slow",          # Better compression efficiency
-        "-crf", "21",                                     # BETTER quality than before!
-        "-tune", "film",                                  # Optimized for typical content
-        "-profile:v", "high",                             # Enable better compression tools
-        "-level", "4.1",                                  # Standard Blu-ray compatibility
-        "-x264-params", "aq-mode=3:psy-rd=1.0",          # Better perceptual quality
-        "-movflags", "+faststart",                        # Better for web streaming
-        "-c:a", "copy",                                   # Keep ORIGINAL audio untouched
-        str(output_no_subs)
-    ]
-else:
-    cmd_v1 = [
-        "ffmpeg", "-y", "-hwaccel", "cuda",
-        "-i", "visual.mp4", "-i", str(audio_path),
-        "-vf", f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
-        "-c:v", "h264_nvenc", "-preset", "slow",
-        "-crf", "21",                                     # BETTER quality (lower CRF = better)
-        "-tune", "film",
-        "-profile:v", "high",
-        "-level", "4.1",
-        "-x264-params", "aq-mode=3:psy-rd=1.0",
-        "-movflags", "+faststart",
-        "-c:a", "copy",                                   # Original audio preserved
-        str(output_no_subs)
-    ]
-
-result = subprocess.run(cmd_v1, capture_output=True, text=True)
-if result.returncode != 0:
-    print(f"❌ Version 1 failed: {result.stderr[:200]}")
-    # Fallback to simpler command
-    cmd_v1_fallback = [
-        "ffmpeg", "-y", "-hwaccel", "cuda",
-        "-i", "visual.mp4", "-i", str(audio_path),
-        "-vf", f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}",
-        "-c:v", "h264_nvenc", "-preset", "medium", "-crf", "21",
-        "-c:a", "copy",
-        str(output_no_subs)
-    ]
-    subprocess.run(cmd_v1_fallback, capture_output=True)
-
-# Verify file size
-if os.path.exists(output_no_subs):
-    file_size_mb = os.path.getsize(output_no_subs) / (1024*1024)
-    file_size_gb = file_size_mb / 1024
-    
-    if file_size_gb > 0.98:  # If dangerously close to 1GB
-        print(f"⚠️  Warning: File is {file_size_gb:.2f}GB - applying extra optimization")
-        # Quick re-encode with slight adjustment
-        temp_file = str(output_no_subs) + "_temp.mp4"
-        cmd_optimize = [
-            "ffmpeg", "-y", "-i", str(output_no_subs),
-            "-c:v", "libx264", "-preset", "veryslow", "-crf", "22",
+    if logo_path and os.path.exists(logo_path):
+        filter_v1 = f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=200:-1[logo];[bg][logo]overlay=25:25[v]"
+        cmd_v1 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
+            "-filter_complex", filter_v1,
+            "-map", "[v]", "-map", "2:a",
+            "-c:v", "h264_nvenc", "-preset", "slow",
+            "-crf", "21",
+            "-tune", "film",
+            "-profile:v", "high",
+            "-level", "4.1",
+            "-x264-params", "aq-mode=3:psy-rd=1.0",
+            "-movflags", "+faststart",
             "-c:a", "copy",
-            temp_file
+            str(output_no_subs)
         ]
-        subprocess.run(cmd_optimize, capture_output=True)
-        if os.path.exists(temp_file):
-            os.replace(temp_file, output_no_subs)
-    
-    final_size_gb = os.path.getsize(output_no_subs) / (1024**3)
-    print(f"✅ 900p version: {final_size_gb:.2f}GB (guaranteed under 1GB)")
-    
-    # Size prediction for user info
-    estimated_per_minute = final_size_gb * 60 / DURATION_MINS
-    print(f"📊 Size prediction: ~{estimated_per_minute:.2f}GB per 10 minutes at this quality")
+    else:
+        cmd_v1 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
+            "-vf", f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
+            "-c:v", "h264_nvenc", "-preset", "slow",
+            "-crf", "21",
+            "-tune", "film",
+            "-profile:v", "high",
+            "-level", "4.1",
+            "-x264-params", "aq-mode=3:psy-rd=1.0",
+            "-movflags", "+faststart",
+            "-c:a", "copy",
+            str(output_no_subs)
+        ]
+
+    result = subprocess.run(cmd_v1, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"❌ Version 1 failed: {result.stderr[:200]}")
+        # Fallback to simpler command
+        cmd_v1_fallback = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
+            "-vf", f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}",
+            "-c:v", "h264_nvenc", "-preset", "medium", "-crf", "21",
+            "-c:a", "copy",
+            str(output_no_subs)
+        ]
+        subprocess.run(cmd_v1_fallback, capture_output=True)
+
+    # Verify file size
+    if os.path.exists(output_no_subs):
+        file_size_mb = os.path.getsize(output_no_subs) / (1024*1024)
+        file_size_gb = file_size_mb / 1024
+        
+        if file_size_gb > 0.98:  # If dangerously close to 1GB
+            print(f"⚠️  Warning: File is {file_size_gb:.2f}GB - applying extra optimization")
+            # Quick re-encode with slight adjustment
+            temp_file = str(output_no_subs) + "_temp.mp4"
+            cmd_optimize = [
+                "ffmpeg", "-y", "-i", str(output_no_subs),
+                "-c:v", "libx264", "-preset", "veryslow", "-crf", "22",
+                "-c:a", "copy",
+                temp_file
+            ]
+            subprocess.run(cmd_optimize, capture_output=True)
+            if os.path.exists(temp_file):
+                os.replace(temp_file, output_no_subs)
+        
+        final_size_gb = os.path.getsize(output_no_subs) / (1024**3)
+        print(f"✅ 900p version: {final_size_gb:.2f}GB (guaranteed under 1GB)")
+        
+        # Size prediction for user info
+        estimated_per_minute = final_size_gb * 60 / DURATION_MINS
+        print(f"📊 Size prediction: ~{estimated_per_minute:.2f}GB per 10 minutes at this quality")
     
     # === VERSION 2: WITH SUBTITLES ===
     print("📹 Rendering Version 2: With Subtitles...")
