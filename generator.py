@@ -29,18 +29,18 @@ from pathlib import Path
 print("--- 🔧 Installing Dependencies ---")
 try:
     libs = [
-    "chatterbox-tts",
-    "torchaudio", 
-    "assemblyai",
-    "google-generativeai",
-    "requests",
-    "beautifulsoup4",
-    "pydub",
-    "numpy",
-    "transformers",
-    "sentencepiece",      # Required for Flan-T5
-    "protobuf",           # Required for Flan-T5
-    "--quiet"
+        "chatterbox-tts",
+        "torchaudio", 
+        "assemblyai",
+        "google-generativeai",
+        "requests",
+        "beautifulsoup4",
+        "pydub",
+        "numpy",
+        "transformers",
+        "pillow",
+        "opencv-python",
+        "--quiet"
     ]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
@@ -86,30 +86,20 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 print("--- 🤖 Loading AI Models ---")
 
-# Flan-T5 for Smart Query Generation (UPGRADED)
-print("Loading Flan-T5 Model for Query Generation...")
+
+print("--- 🤖 Loading AI Models ---")
+
+# T5 for Smart Query Generation
+print("Loading T5 Model for Query Generation...")
 try:
-    from transformers import AutoTokenizer, T5ForConditionalGeneration
-    
-    # Use base for speed, or large for better quality
-    # Uncomment one:
-    model_name = "google/flan-t5-base"   # 248M params - Fast, good quality
-    # model_name = "google/flan-t5-large"  # 783M params - Slower, best quality
-    
-    t5_tokenizer = AutoTokenizer.from_pretrained(model_name)
-    t5_model = T5ForConditionalGeneration.from_pretrained(model_name)
-    
-    # Move to GPU if available
-    if torch.cuda.is_available():
-        t5_model = t5_model.cuda()
-        print("✅ Flan-T5 Model loaded on GPU")
-    else:
-        print("✅ Flan-T5 Model loaded on CPU")
-    
+    t5_tokenizer = AutoTokenizer.from_pretrained("fabiochiu/t5-base-tag-generation")
+    t5_model = AutoModelForSeq2SeqLM.from_pretrained("fabiochiu/t5-base-tag-generation")
     T5_AVAILABLE = True
+    print("✅ T5 Model loaded")
 except Exception as e:
-    print(f"⚠️ Flan-T5 Model failed to load: {e}")
+    print(f"⚠️ T5 Model failed to load: {e}")
     T5_AVAILABLE = False
+
 
 
 # ========================================== 
@@ -179,89 +169,41 @@ def is_content_appropriate(text):
 # ========================================== 
 
 def generate_smart_query_t5(script_text):
-    """
-    Generate intelligent search queries using Flan-T5 transformer
-    Now with instruction-tuned understanding
-    """
+    """Generate intelligent search queries using T5 transformer"""
     if not T5_AVAILABLE:
         # Fallback to keyword extraction
         words = re.findall(r'\b\w{5,}\b', script_text.lower())
         return words[0] if words else "background"
     
     try:
-        # Truncate script if too long
-        script_snippet = script_text[:400] if len(script_text) > 400 else script_text
+        # Prepare input
+        inputs = t5_tokenizer([script_text], max_length=512, truncation=True, return_tensors="pt")
         
-        # Instruction-based prompt (Flan-T5 understands instructions)
-        prompt = f"""Extract 2-3 visual search keywords for finding stock video footage. 
-Focus on concrete, visual elements (not abstract concepts). 
-Avoid religious terms, inappropriate content, and abstract ideas.
-Only output keywords separated by spaces, nothing else.
-
-Text: {script_snippet}
-
-Keywords:"""
-        
-        # Tokenize
-        inputs = t5_tokenizer(
-            prompt,
-            return_tensors="pt",
-            max_length=512,
-            truncation=True,
-            padding=True
+        # Generate tags
+        output = t5_model.generate(
+            **inputs,
+            max_length=50,
+            num_beams=5,
+            early_stopping=True,
+            no_repeat_ngram_size=2
         )
         
-        # Move to GPU if model is on GPU
-        if torch.cuda.is_available() and next(t5_model.parameters()).is_cuda:
-            inputs = {k: v.cuda() for k, v in inputs.items()}
-        
-        # Generate with better parameters
-        with torch.no_grad():
-            outputs = t5_model.generate(
-                **inputs,
-                max_length=30,           # Shorter output
-                num_beams=5,             # Beam search for quality
-                temperature=0.7,         # Some creativity
-                do_sample=True,          # Enable sampling
-                top_p=0.9,              # Nucleus sampling
-                no_repeat_ngram_size=2,  # Avoid repetition
-                early_stopping=True
-            )
-        
         # Decode
-        generated_text = t5_tokenizer.decode(outputs[0], skip_special_tokens=True)
+        decoded_output = t5_tokenizer.batch_decode(output, skip_special_tokens=True)[0]
+        tags = list(set(decoded_output.strip().split(", ")))
         
-        # Clean up the output
-        keywords = generated_text.strip().lower()
+        # Return first appropriate tag
+        for tag in tags:
+            if is_content_appropriate(tag):
+                return tag
         
-        # Remove common filler words
-        filler_words = ['keywords:', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to']
-        words = keywords.split()
-        words = [w for w in words if w not in filler_words]
-        
-        # Take first 2-3 meaningful words
-        if len(words) > 3:
-            keywords = ' '.join(words[:3])
-        else:
-            keywords = ' '.join(words)
-        
-        # Content filtering
-        if keywords and is_content_appropriate(keywords):
-            print(f"    🧠 Flan-T5 Query: '{keywords}'")
-            return keywords
-        
-        # If filtered out, try to extract safe keywords
-        safe_words = [w for w in words if is_content_appropriate(w)]
-        if safe_words:
-            return safe_words[0]
-        
-        return "cinematic background"
+        return "background"
         
     except Exception as e:
-        print(f"    Flan-T5 Error: {e}")
-        # Fallback: extract keywords manually
+        print(f"    T5 Error: {e}")
         words = re.findall(r'\b\w{5,}\b', script_text.lower())
         return words[0] if words else "background"
+
 
 # ========================================== 
 # 7. SUBTITLE STYLES
@@ -927,7 +869,7 @@ def search_videos_by_query(query, sentence_index, page=None):
     return all_results
 
 def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
-    """Optimized for Kaggle P100 GPU - Fixed version"""
+    """Optimized for Kaggle P100 GPU - FIXED NVENC Version"""
     
     print("🎬 Processing Visuals with T5 ONLY + PARALLEL PROCESSING...")
     print(f"⚡ Processing up to 20 clips in parallel for maximum speed!")
@@ -1028,11 +970,13 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     TARGET_WIDTH = 1600
     TARGET_HEIGHT = 900
     
-    # Build command for P100
+    # Build command for P100 with FIXED NVENC pipeline
     if logo_path and os.path.exists(logo_path):
+        # Download from GPU to CPU for overlay, then use NVENC for encoding
         filter_v1 = (
             f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[bg];"
+            f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
+            f"hwdownload,format=yuv420p[bg];"
             f"[1:v]scale=200:-1[logo];"
             f"[bg][logo]overlay=25:25[v]"
         )
@@ -1063,9 +1007,11 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             str(output_no_subs)
         ]
     else:
+        # No logo - simpler filter, download from GPU before encoding
         filter_v1 = (
             f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[v]"
+            f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
+            f"hwdownload,format=yuv420p[v]"
         )
         cmd_v1 = [
             "ffmpeg", "-y",
@@ -1093,7 +1039,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             str(output_no_subs)
         ]
     
-    print("    Encoding with NVENC...")
+    print("    Encoding with NVENC (P100 optimized)...")
     result_v1 = subprocess.run(cmd_v1, capture_output=True, text=True, timeout=900)
     
     if result_v1.returncode != 0:
@@ -1102,12 +1048,18 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
         
         # CPU Fallback (libx264)
         if logo_path and os.path.exists(logo_path):
+            filter_fallback = (
+                f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
+                f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[bg];"
+                f"[1:v]scale=200:-1[logo];"
+                f"[bg][logo]overlay=25:25[v]"
+            )
             cmd_fallback = [
                 "ffmpeg", "-y",
                 "-i", "visual.mp4",
                 "-i", str(logo_path),
                 "-i", str(audio_path),
-                "-filter_complex", filter_v1,
+                "-filter_complex", filter_fallback,
                 "-map", "[v]",
                 "-map", "2:a",
                 "-c:v", "libx264",
@@ -1120,11 +1072,15 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
                 str(output_no_subs)
             ]
         else:
+            filter_fallback = (
+                f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
+                f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[v]"
+            )
             cmd_fallback = [
                 "ffmpeg", "-y",
                 "-i", "visual.mp4",
                 "-i", str(audio_path),
-                "-filter_complex", filter_v1,
+                "-filter_complex", filter_fallback,
                 "-map", "[v]",
                 "-map", "1:a",
                 "-c:v", "libx264",
@@ -1164,13 +1120,15 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     print("\n📹 Rendering Version 2: 1080p (With Subtitles) - Maximum Quality")
     update_status(90, "Rendering with subtitles...")
     
-    # Prepare subtitle path
+    # Prepare subtitle path (escape for FFmpeg)
     ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
     
     if logo_path and os.path.exists(logo_path):
+        # Download from GPU, apply overlays and subtitles on CPU, encode with NVENC
         filter_v2 = (
             f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+            f"hwdownload,format=yuv420p[bg];"
             f"[1:v]scale=230:-1[logo];"
             f"[bg][logo]overlay=30:30[withlogo];"
             f"[withlogo]subtitles='{ass_path}'[v]"
@@ -1190,20 +1148,22 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             "-preset", "p4",
             "-tune", "hq",
             "-rc", "vbr",
-            "-cq", "18",          # Better quality (was 20)
-            "-b:v", "12M",        # Higher bitrate (was 10M)
-            "-maxrate", "18M",    # Higher max (was 15M)
-            "-bufsize", "24M",    # Larger buffer (was 20M)
+            "-cq", "18",          # Better quality
+            "-b:v", "12M",        # Higher bitrate
+            "-maxrate", "18M",    # Higher max
+            "-bufsize", "24M",    # Larger buffer
             "-profile:v", "high",
             "-movflags", "+faststart",
             "-c:a", "aac",
-            "-b:a", "256k",       # Better audio (was 192k)
+            "-b:a", "256k",       # Better audio
             str(output_with_subs)
         ]
     else:
+        # No logo - download from GPU, add subs on CPU, encode with NVENC
         filter_v2 = (
             f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+            f"hwdownload,format=yuv420p[bg];"
             f"[bg]subtitles='{ass_path}'[v]"
         )
         cmd_v2 = [
@@ -1231,6 +1191,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             str(output_with_subs)
         ]
     
+    print("    Encoding 1080p with subtitles...")
     result_v2 = subprocess.run(cmd_v2, capture_output=True, text=True, timeout=900)
     
     if result_v2.returncode != 0:
@@ -1248,139 +1209,3 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     print(f"✅ Version 2 Complete: {file_size_v2_gb:.3f}GB ({file_size_v2_mb:.1f}MB)")
     
     return True
-
-# ========================================== 
-# 14. MAIN EXECUTION
-# ========================================== 
-
-print("--- 🚀 START: Enhanced T5 ONLY Version ---")
-update_status(1, "Initializing...")
-
-# Download assets
-ref_voice = TEMP_DIR / "voice.mp3"
-ref_logo = TEMP_DIR / "logo.png"
-
-if not download_asset(VOICE_PATH, ref_voice):
-    update_status(0, "Voice download failed", "failed")
-    exit(1)
-
-if LOGO_PATH and LOGO_PATH != "None":
-    download_asset(LOGO_PATH, ref_logo)
-    if not os.path.exists(ref_logo):
-        ref_logo = None
-else:
-    ref_logo = None
-
-# Generate script
-update_status(10, "Scripting...")
-if MODE == "topic":
-    text = generate_script(TOPIC, DURATION_MINS)
-else:
-    text = SCRIPT_TEXT
-
-if len(text) < 100:
-    update_status(0, "Script too short", "failed")
-    exit(1)
-
-# Generate audio
-update_status(20, "Audio Synthesis...")
-audio_out = TEMP_DIR / "audio.wav"
-
-if clone_voice(text, ref_voice, audio_out):
-    update_status(50, "Creating Subtitles...")
-    
-    # Transcribe
-    if ASSEMBLY_KEY:
-        try:
-            aai.settings.api_key = ASSEMBLY_KEY
-            transcriber = aai.Transcriber()
-            transcript = transcriber.transcribe(str(audio_out))
-            
-            sentences = []
-            for sentence in transcript.get_sentences():
-                sentences.append({
-                    "text": sentence.text,
-                    "start": sentence.start / 1000,
-                    "end": sentence.end / 1000
-                })
-            if sentences:
-                sentences[-1]['end'] += 1.0
-        except:
-            # Fallback timing
-            words = text.split()
-            import wave
-            with wave.open(str(audio_out), 'rb') as wav:
-                total_dur = wav.getnframes() / float(wav.getframerate())
-            
-            words_per_sec = len(words) / total_dur
-            sentences = []
-            current_time = 0
-            
-            for i in range(0, len(words), 12):
-                chunk = words[i:i+12]
-                dur = len(chunk) / words_per_sec
-                sentences.append({
-                    "text": ' '.join(chunk),
-                    "start": current_time,
-                    "end": current_time + dur
-                })
-                current_time += dur
-    else:
-        # Fallback
-        words = text.split()
-        import wave
-        with wave.open(str(audio_out), 'rb') as wav:
-            total_dur = wav.getnframes() / float(wav.getframerate())
-        
-        words_per_sec = len(words) / total_dur
-        sentences = []
-        current_time = 0
-        
-        for i in range(0, len(words), 12):
-            chunk = words[i:i+12]
-            dur = len(chunk) / words_per_sec
-            sentences.append({
-                "text": ' '.join(chunk),
-                "start": current_time,
-                "end": current_time + dur
-            })
-            current_time += dur
-    
-    # Create subtitles
-    ass_file = TEMP_DIR / "subs.ass"
-    create_ass_file(sentences, ass_file)
-    
-    # Process visuals - TWO OUTPUTS
-    update_status(60, "Processing Visuals...")
-    output_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_NO_SUBS.mp4"
-    output_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_WITH_SUBS.mp4"
-    
-    if process_visuals(sentences, audio_out, ass_file, ref_logo, output_no_subs, output_with_subs):
-        # Upload both versions
-        update_status(90, "Uploading Version 1 (No Subs)...")
-        link1 = upload_to_google_drive(output_no_subs)
-        
-        update_status(95, "Uploading Version 2 (With Subs)...")
-        link2 = upload_to_google_drive(output_with_subs)
-        
-        final_message = "✅ Success!\n"
-        if link1:
-            final_message += f"No Subs: {link1}\n"
-        if link2:
-            final_message += f"With Subs: {link2}"
-        
-        update_status(100, final_message, "completed", link1 or link2)
-        print(f"🎉 {final_message}")
-    else:
-        update_status(0, "Processing failed", "failed")
-else:
-    update_status(0, "Audio failed", "failed")
-
-# Cleanup
-if TEMP_DIR.exists():
-    shutil.rmtree(TEMP_DIR)
-for f in ["visual.mp4", "list.txt"]:
-    if os.path.exists(f):
-        os.remove(f)
-
-print("--- ✅ COMPLETE ---")
