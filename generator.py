@@ -869,24 +869,17 @@ def search_videos_by_query(query, sentence_index, page=None):
     return all_results
 
 def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
-    """Optimized for Kaggle P100 GPU - FIXED NVENC Version"""
-    
-    print("🎬 Processing Visuals with T5 ONLY + PARALLEL PROCESSING...")
-    print(f"⚡ Processing up to 20 clips in parallel for maximum speed!")
-    print("🎥 NO CATEGORY LOCK - Using pure T5 queries only!")
+    print("🎬 Processing Visuals with T5 + PARALLEL PROCESSING...")
+    print(f"⚡ Processing {min(5, len(sentences))} clips in parallel...")
+    print("🎥 GPU-accelerated rendering with size optimization!")
     
     # Prepare arguments for parallel processing
     clip_args = [(i, sent, len(sentences)) for i, sent in enumerate(sentences)]
     
-    # Process clips in parallel (UP TO 20 at a time)
+    # Process clips in parallel (5 at a time)
     clips = [None] * len(sentences)
     
-    # Determine optimal worker count
-    optimal_workers = min(20, len(sentences), 20)
-    
-    print(f"🚀 Using {optimal_workers} parallel workers")
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=optimal_workers) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         # Submit all tasks
         future_to_index = {
             executor.submit(process_single_clip, arg): arg[0] 
@@ -903,7 +896,7 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
                 if clip_path and os.path.exists(clip_path):
                     clips[index] = clip_path
                     completed += 1
-                    print(f"✅ Clip {index+1} completed successfully ({completed}/{len(sentences)})")
+                    print(f"✅ Clip {index+1} completed successfully")
                 else:
                     failed_clips.append(index)
                     print(f"❌ Clip {index+1} FAILED after all attempts")
@@ -939,165 +932,65 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             if os.path.exists(c):
                 f.write(f"file '{c}'\n")
     
-    # Use copy for concatenation (fast, no re-encoding)
-    concat_result = subprocess.run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", 
-         "-c", "copy", "visual.mp4"],
+    result = subprocess.run(
+        "ffmpeg -y -f concat -safe 0 -i list.txt -c:v h264_nvenc -preset p1 visual.mp4",
+        shell=True, 
         capture_output=True,
-        text=True,
-        timeout=300
+        text=True
     )
     
-    if concat_result.returncode != 0:
-        print(f"❌ Concatenation failed: {concat_result.stderr[-300:]}")
+    if result.returncode != 0:
+        print(f"❌ Concatenation failed: {result.stderr[:200]}")
         return False
     
     if not os.path.exists("visual.mp4"):
         print("❌ visual.mp4 not created")
         return False
     
-    visual_size = os.path.getsize("visual.mp4")
-    if visual_size < 100000:
-        print(f"❌ visual.mp4 too small: {visual_size} bytes")
-        return False
-    
-    print(f"✅ visual.mp4: {visual_size / (1024*1024):.1f}MB")
-    
     # === VERSION 1: 900p NO SUBTITLES (OPTIMIZED FOR <1GB) ===
-    print("\n📹 Rendering Version 1: 900p (No Subtitles) - Optimized for size")
+    print("\n📹 Rendering Version 1: 900p (No Subtitles) - Optimized for <1GB")
     update_status(85, "Rendering 900p version without subtitles...")
     
     TARGET_WIDTH = 1600
     TARGET_HEIGHT = 900
     
-    # Build command for P100 with FIXED NVENC pipeline
     if logo_path and os.path.exists(logo_path):
-        # Download from GPU to CPU for overlay, then use NVENC for encoding
-        filter_v1 = (
-            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
-            f"hwdownload,format=yuv420p[bg];"
-            f"[1:v]scale=200:-1[logo];"
-            f"[bg][logo]overlay=25:25[v]"
-        )
+        # Scale to 900p with logo overlay
+        filter_v1 = f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=200:-1[logo];[bg][logo]overlay=25:25[v]"
         cmd_v1 = [
-            "ffmpeg", "-y",
-            "-vsync", "0",
-            "-hwaccel", "cuda",
-            "-hwaccel_output_format", "cuda",
-            "-i", "visual.mp4",
-            "-i", str(logo_path),
-            "-i", str(audio_path),
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
             "-filter_complex", filter_v1,
-            "-map", "[v]",
-            "-map", "2:a",
-            "-c:v", "h264_nvenc",
+            "-map", "[v]", "-map", "2:a",
+            "-c:v", "h264_nvenc", 
             "-preset", "p4",
-            "-tune", "hq",
-            "-rc", "vbr",
-            "-cq", "21",
-            "-b:v", "8M",
-            "-maxrate", "12M",
-            "-bufsize", "16M",
-            "-profile:v", "high",
-            "-level", "4.2",
-            "-movflags", "+faststart",
-            "-c:a", "aac",
-            "-b:a", "192k",
+            "-b:v", "6M",           # Lower bitrate for smaller file
+            "-maxrate", "8M",
+            "-bufsize", "12M",
+            "-c:a", "aac", "-b:a", "128k",  # Lower audio bitrate
             str(output_no_subs)
         ]
     else:
-        # No logo - simpler filter, download from GPU before encoding
-        filter_v1 = (
-            f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
-            f"hwdownload,format=yuv420p[v]"
-        )
+        # Scale to 900p without logo
         cmd_v1 = [
-            "ffmpeg", "-y",
-            "-vsync", "0",
-            "-hwaccel", "cuda",
-            "-hwaccel_output_format", "cuda",
-            "-i", "visual.mp4",
-            "-i", str(audio_path),
-            "-filter_complex", filter_v1,
-            "-map", "[v]",
-            "-map", "1:a",
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
+            "-vf", f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
             "-c:v", "h264_nvenc",
             "-preset", "p4",
-            "-tune", "hq",
-            "-rc", "vbr",
-            "-cq", "21",
-            "-b:v", "8M",
-            "-maxrate", "12M",
-            "-bufsize", "16M",
-            "-profile:v", "high",
-            "-level", "4.2",
-            "-movflags", "+faststart",
-            "-c:a", "aac",
-            "-b:a", "192k",
+            "-b:v", "6M",           # Lower bitrate for smaller file
+            "-maxrate", "8M",
+            "-bufsize", "12M",
+            "-c:a", "aac", "-b:a", "128k",  # Lower audio bitrate
             str(output_no_subs)
         ]
     
-    print("    Encoding with NVENC (P100 optimized)...")
-    result_v1 = subprocess.run(cmd_v1, capture_output=True, text=True, timeout=900)
+    print("    Encoding 900p with NVENC (GPU accelerated)...")
+    result_v1 = subprocess.run(cmd_v1, capture_output=True, text=True, timeout=600)
     
     if result_v1.returncode != 0:
-        print(f"❌ NVENC failed, trying CPU fallback...")
-        print(f"Error (last 500 chars): {result_v1.stderr[-500:]}")
-        
-        # CPU Fallback (libx264)
-        if logo_path and os.path.exists(logo_path):
-            filter_fallback = (
-                f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
-                f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[bg];"
-                f"[1:v]scale=200:-1[logo];"
-                f"[bg][logo]overlay=25:25[v]"
-            )
-            cmd_fallback = [
-                "ffmpeg", "-y",
-                "-i", "visual.mp4",
-                "-i", str(logo_path),
-                "-i", str(audio_path),
-                "-filter_complex", filter_fallback,
-                "-map", "[v]",
-                "-map", "2:a",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-crf", "23",
-                "-profile:v", "high",
-                "-movflags", "+faststart",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                str(output_no_subs)
-            ]
-        else:
-            filter_fallback = (
-                f"[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,"
-                f"pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2[v]"
-            )
-            cmd_fallback = [
-                "ffmpeg", "-y",
-                "-i", "visual.mp4",
-                "-i", str(audio_path),
-                "-filter_complex", filter_fallback,
-                "-map", "[v]",
-                "-map", "1:a",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-crf", "23",
-                "-profile:v", "high",
-                "-movflags", "+faststart",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                str(output_no_subs)
-            ]
-        
-        result_v1 = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=1200)
-        
-        if result_v1.returncode != 0:
-            print(f"❌ CPU fallback also failed: {result_v1.stderr[-500:]}")
-            return False
+        print(f"❌ Version 1 failed: {result_v1.stderr[-300:]}")
+        return False
     
     # Validate output
     if not os.path.exists(output_no_subs):
@@ -1115,84 +1008,40 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     
     if file_size_gb > 0.95:
         print(f"⚠️ WARNING: File is {file_size_gb:.3f}GB - very close to 1GB limit!")
+    elif file_size_gb < 1.0:
+        print(f"✅ File size under 1GB target!")
     
     # === VERSION 2: 1080p WITH SUBTITLES (MAXIMUM QUALITY) ===
     print("\n📹 Rendering Version 2: 1080p (With Subtitles) - Maximum Quality")
-    update_status(90, "Rendering with subtitles...")
+    update_status(90, "Rendering 1080p with subtitles...")
     
-    # Prepare subtitle path (escape for FFmpeg)
     ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
     
     if logo_path and os.path.exists(logo_path):
-        # Download from GPU, apply overlays and subtitles on CPU, encode with NVENC
-        filter_v2 = (
-            f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
-            f"hwdownload,format=yuv420p[bg];"
-            f"[1:v]scale=230:-1[logo];"
-            f"[bg][logo]overlay=30:30[withlogo];"
-            f"[withlogo]subtitles='{ass_path}'[v]"
-        )
+        filter_v2 = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[withlogo];[withlogo]subtitles='{ass_path}'[v]"
         cmd_v2 = [
-            "ffmpeg", "-y",
-            "-vsync", "0",
-            "-hwaccel", "cuda",
-            "-hwaccel_output_format", "cuda",
-            "-i", "visual.mp4",
-            "-i", str(logo_path),
-            "-i", str(audio_path),
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
             "-filter_complex", filter_v2,
-            "-map", "[v]",
-            "-map", "2:a",
-            "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-tune", "hq",
-            "-rc", "vbr",
-            "-cq", "18",          # Better quality
-            "-b:v", "12M",        # Higher bitrate
-            "-maxrate", "18M",    # Higher max
-            "-bufsize", "24M",    # Larger buffer
-            "-profile:v", "high",
-            "-movflags", "+faststart",
-            "-c:a", "aac",
-            "-b:a", "256k",       # Better audio
+            "-map", "[v]", "-map", "2:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
             str(output_with_subs)
         ]
     else:
-        # No logo - download from GPU, add subs on CPU, encode with NVENC
-        filter_v2 = (
-            f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
-            f"hwdownload,format=yuv420p[bg];"
-            f"[bg]subtitles='{ass_path}'[v]"
-        )
+        filter_v2 = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_path}'[v]"
         cmd_v2 = [
-            "ffmpeg", "-y",
-            "-vsync", "0",
-            "-hwaccel", "cuda",
-            "-hwaccel_output_format", "cuda",
-            "-i", "visual.mp4",
-            "-i", str(audio_path),
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
             "-filter_complex", filter_v2,
-            "-map", "[v]",
-            "-map", "1:a",
-            "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-tune", "hq",
-            "-rc", "vbr",
-            "-cq", "18",
-            "-b:v", "12M",
-            "-maxrate", "18M",
-            "-bufsize", "24M",
-            "-profile:v", "high",
-            "-movflags", "+faststart",
-            "-c:a", "aac",
-            "-b:a", "256k",
+            "-map", "[v]", "-map", "1:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
             str(output_with_subs)
         ]
     
-    print("    Encoding 1080p with subtitles...")
-    result_v2 = subprocess.run(cmd_v2, capture_output=True, text=True, timeout=900)
+    print("    Encoding 1080p with subtitles (NVENC)...")
+    result_v2 = subprocess.run(cmd_v2, capture_output=True, text=True, timeout=600)
     
     if result_v2.returncode != 0:
         print(f"⚠️ Version 2 failed: {result_v2.stderr[-300:]}")
@@ -1208,7 +1057,156 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     file_size_v2_mb = file_size_v2 / (1024*1024)
     print(f"✅ Version 2 Complete: {file_size_v2_gb:.3f}GB ({file_size_v2_mb:.1f}MB)")
     
-    return True
+    return Truedef process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
+    print("🎬 Processing Visuals with T5 + CLIP + PARALLEL PROCESSING...")
+    print(f"⚡ Processing {min(5, len(sentences))} clips in parallel...")
+    print("🎥 NO GRADIENTS - Will search until real videos are found!")
+    
+    # Prepare arguments for parallel processing
+    clip_args = [(i, sent, len(sentences)) for i, sent in enumerate(sentences)]
+    
+    # Process clips in parallel (5 at a time)
+    clips = [None] * len(sentences)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Submit all tasks
+        future_to_index = {
+            executor.submit(process_single_clip, arg): arg[0] 
+            for arg in clip_args
+        }
+        
+        completed = 0
+        failed_clips = []
+        
+        for future in concurrent.futures.as_completed(future_to_index):
+            try:
+                index, clip_path = future.result()
+                
+                if clip_path and os.path.exists(clip_path):
+                    clips[index] = clip_path
+                    completed += 1
+                    print(f"✅ Clip {index+1} completed successfully")
+                else:
+                    failed_clips.append(index)
+                    print(f"❌ Clip {index+1} FAILED after all attempts")
+                
+                update_status(60 + int((completed/len(sentences))*25), f"Completed {completed}/{len(sentences)} clips")
+                
+            except Exception as e:
+                index = future_to_index[future]
+                failed_clips.append(index)
+                print(f"❌ Clip {index+1} error: {e}")
+    
+    # Handle failed clips
+    if failed_clips:
+        print(f"\n⚠️ WARNING: {len(failed_clips)} clips failed to download")
+        print(f"Failed clip indices: {failed_clips}")
+        print("This might indicate:")
+        print("  - API keys are invalid or expired")
+        print("  - Rate limits reached")
+        print("  - Network connectivity issues")
+        print("  - All search results were filtered out")
+    
+    # Filter out None values
+    valid_clips = [c for c in clips if c is not None and os.path.exists(c)]
+    
+    if not valid_clips:
+        print("❌ No clips generated - cannot create video")
+        return False
+    
+    print(f"✅ Generated {len(valid_clips)}/{len(sentences)} clips")
+    
+    if len(valid_clips) < len(sentences) * 0.5:  # Less than 50% success
+        print(f"⚠️ WARNING: Only {len(valid_clips)} out of {len(sentences)} clips generated")
+        print("Video will have gaps or be shorter than expected")
+    
+    # Concatenate
+    print("🔗 Concatenating clips...")
+    with open("list.txt", "w") as f:
+        for c in valid_clips:
+            if os.path.exists(c):
+                f.write(f"file '{c}'\n")
+    
+    result = subprocess.run(
+        "ffmpeg -y -f concat -safe 0 -i list.txt -c:v h264_nvenc -preset p1 visual.mp4",
+        shell=True, 
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode != 0:
+        print(f"❌ Concatenation failed: {result.stderr[:200]}")
+        return False
+    
+    if not os.path.exists("visual.mp4"):
+        print("❌ visual.mp4 not created")
+        return False
+    
+    # === VERSION 1: NO SUBTITLES ===
+    print("📹 Rendering Version 1: Without Subtitles...")
+    update_status(85, "Rendering without subtitles...")
+    
+    if logo_path and os.path.exists(logo_path):
+        filter_v1 = "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[v]"
+        cmd_v1 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
+            "-filter_complex", filter_v1,
+            "-map", "[v]", "-map", "2:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            str(output_no_subs)
+        ]
+    else:
+        cmd_v1 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
+            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            str(output_no_subs)
+        ]
+    
+    result = subprocess.run(cmd_v1, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"❌ Version 1 failed: {result.stderr[:200]}")
+        return False
+    
+    # === VERSION 2: WITH SUBTITLES ===
+    print("📹 Rendering Version 2: With Subtitles...")
+    update_status(90, "Rendering with subtitles...")
+    
+    ass_path = str(ass_file).replace('\\', '/').replace(':', '\\\\:')
+    
+    if logo_path and os.path.exists(logo_path):
+        filter_v2 = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=230:-1[logo];[bg][logo]overlay=30:30[withlogo];[withlogo]subtitles='{ass_path}'[v]"
+        cmd_v2 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path),
+            "-filter_complex", filter_v2,
+            "-map", "[v]", "-map", "2:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            str(output_with_subs)
+        ]
+    else:
+        filter_v2 = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_path}'[v]"
+        cmd_v2 = [
+            "ffmpeg", "-y", "-hwaccel", "cuda",
+            "-i", "visual.mp4", "-i", str(audio_path),
+            "-filter_complex", filter_v2,
+            "-map", "[v]", "-map", "1:a",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "12M",
+            "-c:a", "aac", "-b:a", "256k",
+            str(output_with_subs)
+        ]
+    
+    result = subprocess.run(cmd_v2, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"❌ Version 2 failed: {result.stderr[:200]}")
+        return False
+    
+    return os.path.exists(output_no_subs) and os.path.exists(output_with_subs)
     # 14. MAIN EXECUTION
 # ========================================== 
 
