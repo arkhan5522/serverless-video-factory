@@ -1,1 +1,1 @@
-{"progress": 20, "message": "Audio Synthesis...", "status": "processing", "logs": "[14:42:15] Initializing...\n[14:42:16] Scripting...\n[14:42:17] Audio Synthesis...", "timestamp": 1767883337.9094427}
+{"progress": 22, "message": "Voice 20/222", "status": "processing", "logs": "[14:42:15] Initializing...\n[14:42:16] Scripting...\n[14:42:17] Audio Synthesis...\n[14:42:47] Voice 0/222\n[14:44:25] Voice 10/222\n[14:45:27] Voice 20/222", "timestamp": 1767883527.8584213}
