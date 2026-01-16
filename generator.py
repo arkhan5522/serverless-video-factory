@@ -1,4 +1,3 @@
-
 """
 AI VIDEO GENERATOR WITH GOOGLE DRIVE UPLOAD
 ============================================
@@ -28,165 +27,32 @@ from pathlib import Path
 # ========================================== 
 
 print("--- 🔧 Installing Dependencies ---")
-
-# ========================================== 
-# 1. INSTALLATION (FIXED VERSION)
-# ========================================== 
-
-print("--- 🔧 Installing Dependencies ---")
-
 try:
-    # Install system dependencies first
-    print("Installing system packages...")
-    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg build-essential git", 
-                  shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    
-    print("Installing Python packages...")
-    
-    # Separate packages that might cause issues
-    core_packages = [
-        "numpy",
+    libs = [
+        "chatterbox-tts",
+        "torchaudio", 
+        "assemblyai",
+        "google-generativeai",
         "requests",
-        "pillow",
-        "scipy",
-        "protobuf",
         "beautifulsoup4",
         "pydub",
-        "sentencepiece",
-        "einops",
-        "soundfile",
-        "librosa",
-        "accelerate",
-    ]
-    
-    # Try installing core packages first
-    print("Installing core packages...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install"] + core_packages + ["--quiet"])
-    print("✅ Core packages installed")
-    
-    # Install transformers separately (can be problematic)
-    print("Installing transformers...")
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers", "--quiet"])
-        print("✅ Transformers installed")
-    except:
-        print("⚠️ Transformers installation failed, trying with no-deps...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers", "--no-deps", "--quiet"])
-    
-    # Install torch with proper CUDA support
-    print("Installing PyTorch...")
-    try:
-        # Try different torch installation methods
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", 
-            "torch", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu118", "--quiet"
-        ])
-        print("✅ PyTorch installed with CUDA")
-    except:
-        print("⚠️ CUDA torch failed, installing CPU version...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchaudio", "--quiet"])
-    
-    # Install remaining packages
-    remaining_packages = [
-        "assemblyai",
-        "google-generativeai", 
+        "numpy",
+        "transformers",
+        "pillow",
         "opencv-python",
+        "--quiet"
     ]
-    
-    print("Installing remaining packages...")
-    for package in remaining_packages:
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
-            print(f"✅ {package} installed")
-        except Exception as e:
-            print(f"⚠️ {package} failed: {str(e)[:50]}")
-    
-    # Install chatterbox-tts (this might be the problematic one)
-    print("\nInstalling Chatterbox TTS...")
-    chatterbox_installed = False
-    
-    # Method 1: Direct from PyPI
-    try:
-        print("  Method 1: PyPI...")
-        result = subprocess.run([
-            sys.executable, "-m", "pip", "install", 
-            "chatterbox-tts==0.1.0", "--no-cache-dir"
-        ], capture_output=True, text=True, timeout=180)
-        
-        if result.returncode == 0:
-            chatterbox_installed = True
-            print("  ✅ Installed from PyPI")
-        else:
-            print(f"  PyPI failed: {result.stderr[:100]}")
-    except Exception as e:
-        print(f"  ✗ PyPI error: {str(e)[:50]}")
-    
-    # Method 2: GitHub with specific commit
-    if not chatterbox_installed:
-        try:
-            print("  Method 2: GitHub...")
-            # First install dependencies
-            subprocess.run([
-                sys.executable, "-m", "pip", "install",
-                "torch", "numpy", "scipy", "librosa", "soundfile", "--quiet"
-            ])
-            
-            # Clone and install
-            result = subprocess.run([
-                "git", "clone", "https://github.com/resemble-ai/chatterbox.git",
-                "/tmp/chatterbox"
-            ], capture_output=True, text=True, timeout=180)
-            
-            if result.returncode == 0:
-                result = subprocess.run([
-                    sys.executable, "-m", "pip", "install",
-                    "-e", "/tmp/chatterbox", "--no-deps"
-                ], capture_output=True, text=True, timeout=180)
-                
-                if result.returncode == 0:
-                    chatterbox_installed = True
-                    print("  ✅ Installed from GitHub")
-                else:
-                    print(f"  Installation failed: {result.stderr[:100]}")
-        except Exception as e:
-            print(f"  ✗ GitHub error: {str(e)[:50]}")
-    
-    # Method 3: Alternative TTS library
-    if not chatterbox_installed:
-        try:
-            print("  Method 3: Using alternative TTS...")
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install",
-                "TTS", "--quiet"
-            ])
-            print("  ✅ Installed TTS as alternative")
-            # You'll need to update the audio generation code to use TTS instead
-        except:
-            print("  ✗ TTS installation failed")
-    
-    # Verify Chatterbox
-    if chatterbox_installed:
-        try:
-            from chatterbox.tts import ChatterboxTTS
-            print("✅ Chatterbox TTS ready!")
-        except ImportError as e:
-            print(f"❌ Cannot import Chatterbox: {e}")
-            print("⚠️ Continuing without Chatterbox...")
-    else:
-        print("⚠️ Chatterbox installation failed, will use fallback TTS")
-    
-    print("✅ All packages installed successfully")
-    
+    subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
+    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
 except Exception as e:
-    print(f"❌ Installation failed: {e}")
-    import traceback
-    traceback.print_exc()
-    print("\n⚠️ Trying to continue with partial installation...")
+    print(f"Install Warning: {e}")
+
 import torch
 import torchaudio
 import assemblyai as aai
 import google.generativeai as genai
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
 # ========================================== 
 # 2. CONFIGURATION
 # ========================================== 
