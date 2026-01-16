@@ -27,45 +27,18 @@ from pathlib import Path
 # ========================================== 
 
 print("--- 🔧 Installing Dependencies ---")
+
 try:
     # Install system dependencies first
     print("Installing system packages...")
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg build-essential git", 
                   shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
     
-    # Install PyTorch and torchaudio first (required for chatterbox)
-    print("Installing PyTorch...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchaudio", "--quiet"])
-    
-    # Try installing chatterbox-tts from git (more stable)
-    print("Installing Chatterbox TTS from source...")
-    try:
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", 
-            "git+https://github.com/resemble-ai/chatterbox.git",
-            "--quiet"
-        ], timeout=300)
-        CHATTERBOX_INSTALLED = True
-        print("✅ Chatterbox TTS installed from source")
-    except:
-        # If that fails, try pip with no build isolation
-        print("Trying alternative Chatterbox installation...")
-        try:
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", 
-                "chatterbox-tts",
-                "--no-build-isolation",
-                "--quiet"
-            ], timeout=300)
-            CHATTERBOX_INSTALLED = True
-            print("✅ Chatterbox TTS installed")
-        except:
-            print("⚠️ Chatterbox TTS installation failed - using fallback")
-            CHATTERBOX_INSTALLED = False
-    
-    # Install other essential packages
-    print("Installing other dependencies...")
+    # Install essential packages first
+    print("Installing core dependencies...")
     essential_libs = [
+        "torch",
+        "torchaudio",
         "assemblyai",
         "google-generativeai",
         "requests",
@@ -78,13 +51,75 @@ try:
     ]
     
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + essential_libs + ["--quiet"])
+    print("✅ Core dependencies installed")
     
-    print("✅ Core dependencies installed successfully")
+    # Try installing Chatterbox TTS - multiple methods
+    print("Installing Chatterbox TTS...")
+    chatterbox_installed = False
+    
+    # Method 1: Try from GitHub
+    if not chatterbox_installed:
+        try:
+            print("  Trying GitHub installation...")
+            result = subprocess.run([
+                sys.executable, "-m", "pip", "install", 
+                "git+https://github.com/resemble-ai/chatterbox.git"
+            ], capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                chatterbox_installed = True
+                print("  ✅ Installed from GitHub")
+        except Exception as e:
+            print(f"  ✗ GitHub install failed: {str(e)[:50]}")
+    
+    # Method 2: Try from PyPI
+    if not chatterbox_installed:
+        try:
+            print("  Trying PyPI installation...")
+            result = subprocess.run([
+                sys.executable, "-m", "pip", "install", 
+                "chatterbox-tts"
+            ], capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                chatterbox_installed = True
+                print("  ✅ Installed from PyPI")
+        except Exception as e:
+            print(f"  ✗ PyPI install failed: {str(e)[:50]}")
+    
+    # Method 3: Try with no build isolation
+    if not chatterbox_installed:
+        try:
+            print("  Trying no-build-isolation method...")
+            result = subprocess.run([
+                sys.executable, "-m", "pip", "install", 
+                "chatterbox-tts", "--no-build-isolation"
+            ], capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                chatterbox_installed = True
+                print("  ✅ Installed with no-build-isolation")
+        except Exception as e:
+            print(f"  ✗ No-build-isolation failed: {str(e)[:50]}")
+    
+    # Verify installation
+    if chatterbox_installed:
+        try:
+            from chatterbox.tts import ChatterboxTTS
+            print("✅ Chatterbox TTS verified and ready!")
+        except ImportError:
+            print("❌ Chatterbox installed but cannot import - check dependencies")
+            exit(1)
+    else:
+        print("❌ All Chatterbox installation methods failed")
+        print("Please install manually: pip install git+https://github.com/resemble-ai/chatterbox.git")
+        exit(1)
     
 except Exception as e:
-    print(f"⚠️ Installation warning: {e}")
-    print("Continuing with available packages...")
-    CHATTERBOX_INSTALLED = False
+    print(f"❌ Installation failed: {e}")
+    import traceback
+    traceback.print_exc()
+    exit(1)
 import torch
 import torchaudio
 import assemblyai as aai
