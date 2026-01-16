@@ -116,8 +116,8 @@ jobs:
 
           # 4. Create Kaggle Metadata
           echo '{
-            "id": "'"$KAGGLE_USERNAME"'/video-factory-titan",
-            "title": "Video Factory Titan",
+            "id": "'"$KAGGLE_USERNAME"'/video-factory-titan-English",
+            "title": "Video Factory Titan English",
             "code_file": "final_script.py",
             "language": "python",
             "kernel_type": "script",
