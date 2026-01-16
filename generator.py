@@ -28,9 +28,44 @@ from pathlib import Path
 
 print("--- 🔧 Installing Dependencies ---")
 try:
-    libs = [
-        "chatterbox-tts",
-        "torchaudio", 
+    # Install system dependencies first
+    print("Installing system packages...")
+    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg build-essential git", 
+                  shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    
+    # Install PyTorch and torchaudio first (required for chatterbox)
+    print("Installing PyTorch...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchaudio", "--quiet"])
+    
+    # Try installing chatterbox-tts from git (more stable)
+    print("Installing Chatterbox TTS from source...")
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            "git+https://github.com/resemble-ai/chatterbox.git",
+            "--quiet"
+        ], timeout=300)
+        CHATTERBOX_INSTALLED = True
+        print("✅ Chatterbox TTS installed from source")
+    except:
+        # If that fails, try pip with no build isolation
+        print("Trying alternative Chatterbox installation...")
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install", 
+                "chatterbox-tts",
+                "--no-build-isolation",
+                "--quiet"
+            ], timeout=300)
+            CHATTERBOX_INSTALLED = True
+            print("✅ Chatterbox TTS installed")
+        except:
+            print("⚠️ Chatterbox TTS installation failed - using fallback")
+            CHATTERBOX_INSTALLED = False
+    
+    # Install other essential packages
+    print("Installing other dependencies...")
+    essential_libs = [
         "assemblyai",
         "google-generativeai",
         "requests",
@@ -39,14 +74,17 @@ try:
         "numpy",
         "transformers",
         "pillow",
-        "opencv-python",
-        "--quiet"
+        "opencv-python"
     ]
-    subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
-    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
+    
+    subprocess.check_call([sys.executable, "-m", "pip", "install"] + essential_libs + ["--quiet"])
+    
+    print("✅ Core dependencies installed successfully")
+    
 except Exception as e:
-    print(f"Install Warning: {e}")
-
+    print(f"⚠️ Installation warning: {e}")
+    print("Continuing with available packages...")
+    CHATTERBOX_INSTALLED = False
 import torch
 import torchaudio
 import assemblyai as aai
