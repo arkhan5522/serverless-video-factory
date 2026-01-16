@@ -55,7 +55,8 @@ try:
         "soundfile",
         "einops",
         "scipy",
-        "accelerate"
+        "accelerate",
+        "chatterbox-tts",
     ]
     
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + all_packages + ["--quiet"])
