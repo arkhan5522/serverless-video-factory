@@ -43,7 +43,6 @@ print("--- 🔧 Installing Dependencies ---")
     # Try installing Chatterbox TTS - multiple methods
     print("Installing Chatterbox TTS...")
     chatterbox_installed = False
-    
     # Method 1: Install from specific commit (more stable)
     if not chatterbox_installed:
         try:
