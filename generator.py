@@ -1,3 +1,4 @@
+
 """
 AI VIDEO GENERATOR WITH GOOGLE DRIVE UPLOAD
 ============================================
@@ -28,43 +29,62 @@ from pathlib import Path
 
 print("--- 🔧 Installing Dependencies ---")
 
-# Install Chatterbox dependencies first
-    print("Installing Chatterbox dependencies...")
-    chatterbox_deps = [
+try:
+    # Install system dependencies first
+    print("Installing system packages...")
+    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg build-essential git", 
+                  shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    
+    # Install ALL dependencies in one go
+    print("Installing Python packages...")
+    all_packages = [
+        "torch",
+        "torchaudio",
+        "assemblyai",
+        "google-generativeai",
+        "requests",
+        "beautifulsoup4",
+        "pydub",
+        "numpy",
+        "transformers",
+        "pillow",
+        "opencv-python",
         "sentencepiece",
         "protobuf",
         "librosa",
         "soundfile",
         "einops",
-        "scipy"
+        "scipy",
+        "accelerate"
     ]
-    subprocess.check_call([sys.executable, "-m", "pip", "install"] + chatterbox_deps + ["--quiet"])
     
-    # Try installing Chatterbox TTS - multiple methods
+    subprocess.check_call([sys.executable, "-m", "pip", "install"] + all_packages + ["--quiet"])
+    print("✅ Python packages installed")
+    
+    # Try installing Chatterbox TTS
     print("Installing Chatterbox TTS...")
     chatterbox_installed = False
-    # Method 1: Install from specific commit (more stable)
+    
+    # Method 1: GitHub
     if not chatterbox_installed:
         try:
-            print("  Trying GitHub installation (specific commit)...")
+            print("  Method 1: GitHub...")
             result = subprocess.run([
                 sys.executable, "-m", "pip", "install", 
-                "git+https://github.com/resemble-ai/chatterbox.git@main",
+                "git+https://github.com/resemble-ai/chatterbox.git",
                 "--no-cache-dir"
             ], capture_output=True, text=True, timeout=300)
             
             if result.returncode == 0:
                 chatterbox_installed = True
                 print("  ✅ Installed from GitHub")
-            else:
-                print(f"  ✗ GitHub install failed: {result.stderr[-200:]}")
-        except Exception as e:
-            print(f"  ✗ GitHub install error: {str(e)[:50]}")
+        except:
+            print("  ✗ GitHub failed")
     
-    # Method 2: Try forcing reinstall
+    # Method 2: Force reinstall
     if not chatterbox_installed:
         try:
-            print("  Trying forced reinstall...")
+            print("  Method 2: Force reinstall...")
             result = subprocess.run([
                 sys.executable, "-m", "pip", "install", 
                 "git+https://github.com/resemble-ai/chatterbox.git",
@@ -73,16 +93,14 @@ print("--- 🔧 Installing Dependencies ---")
             
             if result.returncode == 0:
                 chatterbox_installed = True
-                print("  ✅ Installed with force-reinstall")
-            else:
-                print(f"  ✗ Force-reinstall failed: {result.stderr[-200:]}")
-        except Exception as e:
-            print(f"  ✗ Force-reinstall error: {str(e)[:50]}")
+                print("  ✅ Force reinstall worked")
+        except:
+            print("  ✗ Force reinstall failed")
     
-    # Method 3: Try PyPI
+    # Method 3: PyPI
     if not chatterbox_installed:
         try:
-            print("  Trying PyPI installation...")
+            print("  Method 3: PyPI...")
             result = subprocess.run([
                 sys.executable, "-m", "pip", "install", 
                 "chatterbox-tts", "--no-cache-dir"
@@ -90,52 +108,34 @@ print("--- 🔧 Installing Dependencies ---")
             
             if result.returncode == 0:
                 chatterbox_installed = True
-                print("  ✅ Installed from PyPI")
-            else:
-                print(f"  ✗ PyPI install failed: {result.stderr[-200:]}")
-        except Exception as e:
-            print(f"  ✗ PyPI error: {str(e)[:50]}")
+                print("  ✅ PyPI worked")
+        except:
+            print("  ✗ PyPI failed")
     
-    # Verify installation
+    # Verify
     if chatterbox_installed:
         try:
-            import importlib
-            importlib.invalidate_caches()
             from chatterbox.tts import ChatterboxTTS
-            print("✅ Chatterbox TTS verified and ready!")
-        except ImportError as ie:
-            print(f"❌ Chatterbox installed but cannot import: {ie}")
-            print("Attempting to fix import issues...")
-            
-            # Try installing missing dependencies
-            try:
-                subprocess.check_call([
-                    sys.executable, "-m", "pip", "install",
-                    "transformers>=4.30.0",
-                    "accelerate",
-                    "--upgrade", "--quiet"
-                ])
-                from chatterbox.tts import ChatterboxTTS
-                print("✅ Fixed! Chatterbox TTS now working!")
-            except:
-                print("❌ Could not fix import issues")
-                print("\n🔧 Manual Installation Required:")
-                print("Run this command in your terminal:")
-                print("pip install git+https://github.com/resemble-ai/chatterbox.git")
-                exit(1)
+            print("✅ Chatterbox TTS ready!")
+        except ImportError:
+            print("❌ Cannot import Chatterbox")
+            exit(1)
     else:
-        print("\n❌ All Chatterbox installation methods failed")
-        print("\n🔧 Please try manual installation:")
-        print("1. Open terminal/command prompt")
-        print("2. Run: pip install git+https://github.com/resemble-ai/chatterbox.git")
-        print("3. If that fails, check GitHub issues: https://github.com/resemble-ai/chatterbox/issues")
+        print("❌ Chatterbox installation failed")
+        print("Manual: pip install git+https://github.com/resemble-ai/chatterbox.git")
         exit(1)
+    
+except Exception as e:
+    print(f"❌ Installation failed: {e}")
+    import traceback
+    traceback.print_exc()
+    exit(1)
+
 import torch
 import torchaudio
 import assemblyai as aai
 import google.generativeai as genai
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-
 # ========================================== 
 # 2. CONFIGURATION
 # ========================================== 
