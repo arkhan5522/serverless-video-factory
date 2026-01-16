@@ -28,22 +28,9 @@ from pathlib import Path
 
 print("--- 🔧 Installing Dependencies ---")
 try:
-    # Install system dependencies first
-    print("Installing system packages...")
-    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg build-essential", 
-                  shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    
-    # Install PyTorch and torchaudio first (required for chatterbox)
-    print("Installing PyTorch...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchaudio", "--quiet"])
-    
-    # Install chatterbox-tts
-    print("Installing Chatterbox TTS...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "chatterbox-tts", "--quiet"])
-    
-    # Install other essential packages
-    print("Installing other dependencies...")
-    essential_libs = [
+    libs = [
+        "chatterbox-tts",
+        "torchaudio", 
         "assemblyai",
         "google-generativeai",
         "requests",
@@ -52,17 +39,14 @@ try:
         "numpy",
         "transformers",
         "pillow",
-        "opencv-python"
+        "opencv-python",
+        "--quiet"
     ]
-    
-    subprocess.check_call([sys.executable, "-m", "pip", "install"] + essential_libs + ["--quiet"])
-    
-    print("✅ All dependencies installed successfully")
-    
+    subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
+    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
 except Exception as e:
-    print(f"❌ Installation failed: {e}")
-    print("Please ensure you have CUDA and build tools installed")
-    exit(1)
+    print(f"Install Warning: {e}")
+
 import torch
 import torchaudio
 import assemblyai as aai
