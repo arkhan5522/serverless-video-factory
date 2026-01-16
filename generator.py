@@ -28,7 +28,21 @@ from pathlib import Path
 
 print("--- 🔧 Installing Dependencies ---")
 try:
-    # Install packages one by one to isolate failures
+    # Install system dependencies first
+    print("Installing system packages...")
+    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg build-essential", 
+                  shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    
+    # Install PyTorch and torchaudio first (required for chatterbox)
+    print("Installing PyTorch...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchaudio", "--quiet"])
+    
+    # Install chatterbox-tts
+    print("Installing Chatterbox TTS...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "chatterbox-tts", "--quiet"])
+    
+    # Install other essential packages
+    print("Installing other dependencies...")
     essential_libs = [
         "assemblyai",
         "google-generativeai",
@@ -41,31 +55,14 @@ try:
         "opencv-python"
     ]
     
-    # Install essential packages first
-    for lib in essential_libs:
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", lib, "--quiet"], 
-                                stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-        except:
-            print(f"Warning: {lib} install failed, continuing...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install"] + essential_libs + ["--quiet"])
     
-    # Try audio packages separately
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "torchaudio", "--quiet"],
-                            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    except:
-        print("Warning: torchaudio install failed")
+    print("✅ All dependencies installed successfully")
     
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "chatterbox-tts", "--quiet"],
-                            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    except:
-        print("Warning: chatterbox-tts install failed - will use fallback TTS")
-    
-    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", 
-                  shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 except Exception as e:
-    print(f"Install Warning: {e}")
+    print(f"❌ Installation failed: {e}")
+    print("Please ensure you have CUDA and build tools installed")
+    exit(1)
 import torch
 import torchaudio
 import assemblyai as aai
