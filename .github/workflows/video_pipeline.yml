@@ -116,8 +116,8 @@ jobs:
 
           # 4. Create Kaggle Metadata
           echo '{
-            "id": "'"$KAGGLE_USERNAME"'/video-factory-titan-English",
-            "title": "Video Factory Titan English",
+            "id": "'"$KAGGLE_USERNAME"'/video-factory-titan",
+            "title": "Video Factory Titan",
             "code_file": "final_script.py",
             "language": "python",
             "kernel_type": "script",
@@ -154,7 +154,7 @@ jobs:
       - name: Download Output
         continue-on-error: true
         run: |
-          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-titan-English -p ./output
+          kaggle kernels output ${{ secrets.KAGGLE_USERNAME }}/video-factory-titan -p ./output
           mkdir public_video
           mv ./output/final_video_*.mp4 ./public_video/ || echo "Video likely uploaded to Google Drive directly."
 
