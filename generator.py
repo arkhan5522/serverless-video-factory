@@ -1,12 +1,11 @@
 """
 AI VIDEO GENERATOR WITH GOOGLE DRIVE UPLOAD
 ============================================
-ENHANCED VERSION:
-1. T5 Transformers for Smart Query Generation
-2. CLIP Model for Exact Visual Matching
-3. Dual Output: With & Without Subtitles
-4. Islamic Content Filtering
-5. Subtitle Design Implementation (ASS format)
+SIMPLIFIED VERSION:
+1. NO T5 Transformers - Pure Natural Landscape Queries
+2. Dual Output: With & Without Subtitles
+3. Islamic Content Filtering
+4. Subtitle Design Implementation (ASS format)
 """
 
 import os
@@ -37,7 +36,6 @@ try:
         "beautifulsoup4",
         "pydub",
         "numpy",
-        "transformers",
         "pillow",
         "opencv-python",
         "--quiet"
@@ -51,7 +49,6 @@ import torch
 import torchaudio
 import assemblyai as aai
 import google.generativeai as genai
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 # ========================================== 
 # 2. CONFIGURATION
@@ -81,29 +78,68 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ========================================== 
-# 3. LOAD AI MODELS (T5 ONLY)
+# 3. NO AI MODELS NEEDED
 # ========================================== 
 
-print("--- 🤖 Loading AI Models ---")
-
-
-print("--- 🤖 Loading AI Models ---")
-
-# T5 for Smart Query Generation
-print("Loading T5 Model for Query Generation...")
-try:
-    t5_tokenizer = AutoTokenizer.from_pretrained("fabiochiu/t5-base-tag-generation")
-    t5_model = AutoModelForSeq2SeqLM.from_pretrained("fabiochiu/t5-base-tag-generation")
-    T5_AVAILABLE = True
-    print("✅ T5 Model loaded")
-except Exception as e:
-    print(f"⚠️ T5 Model failed to load: {e}")
-    T5_AVAILABLE = False
-
-
+print("--- 🌲 Using Natural Landscape Queries Only ---")
+print("🚫 NO T5 Transformers - Direct Nature Queries")
 
 # ========================================== 
-# 4. CONTENT FILTERS (Separate categories)
+# 4. NATURAL LANDSCAPE QUERIES (HARDCODED)
+# ========================================== 
+
+# Predefined nature queries - NO humans, NO beaches, NO pools
+NATURE_QUERIES = [
+    "forest trees cinematic 4k",
+    "mountain landscape nature 4k",
+    "waterfall nature cinematic",
+    "green forest wilderness 4k",
+    "river flowing nature 4k",
+    "rainforest jungle cinematic",
+    "pine forest trees 4k",
+    "meadow grass flowers nature",
+    "autumn forest leaves 4k",
+    "spring forest green 4k",
+    "misty forest morning 4k",
+    "lake reflection nature 4k",
+    "valley landscape cinematic",
+    "hills greenery nature 4k",
+    "woodland forest cinematic",
+    "nature sunrise trees 4k",
+    "sunset mountain landscape",
+    "clouds sky nature 4k",
+    "birds flying forest 4k",
+    "deer forest wildlife 4k",
+    "butterfly flowers nature",
+    "leaves wind forest 4k",
+    "rain forest nature 4k",
+    "snow mountain landscape",
+    "canyon nature cinematic",
+    "tropical rainforest 4k",
+    "alpine meadow flowers",
+    "bamboo forest green",
+    "redwood trees forest",
+    "oak tree nature 4k",
+    "wildflowers meadow spring",
+    "creek stream forest 4k",
+    "moss rocks nature closeup",
+    "fern plants jungle green",
+    "tree canopy forest aerial",
+    "mountain peak clouds 4k",
+    "glacier ice landscape",
+    "northern lights aurora nature",
+    "sand dunes desert landscape",
+    "cactus desert sunset"
+]
+
+def get_nature_query():
+    """ALWAYS return random nature query - ignore script text completely"""
+    query = random.choice(NATURE_QUERIES)
+    print(f"    🌲 Using Nature Query: '{query}'")
+    return query
+
+# ========================================== 
+# 5. CONTENT FILTERS
 # ========================================== 
 
 # Explicit inappropriate content filter
@@ -112,101 +148,35 @@ EXPLICIT_CONTENT_BLACKLIST = [
     'xxx', 'adult xxx', 'erotic xxx', 'nsfw','lgbtq','LGBTQ','war','pork','bikini','swim','violence','drugs','terror','gun','gambling'
 ]
 
-# Religious/Holy terms filter (to avoid mixing religious content with random videos)
+# Religious/Holy terms filter
 RELIGIOUS_HOLY_TERMS = [
-    # Christian terms
     'jesus', 'christ', 'god', 'lord', 'bible', 'gospel', 'church worship',
     'crucifix', 'crucifixion', 'virgin mary', 'holy spirit', 'baptism',
-    
-    # Jewish terms
     'yahweh', 'jehovah', 'torah', 'talmud', 'synagogue', 'rabbi', 'kosher',
-    'hanukkah', 'yom kippur', 'passover',
-    
-    # Hindu terms
     'krishna', 'rama', 'shiva', 'vishnu', 'brahma', 'ganesh', 'hindu temple',
-    'vedas', 'bhagavad gita', 'diwali',
-    
-    # Buddhist terms
-    'buddha', 'buddhist temple', 'nirvana', 'dharma', 'meditation buddha',
-    'tibetan monk', 'dalai lama',
-    
-    # General religious
-    'holy book', 'scripture', 'religious ceremony', 'worship service',
-    'religious ritual', 'sacred text', 'divine revelation'
+    'buddha', 'buddhist temple', 'nirvana', 'dharma', 'meditation buddha'
 ]
 
 def is_content_appropriate(text):
-    """
-    Light content filter with two separate checks:
-    1. Block explicit inappropriate content
-    2. Block religious/holy terms to avoid conflicts
-    
-    Uses word boundary matching to avoid false positives
-    (e.g., "drama" won't be blocked when "rama" is in the list)
-    """
+    """Light content filter"""
     text_lower = text.lower()
     
-    # Check 1: Explicit content (word boundary matching)
     for term in EXPLICIT_CONTENT_BLACKLIST:
-        # Use word boundary regex to match whole words only
         pattern = r'\b' + re.escape(term) + r'\b'
         if re.search(pattern, text_lower):
             print(f"      🚫 BLOCKED: Inappropriate content - '{term}'")
             return False
     
-    # Check 2: Religious/Holy terms (word boundary matching)
     for term in RELIGIOUS_HOLY_TERMS:
-        # Use word boundary regex to match whole words only
         pattern = r'\b' + re.escape(term) + r'\b'
         if re.search(pattern, text_lower):
-            print(f"      🚫 BLOCKED: Religious content - '{term}' (avoiding religious conflicts)")
+            print(f"      🚫 BLOCKED: Religious content - '{term}'")
             return False
     
     return True
 
 # ========================================== 
-# 6. T5 SMART QUERY GENERATION
-# ========================================== 
-
-def generate_smart_query_t5(script_text):
-    """Generate intelligent search queries using T5 transformer"""
-    if not T5_AVAILABLE:
-        # Fallback to keyword extraction
-        words = re.findall(r'\b\w{5,}\b', script_text.lower())
-        return words[0] if words else "background"
-    
-    try:
-        # Prepare input
-        inputs = t5_tokenizer([script_text], max_length=512, truncation=True, return_tensors="pt")
-        
-        # Generate tags
-        output = t5_model.generate(
-            **inputs,
-            max_length=50,
-            num_beams=5,
-            early_stopping=True,
-            no_repeat_ngram_size=2
-        )
-        
-        # Decode
-        decoded_output = t5_tokenizer.batch_decode(output, skip_special_tokens=True)[0]
-        tags = list(set(decoded_output.strip().split(", ")))
-        
-        # Return first appropriate tag
-        for tag in tags:
-            if is_content_appropriate(tag):
-                return tag
-        
-        return "background"
-        
-    except Exception as e:
-        print(f"    T5 Error: {e}")
-        words = re.findall(r'\b\w{5,}\b', script_text.lower())
-        return words[0] if words else "background"
-
-
-# ========================================== 
-# 7. SUBTITLE STYLES
+# 6. SUBTITLE STYLES
 # ========================================== 
 
 SUBTITLE_STYLES = {
@@ -346,7 +316,7 @@ def format_ass_time(seconds):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 # ========================================== 
-# 8. GOOGLE DRIVE UPLOAD
+# 7. GOOGLE DRIVE UPLOAD
 # ========================================== 
 
 def upload_to_google_drive(file_path):
@@ -430,32 +400,114 @@ def upload_to_google_drive(file_path):
         return None
 
 # ========================================== 
-# 10. VIDEO SEARCH WITH T5
+# 8. VIDEO SEARCH WITH NATURE QUERIES ONLY
 # ========================================== 
 
 USED_VIDEO_URLS = set()
 
-def search_videos_smart(script_text, sentence_index):
-    """Search videos using Flan-T5 query generation only"""
-    
-    # Use only T5 for query generation
-    if T5_AVAILABLE:
-        primary_query = generate_smart_query_t5(script_text)
-        print(f"    🧠 Flan-T5 Query: '{primary_query}'")
-    else:
-        # Fallback: extract keywords
-        words = re.findall(r'\b\w{5,}\b', script_text.lower())
-        primary_query = words[0] if words else "background"
-        primary_query += " 4k cinematic"
-        print(f"    📝 Fallback Query: '{primary_query}'")
-    
-    # Use the generic search function
-    return search_videos_by_query(primary_query, sentence_index)
+def search_videos_nature_only(clip_index):
+    """
+    CRITICAL: ALWAYS use nature queries - IGNORE script text completely
+    NO T5, NO analysis, NO topic-based queries
+    """
+    query = get_nature_query()  # Get random nature query
+    return search_videos_by_query(query, clip_index)
 
-def download_and_rank_videos(results, script_text, target_duration, clip_index):
+def search_videos_by_query(query, sentence_index, page=None):
+    """Direct search with a specific query"""
+    if page is None:
+        page = random.randint(1, 3)
+    
+    all_results = []
+    
+    # Pexels
+    if PEXELS_KEYS and PEXELS_KEYS[0]:
+        try:
+            key = random.choice([k for k in PEXELS_KEYS if k])
+            url = "https://api.pexels.com/videos/search"
+            headers = {"Authorization": key}
+            params = {
+                "query": query,
+                "per_page": 20,
+                "page": page,
+                "orientation": "landscape"
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                for video in data.get('videos', []):
+                    video_files = video.get('video_files', [])
+                    if video_files:
+                        hd_files = [f for f in video_files if f.get('quality') == 'hd']
+                        if not hd_files:
+                            hd_files = [f for f in video_files if f.get('quality') == 'large']
+                        if not hd_files:
+                            hd_files = video_files
+                        
+                        if hd_files:
+                            best_file = random.choice(hd_files)
+                            video_url = best_file['link']
+                            
+                            # Content check
+                            video_title = video.get('user', {}).get('name', '')
+                            if not is_content_appropriate(video_title + " " + query):
+                                continue
+                            
+                            if video_url not in USED_VIDEO_URLS:
+                                all_results.append({
+                                    'url': video_url,
+                                    'service': 'pexels',
+                                    'duration': video.get('duration', 0)
+                                })
+        except Exception as e:
+            print(f"    Pexels error: {str(e)[:50]}")
+    
+    # Pixabay
+    if PIXABAY_KEYS and PIXABAY_KEYS[0]:
+        try:
+            key = random.choice([k for k in PIXABAY_KEYS if k])
+            url = "https://pixabay.com/api/videos/"
+            params = {
+                "key": key,
+                "q": query,
+                "per_page": 20,
+                "page": page,
+                "orientation": "horizontal"
+            }
+            
+            response = requests.get(url, params=params, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                for video in data.get('hits', []):
+                    videos_dict = video.get('videos', {})
+                    
+                    video_url = None
+                    for quality in ['large', 'medium', 'small', 'tiny']:
+                        if quality in videos_dict:
+                            video_url = videos_dict[quality]['url']
+                            break
+                    
+                    if video_url:
+                        video_tags = video.get('tags', '')
+                        if not is_content_appropriate(video_tags + " " + query):
+                            continue
+                        
+                        if video_url not in USED_VIDEO_URLS:
+                            all_results.append({
+                                'url': video_url,
+                                'service': 'pixabay',
+                                'duration': video.get('duration', 0)
+                            })
+        except Exception as e:
+            print(f"    Pixabay error: {str(e)[:50]}")
+    
+    return all_results
+
+def download_and_rank_videos(results, target_duration, clip_index):
     """Download videos and use the first valid one"""
     
-    for i, result in enumerate(results[:5]):  # Try top 5 results
+    for i, result in enumerate(results[:5]):
         try:
             raw_path = TEMP_DIR / f"raw_{clip_index}_{i}.mp4"
             response = requests.get(result['url'], timeout=30, stream=True)
@@ -466,7 +518,6 @@ def download_and_rank_videos(results, script_text, target_duration, clip_index):
                         f.write(chunk)
             
             if os.path.exists(raw_path) and os.path.getsize(raw_path) > 0:
-                # Process the video
                 output_path = TEMP_DIR / f"clip_{clip_index}.mp4"
                 
                 cmd = [
@@ -483,7 +534,6 @@ def download_and_rank_videos(results, script_text, target_duration, clip_index):
                 
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # Cleanup raw file
                 try:
                     os.remove(raw_path)
                 except:
@@ -501,7 +551,7 @@ def download_and_rank_videos(results, script_text, target_duration, clip_index):
     return None
 
 # ========================================== 
-# 11. STATUS UPDATES
+# 9. STATUS UPDATES
 # ========================================== 
 
 LOG_BUFFER = []
@@ -577,7 +627,7 @@ def download_asset(path, local):
     return False
 
 # ========================================== 
-# 12. SCRIPT & AUDIO GENERATION
+# 10. SCRIPT & AUDIO GENERATION
 # ========================================== 
 
 def generate_script(topic, minutes):
@@ -660,229 +710,49 @@ def clone_voice(text, ref_audio, out_path):
     return False
 
 # ========================================== 
-# 13. VISUAL PROCESSING WITH PARALLEL PROCESSING
+# 11. VISUAL PROCESSING - NATURE QUERIES ONLY
 # ========================================== 
 
 def process_single_clip(args):
-    """Process a single clip - used for parallel processing"""
+    """
+    Process single clip - ALWAYS use nature queries
+    NO analysis of script text
+    """
     i, sent, sentences_count = args
     
     duration = max(3.5, sent['end'] - sent['start'])
     
-    print(f"  🔍 Clip {i+1}/{sentences_count}: '{sent['text'][:50]}...'")
+    print(f"  🌲 Clip {i+1}/{sentences_count}: Nature Scene (ignoring text)")
     
-    # Try multiple search strategies until video found
-    max_attempts = 10  # Increased attempts
-    attempt = 0
-    
-    while attempt < max_attempts:
-        attempt += 1
+    # Try multiple times with different nature queries
+    for attempt in range(1, 7):
+        print(f"    Attempt {attempt}: Random Nature Query")
         
-        if attempt == 1:
-            # Primary: T5 generated query
-            print(f"    Attempt {attempt}: T5 Smart Query")
-            results = search_videos_smart(sent['text'], i)
+        # ALWAYS use nature queries - NEVER analyze script text
+        results = search_videos_nature_only(i)
         
-        elif attempt == 2:
-            # Secondary: Extract main keywords from sentence
-            print(f"    Attempt {attempt}: Keyword Extraction")
-            words = re.findall(r'\b\w{5,}\b', sent['text'].lower())
-            if words:
-                query = f"{words[0]} cinematic 4k"
-                results = search_videos_by_query(query, i)
-            else:
-                results = []
-        
-        elif attempt == 3:
-            # Tertiary: Generic visual terms
-            print(f"    Attempt {attempt}: Visual Terms")
-            visual_terms = ['cinematic', 'motion', 'animation', 'stock footage', 
-                           'background video', 'b-roll', 'visual effects']
-            query = f"{random.choice(visual_terms)} hd"
-            results = search_videos_by_query(query, i)
-        
-        elif attempt == 4:
-            # Fourth: Nature/landscape
-            print(f"    Attempt {attempt}: Nature/Landscape")
-            nature_terms = ['nature', 'landscape', 'scenery', 'outdoors',
-                          'mountain', 'ocean', 'forest', 'sky']
-            query = f"{random.choice(nature_terms)} cinematic"
-            results = search_videos_by_query(query, i)
-        
-        elif attempt == 5:
-            # Fifth: Abstract/patterns
-            print(f"    Attempt {attempt}: Abstract Patterns")
-            abstract_terms = ['abstract', 'pattern', 'geometric', 'light',
-                            'particles', 'flow', 'motion graphics']
-            query = f"{random.choice(abstract_terms)} 4k"
-            results = search_videos_by_query(query, i)
-        
-        elif attempt == 6:
-            # Sixth: City/urban
-            print(f"    Attempt {attempt}: City/Urban")
-            urban_terms = ['city', 'urban', 'architecture', 'building',
-                          'skyline', 'street', 'traffic', 'lights']
-            query = f"{random.choice(urban_terms)} time lapse"
-            results = search_videos_by_query(query, i)
-        
-        elif attempt == 7:
-            # Seventh: Technology
-            print(f"    Attempt {attempt}: Technology")
-            tech_terms = ['technology', 'digital', 'futuristic', 'innovation',
-                         'data', 'network', 'circuit', 'code']
-            query = f"{random.choice(tech_terms)} background"
-            results = search_videos_by_query(query, i)
-        
-        elif attempt == 8:
-            # Eighth: Time-lapse/motion
-            print(f"    Attempt {attempt}: Time-lapse")
-            motion_terms = ['time lapse', 'slow motion', 'hyperlapse',
-                          'drone footage', 'aerial view', 'moving']
-            query = f"{random.choice(motion_terms)}"
-            results = search_videos_by_query(query, i)
-        
-        elif attempt == 9:
-            # Ninth: Generic safe terms
-            print(f"    Attempt {attempt}: Generic Safe Terms")
-            safe_terms = ['background', 'video', 'footage', 'stock',
-                         'cinematic', 'shot', 'scene', 'view']
-            query = f"{random.choice(safe_terms)} hd"
-            results = search_videos_by_query(query, i)
-        
-        else:
-            # Final attempt: Completely random page from broad search
-            print(f"    Attempt {attempt}: Random Broad Search")
-            broad_terms = ['background', 'cinematic', 'nature', 'city', 
-                         'technology', 'abstract', 'motion', 'light']
-            query = random.choice(broad_terms)
-            results = search_videos_by_query(query, i, page=random.randint(1, 10))
-        
-        # Try to download and rank
         if results:
-            clip_path = download_and_rank_videos(results, sent['text'], duration, i)
+            clip_path = download_and_rank_videos(results, duration, i)
             if clip_path and os.path.exists(clip_path):
                 print(f"    ✅ Video found on attempt {attempt}")
                 return (i, clip_path)
         
-        # Wait a bit before next attempt to avoid rate limits
-        if attempt < max_attempts:
-            time.sleep(0.5)
+        time.sleep(0.5)
     
-    # If we reach here after all attempts, something is very wrong
-    print(f"    ❌ Failed to find video after {max_attempts} attempts")
-    print(f"    ⚠️ This should not happen - check API keys and internet connection")
-    
-    # Return None to indicate failure
+    print(f"    ❌ Failed to find video after all attempts")
     return (i, None)
 
-def search_videos_by_query(query, sentence_index, page=None):
-    """Direct search with a specific query"""
-    if page is None:
-        page = random.randint(1, 3)
-    
-    all_results = []
-    
-    # Pexels
-    if PEXELS_KEYS and PEXELS_KEYS[0]:
-        try:
-            key = random.choice([k for k in PEXELS_KEYS if k])
-            url = "https://api.pexels.com/videos/search"
-            headers = {"Authorization": key}
-            params = {
-                "query": query,
-                "per_page": 20,  # Increased from 15
-                "page": page,
-                "orientation": "landscape"
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                for video in data.get('videos', []):
-                    video_files = video.get('video_files', [])
-                    if video_files:
-                        hd_files = [f for f in video_files if f.get('quality') == 'hd']
-                        if not hd_files:
-                            hd_files = [f for f in video_files if f.get('quality') == 'large']
-                        if not hd_files:
-                            hd_files = video_files  # Accept any quality
-                        
-                        if hd_files:
-                            best_file = random.choice(hd_files)
-                            video_url = best_file['link']
-                            
-                            # Content check
-                            video_title = video.get('user', {}).get('name', '')
-                            if not is_content_appropriate(video_title + " " + query):
-                                continue
-                            
-                            if video_url not in USED_VIDEO_URLS:
-                                all_results.append({
-                                    'url': video_url,
-                                    'service': 'pexels',
-                                    'duration': video.get('duration', 0)
-                                })
-        except Exception as e:
-            print(f"    Pexels error: {str(e)[:50]}")
-    
-    # Pixabay
-    if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-        try:
-            key = random.choice([k for k in PIXABAY_KEYS if k])
-            url = "https://pixabay.com/api/videos/"
-            params = {
-                "key": key,
-                "q": query,
-                "per_page": 20,  # Increased from 15
-                "page": page,
-                "orientation": "horizontal"
-            }
-            
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                for video in data.get('hits', []):
-                    videos_dict = video.get('videos', {})
-                    
-                    # Try all quality levels
-                    video_url = None
-                    for quality in ['large', 'medium', 'small', 'tiny']:
-                        if quality in videos_dict:
-                            video_url = videos_dict[quality]['url']
-                            break
-                    
-                    if video_url:
-                        # Content check
-                        video_tags = video.get('tags', '')
-                        if not is_content_appropriate(video_tags + " " + query):
-                            continue
-                        
-                        if video_url not in USED_VIDEO_URLS:
-                            all_results.append({
-                                'url': video_url,
-                                'service': 'pixabay',
-                                'duration': video.get('duration', 0)
-                            })
-        except Exception as e:
-            print(f"    Pixabay error: {str(e)[:50]}")
-    
-    return all_results
-
 def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, output_with_subs):
-    """Process visuals with T5 smart queries and GPU-accelerated encoding"""
+    """Process visuals with parallel processing - NATURE QUERIES ONLY"""
     
-    print("🎬 Processing Visuals with T5 + PARALLEL PROCESSING...")
+    print("🎬 Processing Visuals - NATURE QUERIES ONLY...")
+    print("🌲 All videos will be nature scenes regardless of script content")
     print(f"⚡ Processing {min(5, len(sentences))} clips in parallel...")
-    print("🎥 GPU-accelerated rendering with size optimization!")
     
-    # Prepare arguments for parallel processing
     clip_args = [(i, sent, len(sentences)) for i, sent in enumerate(sentences)]
-    
-    # Process clips in parallel (5 at a time)
     clips = [None] * len(sentences)
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        # Submit all tasks
         future_to_index = {
             executor.submit(process_single_clip, arg): arg[0] 
             for arg in clip_args
@@ -966,10 +836,10 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             "-map", "[v]", "-map", "2:a",
             "-c:v", "h264_nvenc", 
             "-preset", "p4",
-            "-b:v", "6M",           # Lower bitrate for smaller file
+            "-b:v", "6M",
             "-maxrate", "8M",
             "-bufsize", "12M",
-            "-c:a", "aac", "-b:a", "128k",  # Lower audio bitrate
+            "-c:a", "aac", "-b:a", "128k",
             str(output_no_subs)
         ]
     else:
@@ -980,10 +850,10 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
             "-vf", f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
             "-c:v", "h264_nvenc",
             "-preset", "p4",
-            "-b:v", "6M",           # Lower bitrate for smaller file
+            "-b:v", "6M",
             "-maxrate", "8M",
             "-bufsize", "12M",
-            "-c:a", "aac", "-b:a", "128k",  # Lower audio bitrate
+            "-c:a", "aac", "-b:a", "128k",
             str(output_no_subs)
         ]
     
@@ -1060,10 +930,16 @@ def process_visuals(sentences, audio_path, ass_file, logo_path, output_no_subs, 
     print(f"✅ Version 2 Complete: {file_size_v2_gb:.3f}GB ({file_size_v2_mb:.1f}MB)")
     
     return True
-    # 14. MAIN EXECUTION
+
+# ========================================== 
+# 12. MAIN EXECUTION
 # ========================================== 
 
-print("--- 🚀 START: Enhanced T5 ONLY Version ---")
+print("\n" + "="*60)
+print("🚀 AI VIDEO GENERATOR - NATURAL QUERIES ONLY")
+print("🌲 Pure Nature Videos (No T5, No Analysis)")
+print("="*60)
+
 update_status(1, "Initializing...")
 
 # Download assets
@@ -1160,8 +1036,8 @@ if clone_voice(text, ref_voice, audio_out):
     ass_file = TEMP_DIR / "subs.ass"
     create_ass_file(sentences, ass_file)
     
-    # Process visuals - TWO OUTPUTS
-    update_status(60, "Processing Visuals...")
+    # Process visuals - TWO OUTPUTS - NATURE ONLY
+    update_status(60, "🌲 Processing Nature Visuals (ignoring script text)...")
     output_no_subs = OUTPUT_DIR / f"final_{JOB_ID}_NO_SUBS.mp4"
     output_with_subs = OUTPUT_DIR / f"final_{JOB_ID}_WITH_SUBS.mp4"
     
@@ -1174,6 +1050,8 @@ if clone_voice(text, ref_voice, audio_out):
         link2 = upload_to_google_drive(output_with_subs)
         
         final_message = "✅ Success!\n"
+        final_message += "🌲 Pure Nature Videos\n"
+        final_message += "🚫 No T5/Analysis Used\n"
         if link1:
             final_message += f"No Subs: {link1}\n"
         if link2:
