@@ -39,15 +39,14 @@ try:
         "chatterbox-tts"
     ])
     
-    # Step 3: Install resemble-enhance with --no-deps to avoid conflicts
-    # then install its actual deps that don't conflict
+    # Step 3: Install resemble-enhance from GitHub (PyPI version has broken deps)
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
         "--no-deps", "resemble-enhance"
     ])
-    # Install resemble-enhance's dependencies that don't conflict with chatterbox
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
-        "df_conformer", "speechbrain>=1.0", "--no-deps"
-    ])
+    # Install resemble-enhance's key dependencies individually
+    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+        "librosa", "scipy"
+    ], capture_output=True)
     
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
 except Exception as e:
@@ -138,7 +137,7 @@ def generate_queries_openrouter(script_text, num_queries):
         print("  No OpenRouter key, using Flan-T5 local model...")
         return _generate_queries_flan_t5(script_text, num_queries)
     
-    print(f"  Generating {num_queries} queries via DeepSeek V4 Flash...")
+    print(f"  Generating {num_queries} queries via OpenRouter free models...")
     
     # Split into 2-3 batches for efficiency
     batch_size = min(25, (num_queries + 2) // 3)
@@ -232,11 +231,13 @@ Generate exactly {queries_needed} search queries, one per line:"""
 
 
 def _call_openrouter(prompt, max_retries=3):
-    """Call OpenRouter API with DeepSeek V4 Flash, fallback to other free models"""
+    """Call OpenRouter API with current free models (July 2026)"""
     models = [
-        "deepseek/deepseek-v4-flash:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
         "google/gemma-4-31b-it:free",
-        "openrouter/free"
+        "inclusionai/ling-3.0-flash:free",
+        "openai/gpt-oss-20b:free",
+        "nvidia/nemotron-3-nano-30b-a3b:free"
     ]
     
     for model in models:
