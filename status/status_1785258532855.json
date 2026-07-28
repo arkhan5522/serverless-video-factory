@@ -1,1 +1,1 @@
-{"progress": 10, "message": "Generating queries via Groq...", "status": "processing", "logs": "[17:11:27] Initializing...\n[17:11:29] Generating script...\n[17:11:30] Generating queries via Groq...", "timestamp": 1785258690.19871}
+{"progress": 15, "message": "Generating audio...", "status": "processing", "logs": "[17:11:27] Initializing...\n[17:11:29] Generating script...\n[17:11:30] Generating queries via Groq...\n[17:11:37] Generating audio...", "timestamp": 1785258697.2313597}
