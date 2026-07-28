@@ -28,26 +28,41 @@ from pathlib import Path
 
 print("--- Installing Dependencies ---")
 try:
-    libs = [
-        "chatterbox-tts",
-        "resemble-enhance",
-        "torchaudio",
-        "assemblyai",
-        "google-generativeai",
-        "transformers",
-        "sentencepiece",
-        "requests",
-        "beautifulsoup4",
-        "pydub",
-        "numpy",
-        "pillow",
-        "opencv-python",
-        "--quiet"
-    ]
-    subprocess.check_call([sys.executable, "-m", "pip", "install"] + libs)
+    # Step 1: Install core dependencies first (these are already on Kaggle)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+        "assemblyai", "google-generativeai", "transformers", "sentencepiece",
+        "requests", "beautifulsoup4", "pydub", "numpy", "pillow", "opencv-python"
+    ])
+    
+    # Step 2: Install chatterbox-tts (main TTS engine)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+        "chatterbox-tts"
+    ])
+    
+    # Step 3: Install resemble-enhance with --no-deps to avoid conflicts
+    # then install its actual deps that don't conflict
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+        "--no-deps", "resemble-enhance"
+    ])
+    # Install resemble-enhance's dependencies that don't conflict with chatterbox
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+        "df_conformer", "speechbrain>=1.0", "--no-deps"
+    ])
+    
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
 except Exception as e:
     print(f"Install Warning: {e}")
+    # Fallback: try installing just chatterbox without enhance
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+            "chatterbox-tts", "assemblyai", "google-generativeai",
+            "transformers", "sentencepiece", "requests", "beautifulsoup4",
+            "pydub", "numpy", "pillow", "opencv-python"
+        ])
+        subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
+        print("  Installed without resemble-enhance (will use raw audio)")
+    except Exception as e2:
+        print(f"  Critical install failure: {e2}")
 
 import torch
 import torchaudio
