@@ -36,6 +36,7 @@ jobs:
           USER_VOICE_PATH: ${{ github.event.client_payload.voice_path }}
           USER_LOGO_PATH: ${{ github.event.client_payload.logo_path }}
           USER_JOB_ID: ${{ github.event.client_payload.job_id }}
+          USER_LANGUAGE: ${{ github.event.client_payload.language || 'english' }}
           
           # NEW ADVANCED SETTINGS - CRITICAL FIX
           USER_SUBTITLE_STYLE: ${{ github.event.client_payload.subtitle_style || 'mrbeast_yellow' }}
@@ -50,6 +51,7 @@ jobs:
           PEXELS_KEYS: ${{ secrets.PEXELS_KEYS }}
           PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_KEY: ${{ secrets.GROQ_API_KEY }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           
@@ -79,6 +81,7 @@ jobs:
               '{{VOICE_PATH_PLACEHOLDER}}': os.environ.get('USER_VOICE_PATH', ''),
               '{{LOGO_PATH_PLACEHOLDER}}': os.environ.get('USER_LOGO_PATH', ''),
               '{{JOB_ID_PLACEHOLDER}}': os.environ.get('USER_JOB_ID', 'debug_run'),
+              '{{LANGUAGE_PLACEHOLDER}}': os.environ.get('USER_LANGUAGE', 'english'),
               # NEW ADVANCED SETTINGS
               '{{SUBTITLE_STYLE_PLACEHOLDER}}': os.environ.get('USER_SUBTITLE_STYLE', 'mrbeast_yellow'),
               '{{AUDIO_SPEED_PLACEHOLDER}}': os.environ.get('USER_AUDIO_SPEED', '1.0'),
@@ -111,6 +114,7 @@ jobs:
           os.environ['OAUTH_REFRESH_TOKEN'] = '$OAUTH_REFRESH_TOKEN'
           os.environ['GOOGLE_DRIVE_FOLDER_ID'] = '$GOOGLE_DRIVE_FOLDER_ID'
           os.environ['OPENROUTER_API_KEY'] = '$OPENROUTER_KEY'
+          os.environ['GROQ_API_KEY'] = '$GROQ_KEY'
           EOF
           
           # Combine the header (secrets) with the main script
