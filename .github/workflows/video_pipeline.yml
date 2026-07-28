@@ -49,6 +49,7 @@ jobs:
           ASSEMBLY_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
           PEXELS_KEYS: ${{ secrets.PEXELS_KEYS }}
           PIXABAY_KEYS: ${{ secrets.PIXABAY_KEYS }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           
@@ -109,6 +110,7 @@ jobs:
           os.environ['OAUTH_CLIENT_SECRET'] = '$OAUTH_CLIENT_SECRET'
           os.environ['OAUTH_REFRESH_TOKEN'] = '$OAUTH_REFRESH_TOKEN'
           os.environ['GOOGLE_DRIVE_FOLDER_ID'] = '$GOOGLE_DRIVE_FOLDER_ID'
+          os.environ['OPENROUTER_API_KEY'] = '$OPENROUTER_KEY'
           EOF
           
           # Combine the header (secrets) with the main script
