@@ -1,1 +1,1 @@
-{"progress": 15, "message": "Studio Audio Pipeline...", "status": "processing", "logs": "[11:56:56] Initializing...\n[11:56:58] Generating script...\n[11:56:59] Generating AI video queries...\n[11:59:04] Studio Audio Pipeline...", "timestamp": 1785239944.397643}
+{"progress": 20, "message": "Voice synthesis 0/40 chunks", "status": "processing", "logs": "[11:56:56] Initializing...\n[11:56:58] Generating script...\n[11:56:59] Generating AI video queries...\n[11:59:04] Studio Audio Pipeline...\n[11:59:52] Voice synthesis 0/40 chunks", "timestamp": 1785239992.3639028}
