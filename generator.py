@@ -25,9 +25,25 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 ])
 
 # TTS engine (needs torch>=2.6 which is already on Kaggle GPU image)
-subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
-    "git+https://github.com/resemble-ai/chatterbox.git"
-])
+# NOTE: PyPI's chatterbox-tts (0.1.7 as of this writing) does NOT have the
+# t3_model= kwarg needed for the V3 multilingual checkpoint - that only
+# exists on the GitHub master branch (confirmed by inspecting the actual
+# wheel contents). Install from source to get real V3 support.
+print("  Installing chatterbox-tts from GitHub (master) for V3 support...")
+_cb_installed = subprocess.run(
+    [sys.executable, "-m", "pip", "install", "--quiet",
+     "git+https://github.com/resemble-ai/chatterbox.git"],
+    capture_output=True, text=True
+)
+if _cb_installed.returncode != 0:
+    print("  git install failed, falling back to PyPI chatterbox-tts (no V3 t3_model support)")
+    print(f"  (reason: {_cb_installed.stderr.strip()[-300:]})")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+        "chatterbox-tts"
+    ])
+else:
+    print("  chatterbox-tts installed from source (V3-capable)")
+
 # Resemble Enhance - install WITHOUT deps to avoid torch version conflicts
 subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
     "--no-deps", "resemble-enhance"], capture_output=True)
