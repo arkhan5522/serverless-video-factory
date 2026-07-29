@@ -173,21 +173,21 @@ def _safe(q):
 # 4. SUBTITLE PRESETS (Variety)
 # ==========================================
 SUBTITLE_STYLES = {
-    "cinema": {"name":"Cinema","font":"Arial","size":54,"bold":-1,
+    "cinema": {"name":"Cinema","font":"Arial","size":62,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&H80000000",
-        "border":3,"outline":0,"shadow":0,"margin":40,"spacing":0.5},
-    "modern_bold": {"name":"Modern Bold","font":"Arial Black","size":60,"bold":-1,
+        "border":3,"outline":0,"shadow":0,"margin":45,"spacing":0.5},
+    "modern_bold": {"name":"Modern Bold","font":"Arial Black","size":68,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00111111","back":"&H00000000",
-        "border":1,"outline":5,"shadow":2,"margin":48,"spacing":1.2},
-    "neon_yellow": {"name":"Neon Yellow","font":"Arial Black","size":62,"bold":-1,
+        "border":1,"outline":5,"shadow":2,"margin":50,"spacing":1.2},
+    "neon_yellow": {"name":"Neon Yellow","font":"Arial Black","size":70,"bold":-1,
         "primary":"&H0000FFFF","outline_c":"&H00000044","back":"&H00000000",
-        "border":1,"outline":5,"shadow":3,"margin":50,"spacing":1.5},
-    "soft_white": {"name":"Soft White","font":"Arial","size":52,"bold":-1,
+        "border":1,"outline":5,"shadow":3,"margin":52,"spacing":1.5},
+    "soft_white": {"name":"Soft White","font":"Arial","size":60,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00333333","back":"&H00000000",
-        "border":1,"outline":3,"shadow":4,"margin":42,"spacing":0.8},
-    "electric_cyan": {"name":"Electric Cyan","font":"Arial Black","size":58,"bold":-1,
+        "border":1,"outline":3,"shadow":4,"margin":45,"spacing":0.8},
+    "electric_cyan": {"name":"Electric Cyan","font":"Arial Black","size":66,"bold":-1,
         "primary":"&H00FFFF00","outline_c":"&H00663300","back":"&H00000000",
-        "border":1,"outline":4,"shadow":3,"margin":46,"spacing":1},
+        "border":1,"outline":4,"shadow":3,"margin":48,"spacing":1},
 }
 
 def create_subtitles(sentences, ass_path, word_data=None):
@@ -207,7 +207,7 @@ def create_subtitles(sentences, ass_path, word_data=None):
     
     with open(ass_path, "w", encoding="utf-8-sig") as f:
         f.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n")
-        f.write("WrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\n")
+        f.write("WrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
                 "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
                 "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
@@ -219,51 +219,65 @@ def create_subtitles(sentences, ass_path, word_data=None):
         f.write("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
         
         if word_data:
-            # Word-level highlighting: group words into display chunks (4-6 words)
-            # Each chunk shows all words, but highlights one at a time via karaoke-style
-            chunk_size = 5
-            for i in range(0, len(word_data), chunk_size):
-                chunk_words = word_data[i:i+chunk_size]
+            # Word-level highlighting: group words into display chunks by
+            # character budget (not raw word count), so a chunk of short
+            # words can hold more words than a chunk of long words.
+            MAX_CHARS_PER_CHUNK = 46   # total chars across both lines, tune per font/size
+            MAX_WORDS_PER_CHUNK = 14   # hard ceiling so very short words can't run away
+
+            chunks = []
+            buf, blen = [], 0
+            for word in word_data:
+                wlen = len(word['text']) + 1  # +1 for the joining space
+                if buf and (blen + wlen > MAX_CHARS_PER_CHUNK or len(buf) >= MAX_WORDS_PER_CHUNK):
+                    chunks.append(buf)
+                    buf, blen = [], 0
+                buf.append(word)
+                blen += wlen
+            if buf:
+                chunks.append(buf)
+
+            for chunk_words in chunks:
                 if not chunk_words: continue
-                
-                chunk_start = chunk_words[0]['start']
-                chunk_end = chunk_words[-1]['end']
-                
+
+                # Balance the 2-line split by character length, not word count,
+                # so line 1 and line 2 come out visually similar in width.
+                total_chars = sum(len(w['text']) for w in chunk_words)
+                running, split_idx = 0, len(chunk_words) - 1
+                for j, cw in enumerate(chunk_words):
+                    running += len(cw['text'])
+                    if running >= total_chars / 2:
+                        split_idx = j
+                        break
+
                 # For each word in chunk, create a dialogue line where THAT word is highlighted
                 for w_idx, word in enumerate(chunk_words):
                     w_start = _fmt(word['start'])
                     w_end = _fmt(word['end'])
-                    
-                    # Build text with highlight on current word
-                    parts = []
+
+                    p1, p2 = [], []
                     for j, cw in enumerate(chunk_words):
-                        if j == w_idx:
-                            # Highlighted word (different color + slightly bigger)
-                            parts.append(f"{{\\c{highlight}\\fscx110\\fscy110}}{cw['text']}{{\\r}}")
-                        else:
-                            parts.append(cw['text'])
-                    
-                    line = ' '.join(parts)
-                    # 2-line wrap if too long
-                    if len(' '.join([w['text'] for w in chunk_words])) > 40:
-                        mid = len(chunk_words) // 2
-                        p1 = []
-                        p2 = []
-                        for j, cw in enumerate(chunk_words):
-                            txt = f"{{\\c{highlight}\\fscx110\\fscy110}}{cw['text']}{{\\r}}" if j == w_idx else cw['text']
-                            if j < mid: p1.append(txt)
-                            else: p2.append(txt)
-                        line = ' '.join(p1) + "\\N" + ' '.join(p2)
-                    
+                        txt = f"{{\\c{highlight}\\fscx115\\fscy115}}{cw['text']}{{\\r}}" if j == w_idx else cw['text']
+                        if j <= split_idx: p1.append(txt)
+                        else: p2.append(txt)
+
+                    line = ' '.join(p1) + "\\N" + ' '.join(p2) if p2 else ' '.join(p1)
                     f.write(f"Dialogue: 0,{w_start},{w_end},Default,,0,0,0,,{line}\n")
         else:
-            # Sentence-level fallback
+            # Sentence-level fallback - split into 2 lines balanced by character length
             for sent in sentences:
                 t1 = _fmt(sent['start']); t2 = _fmt(sent['end'])
                 txt = sent['text'].strip().rstrip('.,;:')
-                if len(txt) > 42:
-                    w = txt.split(); mid = len(w)//2
-                    txt = ' '.join(w[:mid]) + "\\N" + ' '.join(w[mid:])
+                w = txt.split()
+                if len(w) > 3:
+                    total_chars = sum(len(x) for x in w)
+                    running, split_idx = 0, len(w) - 1
+                    for j, word in enumerate(w):
+                        running += len(word)
+                        if running >= total_chars / 2:
+                            split_idx = j
+                            break
+                    txt = ' '.join(w[:split_idx+1]) + "\\N" + ' '.join(w[split_idx+1:])
                 f.write(f"Dialogue: 0,{t1},{t2},Default,,0,0,0,,{txt}\n")
 
 def _fmt(sec):
@@ -308,7 +322,7 @@ def generate_audio(text, ref_audio, out_path):
                     if IS_SPANISH:
                         w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), language_id="es")
                     else:
-                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), exaggeration=0.6, cfg_weight=0.4)
+                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), exaggeration=0.45, cfg_weight=0.3)
                     wavs.append(w.cpu())
                 if i%8==0: torch.cuda.empty_cache()
             except: continue
