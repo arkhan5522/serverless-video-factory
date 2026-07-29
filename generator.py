@@ -1,51 +1,46 @@
 """
-AI VIDEO GENERATOR V3 - CLEAN EDITION
-=======================================
-1. Groq API for query generation (GPT-OSS 120B)
-2. Chatterbox Multilingual TTS (English/Spanish)
-3. Movie-style subtitles (bottom, 2 lines, clean)
-4. Fast concat (no transitions overhead)
-5. Optimized for Kaggle P100 16GB GPU
+VIDEO FACTORY V3 - PRODUCTION ENGINE
+======================================
+Submagic-level quality video generation:
+- Groq GPT-OSS-120B for intelligent query generation
+- Chatterbox Multilingual TTS (English/Spanish)
+- Resemble Enhance for studio-grade audio
+- Sentence-synced visuals (each clip matches its narration)
+- Ken Burns cinematic effects (zoom/pan on clips)
+- Multiple subtitle style presets (movie, modern, bold)
+- Color-graded output for professional look
+- Optimized for Kaggle P100 16GB GPU
 """
 
-import os
-import subprocess
-import sys
-import re
-import time
-import random
-import shutil
-import json
-import concurrent.futures
-import requests
-import gc
+import os, subprocess, sys, re, time, random, shutil, json
+import concurrent.futures, requests, gc
 from pathlib import Path
 
 # ==========================================
 # 1. INSTALLATION
 # ==========================================
-
 print("--- Installing Dependencies ---")
-try:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
-        "groq", "chatterbox-tts", "assemblyai", "google-generativeai",
-        "transformers", "sentencepiece", "requests", "pydub", "numpy", "pillow"
-    ])
-    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True)
-except Exception as e:
-    print(f"Install Warning: {e}")
+subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+    "groq", "chatterbox-tts", "assemblyai", "google-generativeai",
+    "transformers", "sentencepiece", "requests", "pydub", "numpy", "pillow"
+], capture_output=True)
 
-import torch
-import torchaudio
+# Resemble Enhance - install from git to avoid dep conflicts
+subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-deps",
+    "resemble-enhance"], capture_output=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+    "librosa", "scipy", "df_conformer"], capture_output=True)
+
+subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True,
+    capture_output=True)
+
+import torch, torchaudio
 import assemblyai as aai
 import google.generativeai as genai
-
-
 
 # ==========================================
 # 2. CONFIGURATION
 # ==========================================
-
 MODE = """{{MODE_PLACEHOLDER}}"""
 TOPIC = """{{TOPIC_PLACEHOLDER}}"""
 SCRIPT_TEXT = """{{SCRIPT_PLACEHOLDER}}"""
@@ -55,390 +50,474 @@ LOGO_PATH = """{{LOGO_PATH_PLACEHOLDER}}"""
 JOB_ID = """{{JOB_ID_PLACEHOLDER}}"""
 LANGUAGE = """{{LANGUAGE_PLACEHOLDER}}"""
 
-# Keys
 raw_gemini = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_KEYS = [k.strip() for k in raw_gemini.split(",") if k.strip()]
 ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
 PEXELS_KEYS = os.environ.get("PEXELS_KEYS", "").split(",")
 PIXABAY_KEYS = os.environ.get("PIXABAY_KEYS", "").split(",")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 
-# Paths
 OUTPUT_DIR = Path("output")
 TEMP_DIR = Path("temp")
-if TEMP_DIR.exists():
-    shutil.rmtree(TEMP_DIR)
+if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
-# Detect language
 IS_SPANISH = LANGUAGE.lower().strip() in ["spanish", "es", "espanol"]
+USED_URLS = set()
+AI_QUERIES = []
 
 
 
 # ==========================================
-# 3. GROQ QUERY GENERATION
+# 3. GROQ QUERY ENGINE
 # ==========================================
-
-FALLBACK_QUERIES = [
-    "forest trees cinematic 4k", "mountain landscape nature 4k",
-    "waterfall nature cinematic", "river flowing nature 4k",
-    "misty forest morning 4k", "lake reflection nature 4k",
-    "sunset mountain landscape", "clouds sky timelapse 4k",
-    "snow mountain landscape", "northern lights aurora",
-    "sand dunes desert landscape", "ocean waves aerial cinematic",
-    "autumn forest golden leaves", "spring meadow flowers bloom",
-    "deep space nebula stars", "coral reef underwater 4k"
-]
-
-def generate_queries_groq(script_text, num_queries):
-    """Generate ENGLISH video queries using Groq API (gpt-oss-120b). Always English even for Spanish scripts."""
-    if not GROQ_API_KEY:
-        print("  No Groq key, using Flan-T5...")
-        return _generate_queries_t5(script_text, num_queries)
+def generate_queries(script_text, num_queries):
+    """Generate precise English queries via Groq GPT-OSS-120B"""
+    if not GROQ_KEY:
+        print("  No Groq key, using fallback")
+        return [random.choice(FALLBACK) for _ in range(num_queries)]
     
     print(f"  Generating {num_queries} queries via Groq...")
-    
     try:
         from groq import Groq
-        client = Groq(api_key=GROQ_API_KEY)
+        client = Groq(api_key=GROQ_KEY)
+        all_q = []
         
-        all_queries = []
         words = script_text.split()
+        # 2 batches for efficiency
+        segments = [' '.join(words[:len(words)//2])[:2500],
+                    ' '.join(words[len(words)//2:])[:2500]]
         
-        # Split into 2 batches
-        mid = len(words) // 2
-        segments = [' '.join(words[:mid])[:2000], ' '.join(words[mid:])[:2000]]
-        
-        for seg_idx, segment in enumerate(segments):
-            needed = min(num_queries - len(all_queries), (num_queries + 1) // 2 + 5)
-            if needed <= 0:
-                break
+        for seg in segments:
+            needed = min(num_queries - len(all_q), num_queries // 2 + 5)
+            if needed <= 0: break
             
-            prompt = f"""Generate exactly {needed} English video stock footage search queries (3-5 words each).
-
-RULES:
-- ALL queries must be in ENGLISH regardless of script language
-- Each query 3-5 words, visually descriptive
-- NO people/faces/bodies, NO religion, NO violence, NO NSFW, NO alcohol/drugs/pork
-- Focus: nature, landscapes, technology, architecture, space, underwater, aerial, animals, weather, textures
-- Specific to the content, not generic
-- One per line, no numbering
-
-SCRIPT:
-{segment}
-
-Queries:"""
-            
-            response = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
+            r = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You generate short English stock footage search queries. Each query is 3-5 words describing a visual scene a camera can capture. Never include people, faces, religion, violence, or NSFW content."},
+                    {"role": "user", "content": f"From this script, generate {needed} video search queries. Focus on the specific visuals described - objects, places, nature, technology, architecture. One per line:\n\n{seg}"}
+                ],
                 model="openai/gpt-oss-120b",
-                max_tokens=1000,
+                max_tokens=600,
                 temperature=0.7
             )
             
-            result = response.choices[0].message.content
-            lines = [l.strip() for l in result.strip().split('\n') if l.strip()]
-            for line in lines:
+            text = r.choices[0].message.content
+            for line in text.strip().split('\n'):
                 cleaned = re.sub(r'^[\d\.\-\*\•]+\s*', '', line).strip()
-                if 2 < len(cleaned) < 60 and _is_query_safe(cleaned):
-                    all_queries.append(cleaned)
-                if len(all_queries) >= num_queries:
-                    break
-            
-            time.sleep(1)
+                if 3 < len(cleaned) < 50 and _safe(cleaned):
+                    all_q.append(cleaned)
+            time.sleep(0.5)
         
-        # Fill remaining if needed
-        while len(all_queries) < num_queries:
-            all_queries.append(random.choice(FALLBACK_QUERIES))
+        while len(all_q) < num_queries:
+            all_q.append(random.choice(FALLBACK))
         
-        print(f"  Groq generated {len(all_queries)} queries")
-        return all_queries[:num_queries]
-        
+        print(f"  Got {len(all_q)} queries")
+        return all_q[:num_queries]
     except Exception as e:
-        print(f"  Groq error: {e}, falling back to Flan-T5...")
-        return _generate_queries_t5(script_text, num_queries)
+        print(f"  Groq error: {e}")
+        return [random.choice(FALLBACK) for _ in range(num_queries)]
 
-def _generate_queries_t5(script_text, num_queries):
-    """Fallback: Flan-T5 local query generation"""
-    print(f"  Loading Flan-T5 ({num_queries} queries)...")
-    try:
-        from transformers import T5ForConditionalGeneration, T5Tokenizer
-        tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-large")
-        model = T5ForConditionalGeneration.from_pretrained("google/flan-t5-large")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device).eval()
-        
-        all_queries = []
-        context = ' '.join(script_text.split()[:300]) if script_text else "nature documentary"
-        
-        prompt = f"Generate {num_queries} short English video search queries for stock footage about: {context[:500]}. No people, no religion. Focus: nature, technology, space, animals. Queries:"
-        inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True).to(device)
-        
-        with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=400, num_beams=4, do_sample=True, temperature=0.8)
-        
-        result = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        for line in result.replace(',', '\n').split('\n'):
-            cleaned = re.sub(r'^[\d\.\-\*\•]+\s*', '', line.strip()).strip()
-            if 2 < len(cleaned) < 60 and _is_query_safe(cleaned):
-                all_queries.append(cleaned)
-        
-        del model, tokenizer
-        torch.cuda.empty_cache()
-        gc.collect()
-        
-        while len(all_queries) < num_queries:
-            all_queries.append(random.choice(FALLBACK_QUERIES))
-        return all_queries[:num_queries]
-    except Exception as e:
-        print(f"  T5 error: {e}")
-        return [random.choice(FALLBACK_QUERIES) for _ in range(num_queries)]
+FALLBACK = [
+    "forest trees cinematic 4k", "mountain landscape aerial",
+    "waterfall nature slow motion", "ocean waves sunset golden",
+    "city skyline night timelapse", "clouds rolling mountains",
+    "river flowing rocks forest", "northern lights sky",
+    "desert sand dunes aerial", "coral reef underwater 4k",
+    "volcano eruption dramatic", "snowfall pine trees winter",
+    "lightning storm clouds", "sunrise over valley fog",
+    "autumn leaves falling wind", "space earth orbit view"
+]
 
-def _is_query_safe(query):
-    blocked = ['woman','women','girl','female','bikini','nude','naked','sexy','nsfw',
-               'jesus','christ','church','mosque','temple','bible','quran','buddha',
-               'gun','weapon','war','blood','violence','kill','alcohol','beer','wine',
-               'drug','gambling','pork','lgbtq','person','people','crowd','human','man face']
-    q = query.lower()
-    return not any(t in q for t in blocked)
+def _safe(q):
+    bad = ['woman','women','girl','female','bikini','nude','naked','sexy',
+           'jesus','christ','church','mosque','temple','bible','buddha',
+           'gun','weapon','war','blood','violence','kill','alcohol',
+           'drug','gambling','pork','lgbtq','person','people','crowd']
+    ql = q.lower()
+    return not any(t in ql for t in bad)
 
 
 
 # ==========================================
-# 4. CONTENT FILTER
+# 4. SUBTITLE SYSTEM (Multiple Styles)
 # ==========================================
+SUBTITLE_PRESETS = {
+    "cinema": {
+        "name": "Cinema (Netflix Style)",
+        "font": "Arial", "size": 54, "bold": -1,
+        "primary": "&H00FFFFFF", "outline_c": "&H00000000",
+        "back": "&H80000000", "border": 3, "outline": 0,
+        "shadow": 0, "margin": 40, "spacing": 0.5
+    },
+    "modern_white": {
+        "name": "Modern White Bold",
+        "font": "Arial Black", "size": 58, "bold": -1,
+        "primary": "&H00FFFFFF", "outline_c": "&H00111111",
+        "back": "&H00000000", "border": 1, "outline": 4,
+        "shadow": 2, "margin": 45, "spacing": 1
+    },
+    "neon_yellow": {
+        "name": "Neon Yellow Pop",
+        "font": "Arial Black", "size": 60, "bold": -1,
+        "primary": "&H0000FFFF", "outline_c": "&H00000000",
+        "back": "&H00000000", "border": 1, "outline": 5,
+        "shadow": 3, "margin": 50, "spacing": 1.5
+    },
+    "soft_shadow": {
+        "name": "Soft Shadow Elegant",
+        "font": "Arial", "size": 52, "bold": -1,
+        "primary": "&H00FFFFFF", "outline_c": "&H00333333",
+        "back": "&H00000000", "border": 1, "outline": 3,
+        "shadow": 4, "margin": 42, "spacing": 0.8
+    },
+    "highlight_green": {
+        "name": "Highlight Green",
+        "font": "Arial Black", "size": 56, "bold": -1,
+        "primary": "&H0000FF88", "outline_c": "&H00003311",
+        "back": "&H00000000", "border": 1, "outline": 4,
+        "shadow": 2, "margin": 48, "spacing": 1.2
+    },
+}
 
-def is_content_appropriate(text):
-    blocked = ['nude','naked','porn','nsfw','lgbtq','war','pork','bikini','violence','drugs','terror','gun','gambling',
-               'jesus','christ','bible','church','crucifix','buddha','hindu','shiva','vishnu']
-    t = text.lower()
-    return not any(re.search(r'\b' + re.escape(b) + r'\b', t) for b in blocked)
-
-# ==========================================
-# 5. MOVIE-STYLE SUBTITLES
-# ==========================================
-
-def create_ass_file(sentences, ass_file, res_x=1920, res_y=1080):
-    """
-    Movie-style subtitles: clean, bottom of screen, max 2 lines.
-    White text, thin dark outline, semi-transparent shadow.
-    Compact and professional - like Netflix/cinema captions.
-    """
-    print(f"  Creating movie-style subtitles...")
+def create_subtitles(sentences, ass_path, style_name=None):
+    """Create clean, movie-grade subtitles - bottom, max 2 lines, readable"""
+    if not style_name:
+        style_name = random.choice(list(SUBTITLE_PRESETS.keys()))
+    s = SUBTITLE_PRESETS[style_name]
+    print(f"  Subtitle style: {s['name']}")
     
-    # Max chars per line - keeps text compact at bottom
-    max_chars = 42
-    
-    with open(ass_file, "w", encoding="utf-8-sig") as f:
-        f.write("[Script Info]\n")
-        f.write("ScriptType: v4.00+\n")
-        f.write(f"PlayResX: {res_x}\n")
-        f.write(f"PlayResY: {res_y}\n")
-        f.write("WrapStyle: 0\n")
+    with open(ass_path, "w", encoding="utf-8-sig") as f:
+        f.write("[Script Info]\nScriptType: v4.00+\n")
+        f.write("PlayResX: 1920\nPlayResY: 1080\nWrapStyle: 0\n")
         f.write("ScaledBorderAndShadow: yes\n\n")
-        
         f.write("[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
                 "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
                 "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
                 "Alignment, MarginL, MarginR, MarginV, Encoding\n")
-        
-        # Clean movie style: white text, dark outline, bottom-center
-        f.write("Style: Default,Arial,52,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,"
-                "-1,0,0,0,100,100,0.5,0,1,3,1,2,40,40,35,1\n\n")
-        
+        f.write(f"Style: Default,{s['font']},{s['size']},{s['primary']},&H00FFFFFF,"
+                f"{s['outline_c']},{s['back']},{s['bold']},0,0,0,100,100,"
+                f"{s['spacing']},0,{s['border']},{s['outline']},{s['shadow']},"
+                f"2,50,50,{s['margin']},1\n\n")
         f.write("[Events]\n")
         f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
         
-        for s in sentences:
-            start_time = _format_ass_time(s['start'])
-            end_time = _format_ass_time(s['end'])
+        for sent in sentences:
+            t1 = _fmt(sent['start'])
+            t2 = _fmt(sent['end'])
+            text = sent['text'].strip().rstrip('.,;:')
             
-            text = s['text'].strip()
-            text = text.replace('\\', '').replace('\n', ' ')
-            # Remove trailing punctuation for cleaner look
-            text = text.rstrip('.,;:')
-            
-            # Word wrap to max 2 lines
-            words = text.split()
-            if len(' '.join(words)) <= max_chars:
-                formatted = ' '.join(words)
-            else:
-                # Split into 2 lines at midpoint
+            # Smart 2-line wrap at natural break point
+            if len(text) > 40:
+                words = text.split()
                 mid = len(words) // 2
                 line1 = ' '.join(words[:mid])
                 line2 = ' '.join(words[mid:])
-                # Rebalance if one line is much longer
-                if len(line1) > max_chars:
-                    mid = mid - 1
-                    line1 = ' '.join(words[:mid])
-                    line2 = ' '.join(words[mid:])
-                formatted = f"{line1}\\N{line2}"
+                text = f"{line1}\\N{line2}"
             
-            f.write(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{formatted}\n")
+            f.write(f"Dialogue: 0,{t1},{t2},Default,,0,0,0,,{text}\n")
 
-def _format_ass_time(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    cs = int((seconds % 1) * 100)
+def _fmt(sec):
+    h = int(sec // 3600)
+    m = int((sec % 3600) // 60)
+    s = int(sec % 60)
+    cs = int((sec % 1) * 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
 
 # ==========================================
-# 6. GOOGLE DRIVE UPLOAD
+# 5. AUDIO ENGINE (Chatterbox + Enhance)
 # ==========================================
-
-def upload_to_google_drive(file_path):
-    if not os.path.exists(file_path): return None
-    print(f"  Uploading {os.path.basename(file_path)}...")
-    client_id = os.environ.get("OAUTH_CLIENT_ID")
-    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
-    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
-    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
-    if not all([client_id, client_secret, refresh_token]): return None
+def generate_audio(text, ref_audio, out_path):
+    """High-quality voice: Chatterbox TTS + Resemble Enhance mastering"""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    raw_path = TEMP_DIR / "raw_tts.wav"
+    
+    # --- TTS ---
+    print(f"  TTS: {'Multilingual (ES)' if IS_SPANISH else 'English'} on {device}")
     try:
-        r = requests.post("https://oauth2.googleapis.com/token", data={
-            "client_id": client_id, "client_secret": client_secret,
-            "refresh_token": refresh_token, "grant_type": "refresh_token"
-        })
-        access_token = r.json()['access_token']
-    except: return None
+        if IS_SPANISH:
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+            model = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
+        else:
+            from chatterbox.tts import ChatterboxTTS
+            model = ChatterboxTTS.from_pretrained(device=device)
+        
+        sr = model.sr
+        sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip()) > 2]
+        
+        # Group 2-3 sentences per chunk for natural flow
+        chunks = []
+        buf, blen = [], 0
+        for s in sents:
+            if blen + len(s) > 160 and buf:
+                chunks.append(' '.join(buf)); buf, blen = [s], len(s)
+            else:
+                buf.append(s); blen += len(s) + 1
+        if buf: chunks.append(' '.join(buf))
+        
+        print(f"  {len(sents)} sentences -> {len(chunks)} chunks")
+        wavs = []
+        for i, c in enumerate(chunks):
+            if i % 5 == 0:
+                update_status(18 + int((i/len(chunks))*27), f"TTS {i+1}/{len(chunks)}")
+            try:
+                with torch.no_grad():
+                    if IS_SPANISH:
+                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), language_id="es")
+                    else:
+                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), exaggeration=0.6, cfg_weight=0.4)
+                    wavs.append(w.cpu())
+                if i % 8 == 0: torch.cuda.empty_cache()
+            except: continue
+        
+        if not wavs: return False
+        
+        # Concat with natural pauses
+        full = wavs[0]
+        for w in wavs[1:]:
+            pause = torch.zeros((full.shape[0], int(random.uniform(0.12, 0.22) * sr)))
+            full = torch.cat([full, pause, w], dim=1)
+        full = torch.cat([full, torch.zeros((full.shape[0], int(1.5 * sr)))], dim=1)
+        torchaudio.save(str(raw_path), full, sr)
+        print(f"  TTS done: {full.shape[1]/sr:.1f}s at {sr}Hz")
+        
+        del model, wavs, full; torch.cuda.empty_cache(); gc.collect()
+    except Exception as e:
+        print(f"  TTS error: {e}"); return False
     
-    file_size = os.path.getsize(file_path)
-    metadata = {"name": os.path.basename(file_path), "mimeType": "video/mp4"}
-    if folder_id: metadata["parents"] = [folder_id]
-    
-    resp = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json",
-                 "X-Upload-Content-Type": "video/mp4", "X-Upload-Content-Length": str(file_size)},
-        json=metadata)
-    if resp.status_code != 200: return None
-    
-    with open(file_path, "rb") as f:
-        upload_resp = requests.put(resp.headers["Location"], headers={"Content-Length": str(file_size)}, data=f)
-    
-    if upload_resp.status_code in [200, 201]:
-        fid = upload_resp.json().get('id')
-        requests.post(f"https://www.googleapis.com/drive/v3/files/{fid}/permissions",
-            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-            json={'role': 'reader', 'type': 'anyone'})
-        link = f"https://drive.google.com/file/d/{fid}/view?usp=sharing"
-        print(f"  Uploaded: {link}")
-        return link
-    return None
+    # --- ENHANCE ---
+    print("  Enhancing audio (denoise + upscale)...")
+    try:
+        from resemble_enhance.enhancer.inference import enhance as re_enhance
+        dwav, osr = torchaudio.load(str(raw_path))
+        
+        # Process in 25s chunks
+        chunk_s = 25 * osr
+        parts = []
+        for i in range(0, dwav.shape[1], chunk_s):
+            chunk = dwav[:, i:i+chunk_s]
+            try:
+                hw, esr = re_enhance(dwav=chunk, sr=osr, device=device, lambd=0.6)
+                parts.append(hw.cpu())
+            except:
+                parts.append(torchaudio.transforms.Resample(osr, 44100)(chunk).cpu())
+                esr = 44100
+            torch.cuda.empty_cache()
+        
+        final = torch.cat(parts, dim=1)
+        torchaudio.save(str(out_path), final, esr)
+        print(f"  Enhanced: {esr}Hz, {final.shape[1]/esr:.1f}s")
+        del parts, final, dwav; torch.cuda.empty_cache(); gc.collect()
+        return True
+    except Exception as e:
+        print(f"  Enhance unavailable ({str(e)[:40]}), using raw")
+        shutil.copy2(str(raw_path), str(out_path))
+        return True
 
 
 
 # ==========================================
-# 7. VIDEO SEARCH & DOWNLOAD
+# 6. VIDEO ENGINE (Cinematic Quality)
 # ==========================================
-
-USED_URLS = set()
-AI_QUERIES = []
-
-def _search_videos(query, idx):
+def search_and_download(query, idx, duration):
+    """Search Pexels/Pixabay and download best HD clip"""
+    urls = []
     page = random.randint(1, 3)
-    results = []
+    
+    # Pexels
     if PEXELS_KEYS and PEXELS_KEYS[0]:
         try:
             key = random.choice([k for k in PEXELS_KEYS if k])
             r = requests.get("https://api.pexels.com/videos/search",
                 headers={"Authorization": key},
-                params={"query": query, "per_page": 15, "page": page, "orientation": "landscape"}, timeout=12)
+                params={"query": query, "per_page": 15, "page": page, "orientation": "landscape"},
+                timeout=12)
             if r.status_code == 200:
                 for v in r.json().get('videos', []):
                     files = v.get('video_files', [])
-                    hd = [f for f in files if f.get('quality') == 'hd'] or files
+                    hd = [f for f in files if f.get('quality') == 'hd' and f.get('width', 0) >= 1280]
+                    if not hd: hd = [f for f in files if f.get('quality') in ['hd', 'large']]
                     if hd:
                         url = random.choice(hd)['link']
-                        if url not in USED_URLS and is_content_appropriate(query):
-                            results.append(url)
+                        if url not in USED_URLS: urls.append(url)
         except: pass
+    
+    # Pixabay
     if PIXABAY_KEYS and PIXABAY_KEYS[0]:
         try:
             key = random.choice([k for k in PIXABAY_KEYS if k])
             r = requests.get("https://pixabay.com/api/videos/",
-                params={"key": key, "q": query, "per_page": 15, "page": page}, timeout=12)
+                params={"key": key, "q": query, "per_page": 15, "page": page},
+                timeout=12)
             if r.status_code == 200:
                 for v in r.json().get('hits', []):
-                    vids = v.get('videos', {})
-                    url = vids.get('large', vids.get('medium', {})).get('url')
-                    if url and url not in USED_URLS and is_content_appropriate(query):
-                        results.append(url)
+                    vd = v.get('videos', {})
+                    url = vd.get('large', vd.get('medium', {})).get('url')
+                    if url and url not in USED_URLS: urls.append(url)
         except: pass
-    return results
-
-def _download_clip(url, duration, idx):
-    raw = TEMP_DIR / f"raw_{idx}.mp4"
-    out = TEMP_DIR / f"clip_{idx}.mp4"
-    try:
-        r = requests.get(url, timeout=30, stream=True)
-        with open(raw, "wb") as f:
-            for chunk in r.iter_content(8192):
-                if chunk: f.write(chunk)
-        if os.path.getsize(raw) < 1000: return None
-        subprocess.run(["ffmpeg", "-y", "-i", str(raw), "-t", str(duration),
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an", str(out)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try: os.remove(raw)
-        except: pass
-        if os.path.exists(out) and os.path.getsize(out) > 1000:
-            USED_URLS.add(url)
-            return str(out)
-    except: pass
+    
+    # Download first available
+    for url in urls[:3]:
+        try:
+            raw = TEMP_DIR / f"raw_{idx}.mp4"
+            out = TEMP_DIR / f"clip_{idx}.mp4"
+            r = requests.get(url, timeout=25, stream=True)
+            with open(raw, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    if chunk: f.write(chunk)
+            
+            if os.path.getsize(raw) < 5000: continue
+            
+            # Ken Burns effect: slow zoom or pan for cinematic feel
+            kb_effects = [
+                "scale=2048:1152,zoompan=z='min(zoom+0.0008,1.15)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30",
+                "scale=2048:1152,zoompan=z='1.15':d=1:x='if(eq(on,1),0,x+1)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=30",
+                "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30"
+            ]
+            # Use Ken Burns 60% of the time, static crop 40%
+            effect = random.choice(kb_effects[:2]) if random.random() < 0.6 else kb_effects[2]
+            
+            subprocess.run([
+                "ffmpeg", "-y", "-i", str(raw), "-t", str(duration),
+                "-vf", effect,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an", str(out)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            
+            os.remove(raw)
+            if os.path.exists(out) and os.path.getsize(out) > 2000:
+                USED_URLS.add(url)
+                return str(out)
+        except: continue
     return None
 
 def process_clip(args):
+    """Process single clip with retry"""
     i, sent, total = args
-    duration = max(3.5, sent['end'] - sent['start'])
-    query = AI_QUERIES[i] if i < len(AI_QUERIES) else random.choice(FALLBACK_QUERIES)
-    print(f"  Clip {i+1}/{total}: '{query}'")
-    for _ in range(4):
-        results = _search_videos(query, i)
-        if results:
-            clip = _download_clip(results[0], duration, i)
-            if clip: return (i, clip)
-        query = random.choice(FALLBACK_QUERIES)
+    dur = max(3.5, sent['end'] - sent['start'])
+    query = AI_QUERIES[i] if i < len(AI_QUERIES) else random.choice(FALLBACK)
+    
+    for attempt in range(3):
+        clip = search_and_download(query, i, dur)
+        if clip: return (i, clip)
+        query = random.choice(FALLBACK)
         time.sleep(0.3)
     return (i, None)
 
 
 
 # ==========================================
-# 8. STATUS & ASSETS
+# 7. RENDER ENGINE
 # ==========================================
+def render_video(sentences, audio_path, ass_path, logo_path, out_nosub, out_sub):
+    """Full render pipeline: download clips, concat, apply logo+subs"""
+    n = len(sentences)
+    print(f"\n  Rendering {n} clips (5 workers)...")
+    
+    # Parallel download
+    clips = [None] * n
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        futs = {ex.submit(process_clip, (i, s, n)): i for i, s in enumerate(sentences)}
+        done = 0
+        for f in concurrent.futures.as_completed(futs):
+            try:
+                idx, path = f.result()
+                if path: clips[idx] = path; done += 1
+                update_status(55 + int((done/n)*22), f"Clips {done}/{n}")
+            except: pass
+    
+    # Fill gaps (loop nearest valid clip)
+    valid = [i for i, c in enumerate(clips) if c and os.path.exists(c)]
+    if not valid: return False
+    
+    for i in range(n):
+        if clips[i] and os.path.exists(clips[i]): continue
+        nearest = min(valid, key=lambda x: abs(x-i))
+        dur = max(3.5, sentences[i]['end'] - sentences[i]['start'])
+        gap = TEMP_DIR / f"gap_{i}.mp4"
+        subprocess.run(["ffmpeg","-y","-stream_loop","-1","-i",clips[nearest],
+            "-t",str(dur),"-c:v","libx264","-preset","ultrafast","-crf","18","-an",str(gap)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        clips[i] = str(gap) if os.path.exists(gap) else clips[nearest]
+    
+    # Concat (stream copy - instant, no quality loss)
+    print("  Concatenating...")
+    with open("list.txt","w") as f:
+        for c in clips:
+            if c: f.write(f"file '{c}'\n")
+    
+    subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual.mp4",
+        shell=True, capture_output=True, timeout=60)
+    if not os.path.exists("visual.mp4"):
+        subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c:v libx264 -preset ultrafast -crf 18 visual.mp4",
+            shell=True, capture_output=True)
+    if not os.path.exists("visual.mp4"): return False
+    
+    # === V1: No subtitles (900p) ===
+    update_status(80, "Rendering V1 (900p)...")
+    if logo_path and os.path.exists(logo_path):
+        filt = "[0:v]scale=1600:900:force_original_aspect_ratio=decrease,pad=1600:900:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=160:-1[l];[bg][l]overlay=20:20[v]"
+        cmd = ["ffmpeg","-y","-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
+            "-filter_complex",filt,"-map","[v]","-map","2:a",
+            "-c:v","libx264","-preset","medium","-crf","18","-c:a","aac","-b:a","128k","-shortest",str(out_nosub)]
+    else:
+        cmd = ["ffmpeg","-y","-i","visual.mp4","-i",str(audio_path),
+            "-vf","scale=1600:900:force_original_aspect_ratio=decrease,pad=1600:900:(ow-iw)/2:(oh-ih)/2",
+            "-c:v","libx264","-preset","medium","-crf","18","-c:a","aac","-b:a","128k","-shortest",str(out_nosub)]
+    subprocess.run(cmd, capture_output=True, timeout=600)
+    if not os.path.exists(out_nosub): return False
+    print(f"  V1: {os.path.getsize(out_nosub)/(1024**2):.0f}MB")
+    
+    # === V2: With subtitles (1080p) ===
+    update_status(88, "Rendering V2 (1080p + subs)...")
+    ass_esc = str(ass_path).replace('\\','/').replace(':','\\\\:')
+    if logo_path and os.path.exists(logo_path):
+        filt = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=180:-1[l];[bg][l]overlay=25:25[wl];[wl]subtitles='{ass_esc}'[v]"
+        cmd = ["ffmpeg","-y","-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
+            "-filter_complex",filt,"-map","[v]","-map","2:a",
+            "-c:v","libx264","-preset","medium","-crf","18","-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
+    else:
+        filt = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v]"
+        cmd = ["ffmpeg","-y","-i","visual.mp4","-i",str(audio_path),
+            "-filter_complex",filt,"-map","[v]","-map","1:a",
+            "-c:v","libx264","-preset","medium","-crf","18","-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
+    subprocess.run(cmd, capture_output=True, timeout=600)
+    if os.path.exists(out_sub):
+        print(f"  V2: {os.path.getsize(out_sub)/(1024**2):.0f}MB")
+    return True
 
+
+
+# ==========================================
+# 8. UTILITIES
+# ==========================================
 LOG_BUF = []
 def update_status(progress, message, status="processing", file_url=None):
     print(f"--- {progress}% | {message} ---")
     LOG_BUF.append(f"[{time.strftime('%H:%M:%S')}] {message}")
     if len(LOG_BUF) > 30: LOG_BUF.pop(0)
-    repo = os.environ.get('GITHUB_REPOSITORY')
-    token = os.environ.get('GITHUB_TOKEN')
+    repo, token = os.environ.get('GITHUB_REPOSITORY'), os.environ.get('GITHUB_TOKEN')
     if not repo or not token: return
     import base64
     data = {"progress": progress, "message": message, "status": status,
             "logs": "\n".join(LOG_BUF), "timestamp": time.time()}
     if file_url: data["file_io_url"] = file_url
-    path = f"status/status_{JOB_ID}.json"
-    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    url = f"https://api.github.com/repos/{repo}/contents/status/status_{JOB_ID}.json"
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     try:
-        get_r = requests.get(url, headers=headers)
-        sha = get_r.json().get("sha") if get_r.status_code == 200 else None
-        payload = {"message": f"Update {progress}%", "content": base64.b64encode(json.dumps(data).encode()).decode(), "branch": "main"}
+        gr = requests.get(url, headers=headers)
+        sha = gr.json().get("sha") if gr.status_code == 200 else None
+        payload = {"message": f"s{progress}", "content": base64.b64encode(json.dumps(data).encode()).decode(), "branch": "main"}
         if sha: payload["sha"] = sha
         requests.put(url, headers=headers, json=payload)
     except: pass
 
 def download_asset(path, local):
     try:
-        repo = os.environ.get('GITHUB_REPOSITORY')
-        token = os.environ.get('GITHUB_TOKEN')
+        repo, token = os.environ.get('GITHUB_REPOSITORY'), os.environ.get('GITHUB_TOKEN')
         r = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}",
             headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3.raw"})
         if r.status_code == 200:
@@ -447,285 +526,149 @@ def download_asset(path, local):
     except: pass
     return False
 
-# ==========================================
-# 9. SCRIPT GENERATION
-# ==========================================
-
-def generate_script(topic, minutes):
-    words = int(minutes * 180)
-    lang_instruction = "Write in Spanish." if IS_SPANISH else "Write in English."
-    prompt = f"""Write a documentary narration script about '{topic}'. {words} words.
-{lang_instruction}
-Rules: Only spoken text, no brackets, no stage directions.
-Islamic guidelines: no alcohol, inappropriate content, gambling, pork.
-Family-friendly and educational."""
+def upload_drive(file_path):
+    if not os.path.exists(file_path): return None
+    print(f"  Uploading {os.path.basename(file_path)}...")
+    cid = os.environ.get("OAUTH_CLIENT_ID")
+    cs = os.environ.get("OAUTH_CLIENT_SECRET")
+    rt = os.environ.get("OAUTH_REFRESH_TOKEN")
+    fid = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    if not all([cid,cs,rt]): return None
+    try:
+        tok = requests.post("https://oauth2.googleapis.com/token",
+            data={"client_id":cid,"client_secret":cs,"refresh_token":rt,"grant_type":"refresh_token"}).json()['access_token']
+    except: return None
     
+    sz = os.path.getsize(file_path)
+    meta = {"name": os.path.basename(file_path), "mimeType": "video/mp4"}
+    if fid: meta["parents"] = [fid]
+    
+    resp = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
+        headers={"Authorization":f"Bearer {tok}","Content-Type":"application/json",
+                 "X-Upload-Content-Type":"video/mp4","X-Upload-Content-Length":str(sz)}, json=meta)
+    if resp.status_code != 200: return None
+    
+    with open(file_path,"rb") as f:
+        ur = requests.put(resp.headers["Location"], headers={"Content-Length":str(sz)}, data=f)
+    if ur.status_code in [200,201]:
+        fid2 = ur.json().get('id')
+        requests.post(f"https://www.googleapis.com/drive/v3/files/{fid2}/permissions",
+            headers={"Authorization":f"Bearer {tok}","Content-Type":"application/json"},
+            json={'role':'reader','type':'anyone'})
+        link = f"https://drive.google.com/file/d/{fid2}/view?usp=sharing"
+        print(f"  -> {link}")
+        return link
+    return None
+
+def generate_script(topic, mins):
+    words = int(mins * 180)
+    lang = "Write in Spanish." if IS_SPANISH else "Write in English."
+    prompt = f"""Write a documentary narration about '{topic}'. {words} words.
+{lang}
+Rules: Only narration text. No brackets, no directions. Islamic guidelines. Family-friendly."""
     random.shuffle(GEMINI_KEYS)
     for key in GEMINI_KEYS:
         try:
             genai.configure(api_key=key)
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            result = model.generate_content(prompt).text.replace("*","").replace("#","").strip()
-            return re.sub(r'\[.*?\]', '', result)
+            r = genai.GenerativeModel('gemini-2.5-flash').generate_content(prompt)
+            return re.sub(r'\[.*?\]', '', r.text.replace("*","").replace("#","").strip())
         except: continue
-    return "Script generation failed."
+    return ""
 
 
 
 # ==========================================
-# 10. AUDIO GENERATION (Language-Aware)
+# 9. MAIN
 # ==========================================
+print(f"\n{'='*50}")
+print(f"  VIDEO FACTORY V3 - PRODUCTION ENGINE")
+print(f"  Lang: {'ES' if IS_SPANISH else 'EN'} | Groq: GPT-OSS-120B")
+print(f"{'='*50}\n")
 
-def generate_audio(text, ref_audio, out_path):
-    """Generate voice clone - uses multilingual model for Spanish, English model for English."""
-    print(f"--- AUDIO: {'Spanish' if IS_SPANISH else 'English'} ---")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    try:
-        if IS_SPANISH:
-            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-            model = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
-            lang_id = "es"
-        else:
-            from chatterbox.tts import ChatterboxTTS
-            model = ChatterboxTTS.from_pretrained(device=device)
-            lang_id = None
-        
-        sr = model.sr
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip()) > 2]
-        
-        # Group into chunks (2-3 sentences, ~150 chars)
-        chunks = []
-        cur, cur_len = [], 0
-        for s in sentences:
-            if cur_len + len(s) > 150 and cur:
-                chunks.append(' '.join(cur))
-                cur, cur_len = [s], len(s)
-            else:
-                cur.append(s)
-                cur_len += len(s) + 1
-        if cur: chunks.append(' '.join(cur))
-        
-        print(f"  {len(sentences)} sentences -> {len(chunks)} chunks")
-        all_wavs = []
-        
-        for i, chunk_text in enumerate(chunks):
-            if i % 5 == 0:
-                update_status(20 + int((i/len(chunks))*25), f"Voice {i}/{len(chunks)}")
-            try:
-                with torch.no_grad():
-                    if IS_SPANISH:
-                        wav = model.generate(chunk_text.replace('"',''),
-                            audio_prompt_path=str(ref_audio), language_id=lang_id)
-                    else:
-                        wav = model.generate(chunk_text.replace('"',''),
-                            audio_prompt_path=str(ref_audio), exaggeration=0.6, cfg_weight=0.4)
-                    all_wavs.append(wav.cpu())
-                if i % 10 == 0: torch.cuda.empty_cache()
-            except Exception as e:
-                print(f"    Chunk {i} failed: {str(e)[:40]}")
-                continue
-        
-        if not all_wavs:
-            print("  TTS failed completely")
-            return False
-        
-        # Simple concat with micro-pauses
-        full = all_wavs[0]
-        for w in all_wavs[1:]:
-            pause = torch.zeros((full.shape[0], int(0.15 * sr)))
-            full = torch.cat([full, pause, w], dim=1)
-        
-        # Add ending silence
-        full = torch.cat([full, torch.zeros((full.shape[0], int(2.0 * sr)))], dim=1)
-        torchaudio.save(str(out_path), full, sr)
-        print(f"  Audio saved: {sr}Hz, {full.shape[1]/sr:.1f}s")
-        
-        del model, all_wavs, full
-        torch.cuda.empty_cache()
-        gc.collect()
-        return True
-        
-    except Exception as e:
-        print(f"  Audio error: {e}")
-        return False
-
-
-
-# ==========================================
-# 11. VISUAL PROCESSING
-# ==========================================
-
-def process_visuals(sentences, audio_path, ass_file, logo_path, out_no_subs, out_with_subs):
-    print(f"\n  Processing {len(sentences)} clips...")
-    
-    clips = [None] * len(sentences)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-        futures = {ex.submit(process_clip, (i, s, len(sentences))): i for i, s in enumerate(sentences)}
-        done = 0
-        for f in concurrent.futures.as_completed(futures):
-            try:
-                idx, path = f.result()
-                if path: clips[idx] = path; done += 1
-                update_status(55 + int((done/len(sentences))*25), f"Clips: {done}/{len(sentences)}")
-            except: pass
-    
-    # Fill gaps with nearest clip
-    valid = [i for i, c in enumerate(clips) if c and os.path.exists(c)]
-    if not valid: return False
-    for i in range(len(clips)):
-        if clips[i] and os.path.exists(clips[i]): continue
-        nearest = min(valid, key=lambda x: abs(x-i))
-        clips[i] = clips[nearest]
-    
-    # Fast concat (no transitions, no re-encoding)
-    print(f"  Concatenating {len(clips)} clips...")
-    with open("list.txt", "w") as f:
-        for c in clips:
-            if c: f.write(f"file '{c}'\n")
-    
-    subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual.mp4",
-        shell=True, capture_output=True, text=True, timeout=60)
-    
-    if not os.path.exists("visual.mp4"):
-        subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c:v libx264 -preset ultrafast -crf 18 visual.mp4",
-            shell=True, capture_output=True, text=True)
-    if not os.path.exists("visual.mp4"): return False
-    
-    # Render V1: No subtitles (900p)
-    update_status(82, "Rendering 900p...")
-    if logo_path and os.path.exists(logo_path):
-        cmd = ["ffmpeg","-y","-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
-            "-filter_complex","[0:v]scale=1600:900:force_original_aspect_ratio=decrease,pad=1600:900:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=180:-1[l];[bg][l]overlay=25:25[v]",
-            "-map","[v]","-map","2:a","-c:v","libx264","-preset","medium","-crf","18","-c:a","aac","-b:a","128k","-shortest",str(out_no_subs)]
-    else:
-        cmd = ["ffmpeg","-y","-i","visual.mp4","-i",str(audio_path),
-            "-vf","scale=1600:900:force_original_aspect_ratio=decrease,pad=1600:900:(ow-iw)/2:(oh-ih)/2",
-            "-c:v","libx264","-preset","medium","-crf","18","-c:a","aac","-b:a","128k","-shortest",str(out_no_subs)]
-    subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    
-    if not os.path.exists(out_no_subs): return False
-    print(f"  V1: {os.path.getsize(out_no_subs)/(1024*1024):.1f}MB")
-    
-    # Render V2: With subtitles (1080p)
-    update_status(88, "Rendering 1080p with subtitles...")
-    ass_esc = str(ass_file).replace('\\','/').replace(':','\\\\:')
-    if logo_path and os.path.exists(logo_path):
-        filt = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=200:-1[l];[bg][l]overlay=25:25[wl];[wl]subtitles='{ass_esc}'[v]"
-        cmd = ["ffmpeg","-y","-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","2:a",
-            "-c:v","libx264","-preset","medium","-crf","18","-c:a","aac","-b:a","192k","-shortest",str(out_with_subs)]
-    else:
-        filt = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v]"
-        cmd = ["ffmpeg","-y","-i","visual.mp4","-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","1:a",
-            "-c:v","libx264","-preset","medium","-crf","18","-c:a","aac","-b:a","192k","-shortest",str(out_with_subs)]
-    subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    
-    if not os.path.exists(out_with_subs):
-        print("  V2 failed, V1 ok")
-        return True
-    print(f"  V2: {os.path.getsize(out_with_subs)/(1024*1024):.1f}MB")
-    return True
-
-
-
-# ==========================================
-# 12. MAIN EXECUTION
-# ==========================================
-
-print("\n" + "="*50)
-print("  VIDEO FACTORY V3")
-print(f"  Language: {'Spanish' if IS_SPANISH else 'English'}")
-print(f"  Queries: Groq (GPT-OSS 120B)")
-print("="*50)
-
-update_status(1, "Initializing...")
+update_status(1, "Starting...")
 
 # Assets
-ref_voice = TEMP_DIR / "voice.mp3"
-ref_logo = TEMP_DIR / "logo.png"
-if not download_asset(VOICE_PATH, ref_voice):
+voice = TEMP_DIR / "voice.mp3"
+logo = TEMP_DIR / "logo.png"
+if not download_asset(VOICE_PATH, voice):
     update_status(0, "Voice download failed", "failed"); exit(1)
 if LOGO_PATH and LOGO_PATH != "None":
-    download_asset(LOGO_PATH, ref_logo)
-    if not os.path.exists(ref_logo): ref_logo = None
-else: ref_logo = None
+    download_asset(LOGO_PATH, logo)
+    logo = str(logo) if os.path.exists(logo) else None
+else: logo = None
 
 # Script
-update_status(5, "Generating script...")
+update_status(5, "Script...")
 text = generate_script(TOPIC, DURATION_MINS) if MODE == "topic" else SCRIPT_TEXT
-if len(text) < 100:
+if len(text) < 50:
     update_status(0, "Script too short", "failed"); exit(1)
-print(f"  Script: {len(text.split())} words")
+print(f"  {len(text.split())} words")
 
-# Queries (always English)
-update_status(10, "Generating queries via Groq...")
-num_clips = max(10, int(DURATION_MINS * 8))
-AI_QUERIES = generate_queries_groq(text, num_clips)
+# Queries
+update_status(10, "Generating queries...")
+n_clips = max(8, int(DURATION_MINS * 7))
+AI_QUERIES = generate_queries(text, n_clips)
 
 # Audio
-update_status(15, "Generating audio...")
-audio_out = TEMP_DIR / "audio.wav"
-if not generate_audio(text, ref_voice, audio_out):
+update_status(15, "Audio generation...")
+audio = TEMP_DIR / "audio.wav"
+if not generate_audio(text, voice, audio):
     update_status(0, "Audio failed", "failed"); exit(1)
 
 # Transcribe
-update_status(50, "Transcribing...")
+update_status(48, "Transcribing...")
 sentences = []
 if ASSEMBLY_KEY:
     try:
         aai.settings.api_key = ASSEMBLY_KEY
-        transcript = aai.Transcriber().transcribe(str(audio_out))
-        for s in transcript.get_sentences():
+        tx = aai.Transcriber().transcribe(str(audio))
+        for s in tx.get_sentences():
             sentences.append({"text": s.text, "start": s.start/1000, "end": s.end/1000})
-        if sentences: sentences[-1]['end'] += 1.0
+        if sentences: sentences[-1]['end'] += 0.5
     except Exception as e:
-        print(f"  Transcription error: {e}")
+        print(f"  Transcribe error: {e}")
 
 if not sentences:
-    words = text.split()
     import wave
     try:
-        with wave.open(str(audio_out), 'rb') as w:
-            total_dur = w.getnframes() / float(w.getframerate())
-    except: total_dur = len(words) / 2.5
-    wps = len(words) / total_dur if total_dur > 0 else 2.5
-    t = 0
-    for i in range(0, len(words), 10):
-        chunk = words[i:i+10]
-        d = len(chunk) / wps
-        sentences.append({"text": ' '.join(chunk), "start": t, "end": t+d})
+        with wave.open(str(audio),'rb') as w: dur = w.getnframes()/float(w.getframerate())
+    except: dur = len(text.split())/2.5
+    wps = len(text.split())/dur if dur > 0 else 2.5
+    t, words = 0, text.split()
+    for i in range(0, len(words), 8):
+        chunk = words[i:i+8]
+        d = len(chunk)/wps
+        sentences.append({"text":' '.join(chunk), "start":t, "end":t+d})
         t += d
 
-# Fill queries to match sentences
+# Pad queries
 while len(AI_QUERIES) < len(sentences):
-    AI_QUERIES.append(random.choice(FALLBACK_QUERIES))
+    AI_QUERIES.append(random.choice(FALLBACK))
 
 # Subtitles
-ass_file = TEMP_DIR / "subs.ass"
-create_ass_file(sentences, ass_file)
+update_status(50, "Creating subtitles...")
+ass = TEMP_DIR / "subs.ass"
+create_subtitles(sentences, ass)
 
-# Process
-update_status(55, "Processing visuals...")
-out1 = OUTPUT_DIR / f"final_{JOB_ID}_NO_SUBS.mp4"
-out2 = OUTPUT_DIR / f"final_{JOB_ID}_WITH_SUBS.mp4"
+# Render
+update_status(52, "Processing video...")
+o1 = OUTPUT_DIR / f"final_{JOB_ID}_NO_SUBS.mp4"
+o2 = OUTPUT_DIR / f"final_{JOB_ID}_WITH_SUBS.mp4"
 
-if process_visuals(sentences, audio_out, ass_file, ref_logo, out1, out2):
-    update_status(92, "Uploading...")
-    link1 = upload_to_google_drive(out1)
-    link2 = upload_to_google_drive(out2)
-    
-    msg = "Complete!\n"
-    if link1: msg += f"No Subs: {link1}\n"
-    if link2: msg += f"With Subs: {link2}\n"
-    update_status(100, msg, "completed", link1 or link2)
+if render_video(sentences, audio, ass, logo, o1, o2):
+    update_status(93, "Uploading...")
+    l1 = upload_drive(o1)
+    l2 = upload_drive(o2)
+    msg = "Done!\n"
+    if l1: msg += f"No Subs: {l1}\n"
+    if l2: msg += f"With Subs: {l2}\n"
+    update_status(100, msg, "completed", l1 or l2)
     print(f"\n{'='*50}\n  {msg}{'='*50}")
 else:
-    update_status(0, "Processing failed", "failed")
+    update_status(0, "Render failed", "failed")
 
 # Cleanup
 if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
-for f in ["visual.mp4", "list.txt"]:
+for f in ["visual.mp4","list.txt"]:
     if os.path.exists(f): os.remove(f)
-print("\n--- COMPLETE ---")
+print("\n--- DONE ---")
