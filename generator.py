@@ -18,26 +18,21 @@ from pathlib import Path
 # ==========================================
 print("--- Installing Dependencies ---")
 
-# Core deps first (fast, no conflicts)
+# Core deps (fast, safe)
 subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
     "groq", "assemblyai", "google-generativeai", "requests",
     "pydub", "numpy", "pillow", "librosa", "scipy"
 ])
 
-# TTS engine
+# TTS engine (needs torch>=2.6 which is already on Kaggle GPU image)
 subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
     "chatterbox-tts"
 ])
 
-# Resemble Enhance (try with deepspeed, fallback without)
-try:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
-        "deepspeed", "resemble-enhance"
-    ])
-except:
-    # deepspeed may fail on some envs - install enhance without it
-    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-        "--no-deps", "resemble-enhance"], capture_output=True)
+# Resemble Enhance - install WITHOUT deps to avoid torch version conflicts
+# It will use the torch already installed by chatterbox
+subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+    "--no-deps", "resemble-enhance"], capture_output=True)
 
 subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True, capture_output=True)
 
@@ -331,6 +326,11 @@ def generate_audio(text, ref_audio, out_path):
     # --- RESEMBLE ENHANCE ---
     print("  Enhancing audio...")
     try:
+        # Mock deepspeed to prevent import error inside resemble-enhance
+        import types
+        ds_mock = types.ModuleType('deepspeed')
+        sys.modules['deepspeed'] = ds_mock
+        
         from resemble_enhance.enhancer.inference import enhance as re_enhance
         dwav, osr = torchaudio.load(str(raw_path))
         chunk_s = 25 * osr; parts = []; esr = 44100
