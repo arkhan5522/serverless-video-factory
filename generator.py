@@ -17,11 +17,28 @@ from pathlib import Path
 # 1. INSTALLATION
 # ==========================================
 print("--- Installing Dependencies ---")
-subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-    "groq", "chatterbox-tts", "assemblyai", "google-generativeai",
-    "transformers", "sentencepiece", "requests", "pydub", "numpy", "pillow",
-    "deepspeed", "resemble-enhance", "librosa", "scipy"
-], capture_output=True)
+
+# Core deps first (fast, no conflicts)
+subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+    "groq", "assemblyai", "google-generativeai", "requests",
+    "pydub", "numpy", "pillow", "librosa", "scipy"
+])
+
+# TTS engine
+subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+    "chatterbox-tts"
+])
+
+# Resemble Enhance (try with deepspeed, fallback without)
+try:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+        "deepspeed", "resemble-enhance"
+    ])
+except:
+    # deepspeed may fail on some envs - install enhance without it
+    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+        "--no-deps", "resemble-enhance"], capture_output=True)
+
 subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True, capture_output=True)
 
 import torch, torchaudio
