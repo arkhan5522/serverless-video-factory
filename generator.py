@@ -26,9 +26,8 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 
 # TTS engine (needs torch>=2.6 which is already on Kaggle GPU image)
 subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
-    "chatterbox-tts"
+    "git+https://github.com/resemble-ai/chatterbox.git"
 ])
-!pip install git+https://github.com/resemble-ai/chatterbox.git
 # Resemble Enhance - install WITHOUT deps to avoid torch version conflicts
 subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
     "--no-deps", "resemble-enhance"], capture_output=True)
