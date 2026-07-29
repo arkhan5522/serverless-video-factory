@@ -30,9 +30,10 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 ])
 
 # Resemble Enhance - install WITHOUT deps to avoid torch version conflicts
-# It will use the torch already installed by chatterbox
 subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
     "--no-deps", "resemble-enhance"], capture_output=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+    "librosa", "scipy", "soundfile"], capture_output=True)
 
 subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True, capture_output=True)
 
@@ -326,23 +327,42 @@ def generate_audio(text, ref_audio, out_path):
     # --- RESEMBLE ENHANCE ---
     print("  Enhancing audio...")
     try:
-        # Mock deepspeed to prevent import error inside resemble-enhance
-        import types
-        ds_mock = types.ModuleType('deepspeed')
-        sys.modules['deepspeed'] = ds_mock
+        from unittest.mock import MagicMock
+        # Mock every deepspeed submodule that resemble_enhance imports
+        mock_names = [
+            'deepspeed', 'deepspeed.accelerator', 'deepspeed.runtime',
+            'deepspeed.runtime.engine', 'deepspeed.runtime.config',
+            'deepspeed.runtime.utils', 'deepspeed.utils',
+            'deepspeed.ops', 'deepspeed.ops.adam', 'deepspeed.comm',
+        ]
+        for name in mock_names:
+            sys.modules[name] = MagicMock()
+        sys.modules['deepspeed.accelerator'].get_accelerator = MagicMock()
+        sys.modules['deepspeed.runtime.engine'].DeepSpeedEngine = MagicMock()
+        sys.modules['deepspeed.runtime.utils'].clip_grad_norm_ = MagicMock()
         
         from resemble_enhance.enhancer.inference import enhance as re_enhance
         dwav, osr = torchaudio.load(str(raw_path))
-        chunk_s = 25 * osr; parts = []; esr = 44100
-        for i in range(0, dwav.shape[1], chunk_s):
+        if dwav.shape[0] > 1:
+            dwav = dwav.mean(dim=0, keepdim=True)
+        
+        chunk_s = 20 * osr; parts = []; esr = 44100
+        total = dwav.shape[1]
+        n_chunks = (total + chunk_s - 1) // chunk_s
+        print(f"  Processing {n_chunks} chunks...")
+        
+        for i in range(0, total, chunk_s):
             chunk = dwav[:, i:i+chunk_s]
             try:
-                hw, esr = re_enhance(dwav=chunk, sr=osr, device=device, lambd=0.6)
-                parts.append(hw.cpu())
-            except:
+                hw, esr = re_enhance(dwav=chunk.squeeze(0), sr=osr, device=device, lambd=0.6)
+                parts.append(hw.cpu().unsqueeze(0))
+                print(f"    Chunk {i//chunk_s+1}/{n_chunks}: OK ({esr}Hz)")
+            except Exception as e:
+                print(f"    Chunk {i//chunk_s+1}/{n_chunks}: fallback ({str(e)[:40]})")
                 parts.append(torchaudio.transforms.Resample(osr, 44100)(chunk).cpu())
                 esr = 44100
             torch.cuda.empty_cache()
+        
         final = torch.cat(parts, dim=1)
         torchaudio.save(str(out_path), final, esr)
         print(f"  Enhanced: {esr}Hz, {final.shape[1]/esr:.1f}s")
