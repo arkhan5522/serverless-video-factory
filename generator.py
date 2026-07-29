@@ -297,7 +297,14 @@ def generate_audio(text, ref_audio, out_path):
     try:
         if IS_SPANISH:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-            model = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
+            try:
+                # Newer chatterbox versions support t3_model="v3" (better quality).
+                model = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
+            except TypeError:
+                # Installed pip version (e.g. 0.1.7) doesn't have this kwarg yet
+                # (only on GitHub main / HF docs as of this writing). Fall back.
+                print("  chatterbox-tts: t3_model kwarg unsupported by installed version, using default checkpoint")
+                model = ChatterboxMultilingualTTS.from_pretrained(device=device)
         else:
             from chatterbox.tts import ChatterboxTTS
             model = ChatterboxTTS.from_pretrained(device=device)
