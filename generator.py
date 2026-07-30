@@ -16,7 +16,7 @@ import os, subprocess, sys, re, time, random, shutil, json
 # option instead of shuffling. os.urandom pulls from the OS entropy pool
 # directly, bypassing whatever default seeding Python did on interpreter start.
 random.seed(int.from_bytes(os.urandom(8), "big") ^ int(time.time() * 1000))
-import concurrent.futures, requests, gc
+import concurrent.futures, requests, gc, threading
 from pathlib import Path
 
 # ==========================================
@@ -190,7 +190,7 @@ RULES:
                     {"role": "user", "content": f"Match each sentence to a video search query:\n\n{numbered}"}
                 ],
                 model="openai/gpt-oss-120b",
-                max_tokens=2000,
+                max_tokens=4000,
                 temperature=0.5
             )
 
@@ -203,6 +203,7 @@ RULES:
             # sentence. That was the root cause of Spanish (and other
             # long-sentence scripts) queries ending up mismatched with
             # their actual sentence content.
+            parsed_count = 0
             for line in result.strip().split('\n'):
                 line = line.strip()
                 mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
@@ -219,6 +220,18 @@ RULES:
                 cleaned = m.group(2).strip().strip('"\'')
                 if 3 < len(cleaned) < 60 and _safe(cleaned) and 0 <= local_idx < len(batch):
                     all_queries[batch_start + local_idx] = cleaned
+                    parsed_count += 1
+
+            # Diagnostic: if we parsed far fewer queries than sentences in
+            # this batch, something is wrong with the model's output format
+            # (e.g. it ignored the numbering instruction, wrapped in
+            # markdown, or refused part of the request) - previously this
+            # failed completely silently, with sentences just quietly
+            # defaulting to random FALLBACK queries with zero explanation.
+            if parsed_count < len(batch) * 0.5:
+                print(f"  WARNING: batch {batch_start}-{batch_start+len(batch)} only parsed "
+                      f"{parsed_count}/{len(batch)} queries. Raw model output (first 300 chars):")
+                print(f"    {result[:300]!r}")
 
         except Exception as e:
             print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
@@ -898,7 +911,26 @@ def generate_audio(text, ref_audio, out_path):
 # ==========================================
 # 6. VIDEO ENGINE (GPU-Accelerated)
 # ==========================================
-def verify_clip_matches_query(frame_path, query):
+# Shared rate limiter for Groq vision calls across all worker threads.
+# 5 concurrent workers all hitting the vision endpoint at once was causing
+# a 429 storm where most calls failed and silently "failed open" (accepted
+# the clip unverified) - defeating the point of verification for a large
+# fraction of clips. This enforces a global minimum gap between requests
+# regardless of how many threads are calling concurrently.
+_vision_rate_lock = threading.Lock()
+_vision_last_call = [0.0]
+_VISION_MIN_INTERVAL = 2.2  # seconds between vision calls, tuned to Groq's free-tier rate limit
+
+def _throttle_vision_call():
+    with _vision_rate_lock:
+        now = time.time()
+        wait = _VISION_MIN_INTERVAL - (now - _vision_last_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _vision_last_call[0] = time.time()
+
+
+def verify_clip_matches_query(frame_path, query, max_retries=2):
     """
     Ask a vision-capable model (Groq's qwen/qwen3.6-27b) whether the given
     frame actually matches the intended search query. This is the real fix
@@ -908,9 +940,8 @@ def verify_clip_matches_query(frame_path, query):
     what it was searched for.
 
     Returns True if it matches well enough to use, False otherwise.
-    Fails open (returns True) on any error/timeout, so a verification
-    hiccup never blocks the whole pipeline - it's a quality filter, not a
-    hard gate.
+    Retries on rate limits (429) with backoff before giving up and failing
+    open - a single rate-limit hit no longer silently skips verification.
     """
     if not GROQ_KEY:
         return True
@@ -918,30 +949,49 @@ def verify_clip_matches_query(frame_path, query):
         import base64
         with open(frame_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode('utf-8')
+    except Exception as e:
+        print(f"    Visual verification skipped (frame read error: {str(e)[:60]}), accepting clip")
+        return True
 
-        from groq import Groq
-        client = Groq(api_key=GROQ_KEY)
-        r = client.chat.completions.create(
-            model="qwen/qwen3.6-27b",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"""Does this image visually match the concept: "{query}"?
+    from groq import Groq
+    client = Groq(api_key=GROQ_KEY)
+
+    for attempt in range(max_retries + 1):
+        _throttle_vision_call()
+        try:
+            r = client.chat.completions.create(
+                model="qwen/qwen3.6-27b",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"""Does this image visually match the concept: "{query}"?
 
 Answer with ONLY one word: YES or NO.
 Answer YES if the image reasonably represents the concept (even loosely/thematically - it doesn't need to be a perfect literal match, stock footage rarely is).
 Answer NO only if the image is clearly unrelated or would look out of place/confusing next to narration about "{query}"."""},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]
-            }],
-            temperature=0.2,
-            max_completion_tokens=10,
-        )
-        answer = r.choices[0].message.content.strip().upper()
-        return "YES" in answer
-    except Exception as e:
-        print(f"    Visual verification skipped ({str(e)[:60]}), accepting clip")
-        return True
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                    ]
+                }],
+                temperature=0.2,
+                max_completion_tokens=10,
+            )
+            answer = r.choices[0].message.content.strip().upper()
+            return "YES" in answer
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "rate limit" in err_str.lower():
+                if attempt < max_retries:
+                    backoff = 3.0 * (attempt + 1)
+                    print(f"    Vision rate limited, retrying in {backoff:.0f}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(backoff)
+                    continue
+                else:
+                    print(f"    Vision verification: rate limit persisted after {max_retries} retries, accepting clip unverified")
+                    return True
+            else:
+                print(f"    Visual verification skipped ({err_str[:60]}), accepting clip")
+                return True
+    return True
 
 
 def _extract_check_frame(video_path, frame_path):
