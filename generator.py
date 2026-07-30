@@ -99,6 +99,14 @@ IS_SPANISH = LANGUAGE.lower().strip() in ["spanish","es","espanol"]
 USED_URLS = set()
 AI_QUERIES = []
 
+# Shorts count by long-video duration: 15min->5, 10min->3, 5min->2
+def get_shorts_count(mins):
+    if mins >= 13: return 5
+    if mins >= 8: return 3
+    return 2
+SHORTS_COUNT = get_shorts_count(DURATION_MINS)
+SHORT_DUR_TARGET = 60  # seconds, target length per short
+
 
 
 # ==========================================
@@ -106,25 +114,34 @@ AI_QUERIES = []
 # ==========================================
 def generate_queries_for_sentences(sentences):
     """
-    Send ALL sentences to Groq, get back a JSON mapping each sentence to its ideal visual.
-    This is the key to submagic-level sync: every visual matches what's being said RIGHT NOW.
+    Send ALL sentences to Groq, get back a mapping of each sentence to its
+    ideal visual search query. Batches into chunks of ~40 sentences per call
+    so long scripts (especially Spanish, which tends to run more characters
+    per sentence than English) never get silently truncated and dropped -
+    that was previously causing queries to desync from sentences.
     """
     if not GROQ_KEY or not sentences:
         return [random.choice(FALLBACK) for _ in sentences]
-    
+
     n = len(sentences)
     print(f"  Groq: matching {n} sentences to visuals...")
-    
-    try:
-        from groq import Groq
-        client = Groq(api_key=GROQ_KEY)
-        
-        # Format sentences as numbered list
-        numbered = "\n".join([f"{i+1}. {s['text'][:100]}" for i, s in enumerate(sentences)])
-        
-        r = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": """You are a professional video editor. For each numbered sentence from a script, you must provide the PERFECT stock footage search query that visually represents what is being said.
+
+    from groq import Groq
+    client = Groq(api_key=GROQ_KEY)
+
+    BATCH_SIZE = 40
+    all_queries = [None] * n
+
+    for batch_start in range(0, n, BATCH_SIZE):
+        batch = sentences[batch_start:batch_start + BATCH_SIZE]
+        # Numbered locally within the batch (1..len(batch)) - offset back to
+        # global index when parsing, so per-batch parsing stays simple.
+        numbered = "\n".join([f"{i+1}. {s['text'][:100]}" for i, s in enumerate(batch)])
+
+        try:
+            r = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": """You are a professional video editor. For each numbered sentence from a script, you must provide the PERFECT stock footage search query that visually represents what is being said.
 
 RULES:
 - Each query must be in ENGLISH (even if script is in another language)
@@ -136,33 +153,42 @@ RULES:
   * "Ancient civilizations built pyramids" -> "egyptian pyramids aerial sunset"
 - NEVER default to generic nature unless the sentence is ABOUT nature
 - NO people/faces/bodies, NO religion, NO violence, NO NSFW
-- Return ONLY the queries, one per line, numbered to match"""},
-                {"role": "user", "content": f"Match each sentence to a video search query:\n\n{numbered[:7000]}"}
-            ],
-            model="openai/gpt-oss-120b",
-            max_tokens=2500,
-            temperature=0.5
-        )
-        
-        result = r.choices[0].message.content
-        queries = []
-        
-        for line in result.strip().split('\n'):
-            cleaned = re.sub(r'^[\d\.\)\-\*]+\s*', '', line).strip().strip('"\'')
-            if 3 < len(cleaned) < 60 and _safe(cleaned):
-                queries.append(cleaned)
-        
-        # Show matching for debug
-        for i in range(min(3, len(queries), len(sentences))):
-            print(f"    [{i+1}] '{sentences[i]['text'][:35]}...' -> '{queries[i]}'")
-        
-        while len(queries) < n:
-            queries.append(random.choice(FALLBACK))
-        return queries[:n]
-        
-    except Exception as e:
-        print(f"  Groq error: {e}")
-        return [random.choice(FALLBACK) for _ in sentences]
+- Return ONLY the queries, one per line, numbered to match (same numbers you were given)"""},
+                    {"role": "user", "content": f"Match each sentence to a video search query:\n\n{numbered}"}
+                ],
+                model="openai/gpt-oss-120b",
+                max_tokens=2000,
+                temperature=0.5
+            )
+
+            result = r.choices[0].message.content
+            # Parse by EXPLICIT leading index (e.g. "1. some query" -> index 0),
+            # not by line order. This prevents misalignment: if Groq skips a
+            # number, returns a blank/rejected line, or the model merges two
+            # lines, sequential-order parsing would silently shift every
+            # subsequent query onto the WRONG sentence. That was the root
+            # cause of Spanish (and other long-sentence scripts) queries
+            # ending up mismatched with their actual sentence content.
+            for line in result.strip().split('\n'):
+                m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line.strip())
+                if not m:
+                    continue
+                local_idx = int(m.group(1)) - 1
+                cleaned = m.group(2).strip().strip('"\'')
+                if 3 < len(cleaned) < 60 and _safe(cleaned) and 0 <= local_idx < len(batch):
+                    all_queries[batch_start + local_idx] = cleaned
+
+        except Exception as e:
+            print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
+            # leave this batch's entries as None -> filled by fallback below
+
+    queries = [q if q else random.choice(FALLBACK) for q in all_queries]
+
+    # Show matching for debug
+    for i in range(min(3, len(queries), len(sentences))):
+        print(f"    [{i+1}] '{sentences[i]['text'][:35]}...' -> '{queries[i]}'")
+
+    return queries
 
 FALLBACK = [
     "technology data center servers", "futuristic city aerial night",
@@ -181,6 +207,105 @@ def _safe(q):
            'gun','weapon','war','blood','violence','kill','alcohol',
            'drug','gambling','pork','lgbtq','person','people','crowd']
     return not any(t in q.lower() for t in bad)
+
+
+
+# ==========================================
+# 3B. AI SHORT-CUTTING (Groq oss-120b picks best 1-min hook moments)
+# ==========================================
+def select_short_segments(sentences, n_shorts, target_seconds=60):
+    """
+    Ask oss-120b to pick the N most engaging/hook-worthy ~60s windows from
+    anywhere in the full sentence list (not sequential chunks - best moments,
+    can skip filler and overlap thematically). Returns a list of dicts:
+    {"start_idx":int, "end_idx":int, "reason":str} (inclusive sentence indices).
+    Falls back to evenly-spaced windows if Groq is unavailable or output is malformed.
+    """
+    def _fallback_windows():
+        # Evenly space fallback windows across the script, sized by duration
+        windows = []
+        total_dur = sentences[-1]['end'] if sentences else 0
+        if total_dur <= 0:
+            return windows
+        step = total_dur / (n_shorts + 1)
+        for k in range(n_shorts):
+            center = step * (k + 1)
+            lo, hi = center - target_seconds/2, center + target_seconds/2
+            s_idx = next((i for i,s in enumerate(sentences) if s['end'] >= lo), 0)
+            e_idx = next((i for i,s in enumerate(sentences) if s['start'] >= hi), len(sentences)-1)
+            e_idx = max(e_idx, s_idx)
+            windows.append({"start_idx": s_idx, "end_idx": e_idx, "reason": "evenly-spaced fallback"})
+        return windows
+
+    if not GROQ_KEY or not sentences:
+        return _fallback_windows()
+
+    print(f"  Groq: selecting {n_shorts} best ~{target_seconds}s hook moments from {len(sentences)} sentences...")
+    try:
+        from groq import Groq
+        client = Groq(api_key=GROQ_KEY)
+
+        numbered = "\n".join([
+            f"{i} [{s['start']:.1f}s-{s['end']:.1f}s]: {s['text'][:140]}"
+            for i, s in enumerate(sentences)
+        ])
+
+        r = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": f"""You are an expert short-form video editor (TikTok/Reels/Shorts).
+You will be given a numbered list of sentences from a long-form narration script, each with its timestamp.
+
+Your job: pick the {n_shorts} BEST standalone moments to turn into ~{target_seconds}-second short videos.
+
+RULES:
+- Pick moments ANYWHERE in the script - do NOT just chunk it sequentially. Prioritize hooks, surprising facts, emotional peaks, cliffhangers, or strong claims - whatever would make someone stop scrolling.
+- Each selected window's total duration (end timestamp - start timestamp) should be close to {target_seconds} seconds (between {int(target_seconds*0.7)}s and {int(target_seconds*1.3)}s).
+- Each window must be a CONTINUOUS range of sentence indices (start_idx to end_idx inclusive) - do not skip sentences within a single short.
+- Windows for different shorts MAY overlap or reuse similar sentences if that content is strong enough to work twice, but prefer variety across the {n_shorts} shorts when possible.
+- Each window must make sense on its own without needing earlier context (avoid starting mid-thought on a pronoun like "it" or "this" referring to something far earlier).
+- Return ONLY a JSON array, nothing else. No markdown, no explanation outside the JSON.
+
+Format exactly like this:
+[{{"start_idx": 4, "end_idx": 9, "reason": "strong opening claim + payoff"}}, {{"start_idx": 22, "end_idx": 27, "reason": "surprising statistic"}}]"""},
+                {"role": "user", "content": f"Sentences:\n\n{numbered[:12000]}\n\nPick the {n_shorts} best windows as JSON."}
+            ],
+            model="openai/gpt-oss-120b",
+            max_tokens=1500,
+            temperature=0.6
+        )
+
+        raw = r.choices[0].message.content.strip()
+        # Strip potential markdown fences
+        raw = re.sub(r'^```json\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE).strip()
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not match:
+            print("  Groq short-selection: no JSON array found, using fallback windows")
+            return _fallback_windows()
+
+        picks = json.loads(match.group(0))
+        windows = []
+        for p in picks:
+            s_idx = int(p.get("start_idx", -1))
+            e_idx = int(p.get("end_idx", -1))
+            if 0 <= s_idx <= e_idx < len(sentences):
+                windows.append({"start_idx": s_idx, "end_idx": e_idx, "reason": p.get("reason","")})
+
+        if not windows:
+            print("  Groq short-selection: parsed JSON had no valid windows, using fallback")
+            return _fallback_windows()
+
+        for w in windows[:n_shorts]:
+            dur = sentences[w['end_idx']]['end'] - sentences[w['start_idx']]['start']
+            print(f"    Short: sentences {w['start_idx']}-{w['end_idx']} (~{dur:.0f}s) - {w['reason'][:50]}")
+
+        while len(windows) < n_shorts:
+            windows.append(random.choice(_fallback_windows() or [{"start_idx":0,"end_idx":min(5,len(sentences)-1),"reason":"padding fallback"}]))
+
+        return windows[:n_shorts]
+
+    except Exception as e:
+        print(f"  Groq short-selection error: {e}")
+        return _fallback_windows()
 
 
 
@@ -205,23 +330,45 @@ SUBTITLE_STYLES = {
         "border":1,"outline":4,"shadow":3,"margin":48,"spacing":1},
 }
 
-def create_subtitles(sentences, ass_path, word_data=None):
+# Short-specific vertical styles (1080x1920 canvas). Bigger fonts than
+# landscape presets since viewers are closer to phone screens, and a much
+# larger MarginV to clear TikTok/Reels/YouTube Shorts UI (caption, like/
+# share buttons, progress bar) which occupies the bottom ~20-25% of frame.
+SHORT_SUBTITLE_STYLES = {
+    "short_punch": {"name":"Short Punch","font":"Arial Black","size":78,"bold":-1,
+        "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&H00000000",
+        "border":1,"outline":6,"shadow":3,"margin":480,"spacing":1},
+    "short_neon": {"name":"Short Neon","font":"Arial Black","size":82,"bold":-1,
+        "primary":"&H0000FFFF","outline_c":"&H00330033","back":"&H00000000",
+        "border":1,"outline":6,"shadow":4,"margin":480,"spacing":1.2},
+    "short_clean": {"name":"Short Clean","font":"Arial","size":74,"bold":-1,
+        "primary":"&H00FFFFFF","outline_c":"&H00111111","back":"&H80000000",
+        "border":3,"outline":0,"shadow":0,"margin":460,"spacing":0.6},
+}
+
+def create_subtitles(sentences, ass_path, word_data=None, style_key=None,
+                      style_set=None, play_res=(1920,1080), max_chars=46):
     """
     Word-level highlighted subtitles (like Submagic/Captions.ai).
     If word_data is provided, each word lights up as it's spoken.
     Falls back to sentence-level if no word data.
+
+    style_set: dict of style presets to choose from (defaults to landscape SUBTITLE_STYLES)
+    play_res: (width, height) of the ASS canvas - must match final video resolution
+    max_chars: character budget per 2-line chunk - tune per play_res/font size
     """
-    key = random.choice(list(SUBTITLE_STYLES.keys()))
-    s = SUBTITLE_STYLES[key]
-    print(f"  Subtitle: {s['name']} {'(word-highlight)' if word_data else '(sentence)'}")
+    style_set = style_set or SUBTITLE_STYLES
+    key = style_key or random.choice(list(style_set.keys()))
+    s = style_set[key]
+    print(f"  Subtitle: {s['name']} {'(word-highlight)' if word_data else '(sentence)'} @ {play_res[0]}x{play_res[1]}")
     
     # Highlight color (the word currently being spoken)
     highlight = "&H0000FFFF"  # Yellow highlight
     if "cyan" in key: highlight = "&H0000FF00"  # Green for cyan style
-    if "yellow" in key: highlight = "&H00FFFFFF"  # White for yellow style
+    if "yellow" in key or "neon" in key: highlight = "&H00FFFFFF"  # White for yellow/neon styles
     
     with open(ass_path, "w", encoding="utf-8-sig") as f:
-        f.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n")
+        f.write(f"[Script Info]\nScriptType: v4.00+\nPlayResX: {play_res[0]}\nPlayResY: {play_res[1]}\n")
         f.write("WrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\n")
         f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
                 "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
@@ -237,7 +384,7 @@ def create_subtitles(sentences, ass_path, word_data=None):
             # Word-level highlighting: group words into display chunks by
             # character budget (not raw word count), so a chunk of short
             # words can hold more words than a chunk of long words.
-            MAX_CHARS_PER_CHUNK = 46   # total chars across both lines, tune per font/size
+            MAX_CHARS_PER_CHUNK = max_chars   # total chars across both lines, tune per font/size/canvas
             MAX_WORDS_PER_CHUNK = 14   # hard ceiling so very short words can't run away
 
             chunks = []
@@ -252,7 +399,7 @@ def create_subtitles(sentences, ass_path, word_data=None):
             if buf:
                 chunks.append(buf)
 
-            for chunk_words in chunks:
+            for c_idx, chunk_words in enumerate(chunks):
                 if not chunk_words: continue
 
                 # Balance the 2-line split by character length, not word count,
@@ -265,10 +412,22 @@ def create_subtitles(sentences, ass_path, word_data=None):
                         split_idx = j
                         break
 
-                # For each word in chunk, create a dialogue line where THAT word is highlighted
+                # For each word in chunk, create a dialogue line where THAT word is highlighted.
+                # IMPORTANT: extend each word's display End to the START of the next word
+                # (or, for the last word in the chunk, to the first word of the NEXT chunk
+                # if one exists - otherwise its own end). Word-level ASR timestamps often
+                # have small gaps between word['end'] and the next word['start']
+                # (pauses/breaths) - using word['end'] directly as the Dialogue End causes
+                # the subtitle to go blank during those gaps, both within and between chunks.
+                is_last_chunk = (c_idx == len(chunks) - 1)
+                next_chunk_start = chunks[c_idx+1][0]['start'] if not is_last_chunk else chunk_words[-1]['end']
                 for w_idx, word in enumerate(chunk_words):
                     w_start = _fmt(word['start'])
-                    w_end = _fmt(word['end'])
+                    if w_idx + 1 < len(chunk_words):
+                        next_start = chunk_words[w_idx+1]['start']
+                    else:
+                        next_start = next_chunk_start
+                    w_end = _fmt(next_start)
 
                     p1, p2 = [], []
                     for j, cw in enumerate(chunk_words):
@@ -279,9 +438,12 @@ def create_subtitles(sentences, ass_path, word_data=None):
                     line = ' '.join(p1) + "\\N" + ' '.join(p2) if p2 else ' '.join(p1)
                     f.write(f"Dialogue: 0,{w_start},{w_end},Default,,0,0,0,,{line}\n")
         else:
-            # Sentence-level fallback - split into 2 lines balanced by character length
-            for sent in sentences:
-                t1 = _fmt(sent['start']); t2 = _fmt(sent['end'])
+            # Sentence-level fallback - split into 2 lines balanced by character length.
+            # Extend each sentence's End to the next sentence's Start to avoid blank gaps.
+            for idx, sent in enumerate(sentences):
+                t1 = _fmt(sent['start'])
+                next_start = sentences[idx+1]['start'] if idx+1 < len(sentences) else sent['end']
+                t2 = _fmt(next_start)
                 txt = sent['text'].strip().rstrip('.,;:')
                 w = txt.split()
                 if len(w) > 3:
@@ -295,9 +457,169 @@ def create_subtitles(sentences, ass_path, word_data=None):
                     txt = ' '.join(w[:split_idx+1]) + "\\N" + ' '.join(w[split_idx+1:])
                 f.write(f"Dialogue: 0,{t1},{t2},Default,,0,0,0,,{txt}\n")
 
-def _fmt(sec):
-    h=int(sec//3600); m=int((sec%3600)//60); s=int(sec%60); cs=int((sec%1)*100)
-    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+def search_and_download_vertical(query, idx, duration, tag=""):
+    """
+    Same as search_and_download but requests portrait/vertical source video
+    where possible and always crops/scales to 1080x1920 (9:16) for Shorts.
+    Uses a distinct USED_URLS-safe idx namespace via `tag` so long-video and
+    shorts clip fetching never collide on temp filenames.
+    """
+    urls = []
+    page = random.randint(1,3)
+
+    if PEXELS_KEYS and PEXELS_KEYS[0]:
+        try:
+            key = random.choice([k for k in PEXELS_KEYS if k])
+            r = requests.get("https://api.pexels.com/videos/search",
+                headers={"Authorization":key},
+                params={"query":query,"per_page":15,"page":page,"orientation":"portrait"}, timeout=12)
+            if r.status_code == 200:
+                for v in r.json().get('videos',[]):
+                    files = v.get('video_files',[])
+                    # Prefer genuinely portrait files (height > width), else take any hd/large
+                    portrait = [f for f in files if f.get('height',0) > f.get('width',0) and f.get('height',0)>=1280]
+                    hd = portrait or [f for f in files if f.get('quality') in ['hd','large']]
+                    if hd:
+                        url = random.choice(hd)['link']
+                        if url not in USED_URLS: urls.append(url)
+        except: pass
+
+    if PIXABAY_KEYS and PIXABAY_KEYS[0]:
+        try:
+            key = random.choice([k for k in PIXABAY_KEYS if k])
+            r = requests.get("https://pixabay.com/api/videos/",
+                params={"key":key,"q":query,"per_page":15,"page":page}, timeout=12)
+            if r.status_code == 200:
+                for v in r.json().get('hits',[]):
+                    vd = v.get('videos',{})
+                    url = vd.get('large',vd.get('medium',{})).get('url')
+                    if url and url not in USED_URLS: urls.append(url)
+        except: pass
+
+    for url in urls[:3]:
+        try:
+            raw = TEMP_DIR / f"raw_s{tag}_{idx}.mp4"
+            out = TEMP_DIR / f"clip_s{tag}_{idx}.mp4"
+            r = requests.get(url, timeout=25, stream=True)
+            with open(raw,"wb") as f:
+                for chunk in r.iter_content(8192):
+                    if chunk: f.write(chunk)
+            if os.path.getsize(raw) < 5000: continue
+
+            # Force crop/scale to 1080x1920 regardless of source orientation
+            vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
+            cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",str(raw),"-t",str(duration),
+                   "-vf",vf] + _enc_args() + ["-an",str(out)]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+
+            try: os.remove(raw)
+            except: pass
+            if os.path.exists(out) and os.path.getsize(out) > 2000:
+                USED_URLS.add(url); return str(out)
+        except: continue
+    return None
+
+
+def process_short_clip(args):
+    i, sent, tag = args
+    dur = max(2.5, sent['end'] - sent['start'])
+    query = AI_QUERIES[sent.get('orig_idx', i)] if sent.get('orig_idx', i) < len(AI_QUERIES) else random.choice(FALLBACK)
+
+    for _ in range(3):
+        clip = search_and_download_vertical(query, i, dur, tag=tag)
+        if clip: return (i, clip)
+        query = random.choice(FALLBACK)
+        time.sleep(0.3)
+    return (i, None)
+
+
+def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, out_path):
+    """
+    Render a single 1080x1920 short: fetch fresh vertical stock clips for
+    this segment's sentences, concat, overlay a LARGE left-side logo (shorts
+    need bigger branding since screen real estate is smaller/closer-viewed),
+    and burn vertical-tuned subtitles.
+    """
+    tag = f"sh{short_idx}"
+    n = len(sentences_slice)
+    print(f"\n  Short {short_idx+1}: fetching {n} vertical clips...")
+
+    clips = [None]*n
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        futs = {ex.submit(process_short_clip, (i,s,tag)): i for i,s in enumerate(sentences_slice)}
+        for f in concurrent.futures.as_completed(futs):
+            try:
+                idx, path = f.result()
+                if path: clips[idx]=path
+            except: pass
+
+    valid = [i for i,c in enumerate(clips) if c and os.path.exists(c)]
+    if not valid:
+        print(f"  Short {short_idx+1}: no clips found, skipping")
+        return False
+    for i in range(n):
+        if clips[i] and os.path.exists(clips[i]): continue
+        nearest = min(valid, key=lambda x:abs(x-i))
+        dur = max(2.5, sentences_slice[i]['end']-sentences_slice[i]['start'])
+        gap = TEMP_DIR / f"gap_{tag}_{i}.mp4"
+        subprocess.run(["ffmpeg","-y","-stream_loop","-1","-i",clips[nearest],
+            "-t",str(dur)] + _enc_args() + ["-an",str(gap)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        clips[i] = str(gap) if os.path.exists(gap) else clips[nearest]
+
+    list_path = f"list_{tag}.txt"
+    visual_path = f"visual_{tag}.mp4"
+    with open(list_path,"w") as f:
+        for c in clips:
+            if c: f.write(f"file '{c}'\n")
+    subprocess.run(f"ffmpeg -y -f concat -safe 0 -i {list_path} -c copy {visual_path}",
+        shell=True, capture_output=True, timeout=60)
+    if not os.path.exists(visual_path):
+        subprocess.run(f"ffmpeg -y -f concat -safe 0 -i {list_path}"
+            f" -c:v libx264 -preset ultrafast -crf 18 {visual_path}",
+            shell=True, capture_output=True)
+    if not os.path.exists(visual_path): return False
+
+    enc = _enc_args()
+    ass_esc = str(ass_path).replace('\\','/').replace(':','\\\\:')
+    if logo_path and os.path.exists(logo_path):
+        # Logo on left, LARGE (shorts are watched up close on phones - a
+        # small landscape-style logo reads as invisible on a 1080x1920 frame).
+        filt = (f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+                f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2[bg];"
+                f"[1:v]scale=280:-1[l];[bg][l]overlay=30:40[wl];"
+                f"[wl]subtitles='{ass_esc}'[v]")
+        cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",visual_path,"-i",str(logo_path),"-i",str(audio_path),
+            "-filter_complex",filt,"-map","[v]","-map","2:a"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
+    else:
+        filt = (f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+                f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v]")
+        cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",visual_path,"-i",str(audio_path),
+            "-filter_complex",filt,"-map","[v]","-map","1:a"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
+    subprocess.run(cmd, capture_output=True, timeout=300)
+
+    for p in [list_path, visual_path]:
+        if os.path.exists(p): os.remove(p)
+
+    if os.path.exists(out_path):
+        print(f"  Short {short_idx+1}: {os.path.getsize(out_path)/(1024**2):.0f}MB")
+        return True
+    return False
+
+
+def extract_short_audio(full_audio_path, start_sec, end_sec, out_path, fade=0.25):
+    """
+    Cut a clean segment directly from the full enhanced audio (fast, exact
+    same voice/quality - no re-TTS). Applies short fade in/out so the cut
+    doesn't click/pop at the boundaries.
+    """
+    dur = max(0.5, end_sec - start_sec)
+    af = f"afade=t=in:st=0:d={fade},afade=t=out:st={max(0,dur-fade):.2f}:d={fade}"
+    cmd = ["ffmpeg","-y","-i",str(full_audio_path),
+           "-ss",f"{start_sec:.3f}","-t",f"{dur:.3f}",
+           "-af",af,"-ar","44100",str(out_path)]
+    r = subprocess.run(cmd, capture_output=True, timeout=60)
+    return os.path.exists(out_path) and os.path.getsize(out_path) > 1000
 
 
 
@@ -342,9 +664,10 @@ def generate_audio(text, ref_audio, out_path):
             try:
                 with torch.no_grad():
                     if IS_SPANISH:
-                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), language_id="es")
+                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio),
+                                            language_id="es", exaggeration=0.4, cfg_weight=0.65)
                     else:
-                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), exaggeration=0.45, cfg_weight=0.3)
+                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), exaggeration=0.4, cfg_weight=0.65)
                     wavs.append(w.cpu())
                 if i%8==0: torch.cuda.empty_cache()
             except: continue
@@ -706,6 +1029,72 @@ if render_video(sentences, audio, ass, logo, o1, o2):
     msg = "Done!\n"
     if l1: msg += f"No Subs: {l1}\n"
     if l2: msg += f"With Subs: {l2}\n"
+
+    # ==========================================
+    # SHORTS PIPELINE
+    # ==========================================
+    # Only worth generating shorts from audio that's actually long enough
+    # for the requested count (avoid generating garbage 60s shorts from a
+    # 90s total-runtime video, etc.)
+    if sentences and sentences[-1]['end'] >= SHORT_DUR_TARGET * 0.6:
+        update_status(95, f"Generating {SHORTS_COUNT} shorts...")
+        try:
+            windows = select_short_segments(sentences, SHORTS_COUNT, SHORT_DUR_TARGET)
+            short_links = []
+            for si, win in enumerate(windows):
+                update_status(95, f"Short {si+1}/{len(windows)}...")
+                s_idx, e_idx = win['start_idx'], win['end_idx']
+                seg_sentences = sentences[s_idx:e_idx+1]
+                if not seg_sentences:
+                    continue
+
+                t_start = seg_sentences[0]['start']
+                t_end = seg_sentences[-1]['end']
+
+                # Re-base timestamps to 0 for this short, keep original index
+                # for AI_QUERIES lookups (queries were generated per full-script sentence).
+                rebased = []
+                for orig_i, s in enumerate(seg_sentences, start=s_idx):
+                    rebased.append({
+                        "text": s['text'],
+                        "start": s['start'] - t_start,
+                        "end": s['end'] - t_start,
+                        "orig_idx": orig_i,
+                    })
+
+                short_audio = TEMP_DIR / f"short_{si}_audio.wav"
+                if not extract_short_audio(audio, t_start, t_end, short_audio):
+                    print(f"  Short {si+1}: audio extraction failed, skipping")
+                    continue
+
+                # Vertical-tuned word data (re-based) for this short's subtitle window
+                short_word_data = None
+                if word_data:
+                    ww = [w for w in word_data if t_start <= w['start'] < t_end]
+                    if ww:
+                        short_word_data = [
+                            {"text": w['text'], "start": w['start']-t_start, "end": w['end']-t_start}
+                            for w in ww
+                        ]
+
+                short_ass = TEMP_DIR / f"short_{si}_subs.ass"
+                create_subtitles(
+                    rebased, short_ass,
+                    word_data=short_word_data,
+                    style_set=SHORT_SUBTITLE_STYLES,
+                    play_res=(1080, 1920),
+                    max_chars=26,   # narrower canvas than landscape -> tighter budget
+                )
+
+                short_out = OUTPUT_DIR / f"short_{JOB_ID}_{si+1}.mp4"
+                if render_short(si, rebased, short_audio, short_ass, logo, short_out):
+                    link = upload_drive(short_out)
+                    if link:
+                        short_links.append(link)
+                        msg += f"Short {si+1}: {link}\n"
+        except Exception as e:
+            print(f"  Shorts pipeline error: {e}")
+
     update_status(100, msg, "completed", l1 or l2)
     print(f"\n  {msg}")
 else:
@@ -714,4 +1103,8 @@ else:
 if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 for f in ["visual.mp4","list.txt"]:
     if os.path.exists(f): os.remove(f)
+import glob
+for f in glob.glob("list_sh*.txt") + glob.glob("visual_sh*.mp4"):
+    try: os.remove(f)
+    except: pass
 print("--- DONE ---")
