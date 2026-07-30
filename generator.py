@@ -625,19 +625,28 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
         print(f"  Short {short_idx+1}: mux failed - {r.stderr.decode(errors='ignore')[-400:]}")
         return False
 
-    # Verify the output actually has an audio stream with real duration -
-    # a bad stream mapping or corrupt upstream audio could still produce a
-    # "successful" (file exists, exit 0) mp4 with silent/missing audio,
-    # which was the root cause of "voice in one short, no voice in
-    # another" going undetected.
+    # Verify the output actually has a real audio stream - a bad stream
+    # mapping or corrupt upstream audio could still produce a "successful"
+    # (file exists, exit 0) mp4 with silent/missing audio.
+    #
+    # NOTE: ffprobe's per-stream `duration` field is unreliable for MP4/AAC
+    # (frequently reports N/A even on perfectly valid, audible streams).
+    # That was causing a previous version of this check to report 0.0s and
+    # incorrectly discard EVERY short's audio, even when it was fine.
+    # Use frame/packet count instead, which reliably reflects whether
+    # actual audio data is present.
     try:
         rp = subprocess.run(["ffprobe","-v","error","-select_streams","a:0",
-            "-show_entries","stream=duration","-of","default=noprint_wrappers=1:nokey=1",
-            str(out_path)], capture_output=True, text=True, timeout=15)
-        a_dur = float(rp.stdout.strip()) if rp.stdout.strip() else 0.0
-        if a_dur < 1.0:
-            print(f"  Short {short_idx+1}: output has no/near-empty audio stream ({a_dur:.2f}s) - treating as failed")
+            "-count_packets","-show_entries","stream=nb_read_packets",
+            "-of","default=noprint_wrappers=1:nokey=1",
+            str(out_path)], capture_output=True, text=True, timeout=20)
+        out = rp.stdout.strip()
+        n_packets = int(out) if out.isdigit() else -1
+        if n_packets == 0:
+            print(f"  Short {short_idx+1}: output audio stream has 0 packets - silent, treating as failed")
             return False
+        elif n_packets < 0:
+            print(f"  Short {short_idx+1}: could not verify audio packet count, proceeding (assuming OK)")
     except Exception as e:
         print(f"  Short {short_idx+1}: audio-stream verification failed ({e}), proceeding cautiously")
 
@@ -911,13 +920,17 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_nosub, out_sub)
             shell=True, capture_output=True)
     if not os.path.exists("visual.mp4"): return False
 
-    # Safety: stream-copy concat of many clips can lose small fractions of a
-    # second at clip boundaries (keyframe/GOP alignment), which compounds
-    # over dozens of clips. If the resulting visual track ends up shorter
-    # than the audio, -shortest below would truncate the LONGER stream
-    # (the audio) to match - silently cutting off the last spoken
-    # sentence(s). Get actual durations and pad the visual track with a
-    # frozen last frame if needed so audio is never the one getting cut.
+    # Safety: stream-copy concat of many clips can lose fractions of a
+    # second per clip boundary (keyframe/GOP alignment), and clip fetches
+    # can also come back shorter than requested. Either way, if the
+    # resulting visual track ends up shorter than the audio, -shortest
+    # below would truncate the LONGER stream (the audio) to match -
+    # silently cutting off the last spoken sentence(s).
+    #
+    # FIX: instead of freeze-padding (which produces a long dead/frozen
+    # frame - unacceptable for anything more than ~1s), fetch REAL
+    # additional stock clips to cover the deficit, using fresh queries
+    # from AI_QUERIES/FALLBACK so the extra footage still looks intentional.
     def _probe_dur(path):
         try:
             r = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
@@ -928,15 +941,59 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_nosub, out_sub)
 
     vdur = _probe_dur("visual.mp4")
     adur = _probe_dur(audio_path)
-    if vdur > 0 and adur > 0 and vdur < adur - 0.15:
-        pad_needed = (adur - vdur) + 0.3  # small extra buffer
-        print(f"  Visual track {vdur:.2f}s shorter than audio {adur:.2f}s, padding {pad_needed:.2f}s")
-        padded = "visual_padded.mp4"
-        subprocess.run(["ffmpeg","-y","-i","visual.mp4",
-            "-vf",f"tpad=stop_mode=clone:stop_duration={pad_needed:.2f}"] + _enc_args() + ["-an",padded],
-            capture_output=True, timeout=120)
-        if os.path.exists(padded):
-            os.replace(padded, "visual.mp4")
+    if vdur > 0 and adur > 0 and vdur < adur - 0.5:
+        deficit = (adur - vdur) + 0.5  # small extra buffer
+        print(f"  Visual track {vdur:.2f}s shorter than audio {adur:.2f}s, fetching {deficit:.1f}s of extra footage...")
+
+        extra_clips = []
+        remaining = deficit
+        attempt = 0
+        # Pull from the tail of AI_QUERIES first (thematically closest to
+        # the video's ending), falling back to FALLBACK queries if needed.
+        query_pool = list(reversed(AI_QUERIES)) if AI_QUERIES else []
+        while remaining > 0.5 and attempt < 15:
+            q = query_pool[attempt % len(query_pool)] if query_pool else random.choice(FALLBACK)
+            chunk_dur = min(remaining, 8.0)  # fetch in ~8s chunks
+            clip = search_and_download(q, f"pad{attempt}", chunk_dur)
+            if clip:
+                extra_clips.append(clip)
+                remaining -= chunk_dur
+            attempt += 1
+
+        if extra_clips:
+            with open("list.txt", "a") as f:
+                for c in extra_clips:
+                    f.write(f"file '{c}'\n")
+            subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual_ext.mp4",
+                shell=True, capture_output=True, timeout=60)
+            if os.path.exists("visual_ext.mp4"):
+                os.replace("visual_ext.mp4", "visual.mp4")
+                vdur = _probe_dur("visual.mp4")
+
+        # If real footage still didn't fully close the gap (fetch failures,
+        # rate limits, etc.), loop the last clip rather than freeze on a
+        # single static frame - motion is far less noticeable/jarring than
+        # a dead frame, and this only covers whatever small remainder is left.
+        vdur = _probe_dur("visual.mp4")
+        if vdur > 0 and vdur < adur - 0.5:
+            still_needed = (adur - vdur) + 0.3
+            print(f"  Still {still_needed:.1f}s short after extra fetch, looping last clip (not freezing)")
+            last_source = extra_clips[-1] if extra_clips else clips[-1]
+            loop_fill = "visual_loopfill.mp4"
+            subprocess.run(["ffmpeg","-y","-stream_loop","-1","-i",last_source,
+                "-t",f"{still_needed:.2f}"] + _enc_args() + ["-an","loopfill_clip.mp4"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            if os.path.exists("loopfill_clip.mp4"):
+                with open("list.txt", "a") as f:
+                    f.write(f"file 'loopfill_clip.mp4'\n")
+                subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual_final.mp4",
+                    shell=True, capture_output=True, timeout=60)
+                if os.path.exists("visual_final.mp4"):
+                    os.replace("visual_final.mp4", "visual.mp4")
+            for tmp in ["loopfill_clip.mp4"]:
+                if os.path.exists(tmp):
+                    try: os.remove(tmp)
+                    except: pass
     
     # V1: No subs (900p, GPU)
     update_status(80, "Rendering V1 (900p)...")
