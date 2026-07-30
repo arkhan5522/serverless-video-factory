@@ -346,6 +346,11 @@ SHORT_SUBTITLE_STYLES = {
         "border":3,"outline":0,"shadow":0,"margin":460,"spacing":0.6},
 }
 
+def _fmt(sec):
+    h=int(sec//3600); m=int((sec%3600)//60); s=int(sec%60); cs=int((sec%1)*100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
 def create_subtitles(sentences, ass_path, word_data=None, style_key=None,
                       style_set=None, play_res=(1920,1080), max_chars=46):
     """
@@ -988,15 +993,44 @@ word_data = []  # Word-level timestamps for highlighting
 if ASSEMBLY_KEY:
     try:
         aai.settings.api_key = ASSEMBLY_KEY
-        tx = aai.Transcriber().transcribe(str(audio))
-        for s in tx.get_sentences():
-            sentences.append({"text":s.text,"start":s.start/1000,"end":s.end/1000})
-        if sentences: sentences[-1]['end']+=0.5
-        
-        # Get word-level timestamps for subtitle highlighting
-        for word in tx.words:
-            word_data.append({"text": word.text, "start": word.start/1000, "end": word.end/1000})
-        print(f"  Got {len(word_data)} word timestamps for highlighting")
+        # CRITICAL: language must be explicitly set. Without this,
+        # AssemblyAI defaults to English and on Spanish audio produces
+        # heavily garbled/dropped transcription (most words treated as
+        # unintelligible noise) - this was the root cause of only getting
+        # ~163 words out of an 8:42 Spanish narration.
+        tx_config = aai.TranscriptionConfig(
+            language_code="es" if IS_SPANISH else "en",
+            punctuate=True,
+            format_text=True,
+        )
+        tx = aai.Transcriber(config=tx_config).transcribe(str(audio))
+        if tx.status == aai.TranscriptStatus.error:
+            print(f"  Transcribe failed: {tx.error}")
+        else:
+            for s in tx.get_sentences():
+                sentences.append({"text":s.text,"start":s.start/1000,"end":s.end/1000})
+            if sentences: sentences[-1]['end']+=0.5
+
+            # Get word-level timestamps for subtitle highlighting
+            for word in tx.words:
+                word_data.append({"text": word.text, "start": word.start/1000, "end": word.end/1000})
+            print(f"  Got {len(word_data)} word timestamps for highlighting")
+
+            # Sanity check: normal speech is ~2-3 words/sec. If AssemblyAI
+            # returned far fewer words than the audio duration implies, the
+            # transcription is almost certainly garbled/wrong-language
+            # (words dropped as "unintelligible") rather than genuinely
+            # sparse audio. Discard it and fall through to the estimated-
+            # timing path below instead of silently building subtitles and
+            # visual-matching off broken data.
+            audio_dur = sentences[-1]['end'] if sentences else 0
+            if audio_dur > 10:
+                wpm = len(word_data) / (audio_dur/60)
+                if wpm < 60:  # normal narration is ~120-180 wpm; below 60 is a red flag
+                    print(f"  WARNING: only {wpm:.0f} words/min detected (expected 100+) - "
+                          f"transcription looks broken, discarding and using estimated timing instead")
+                    sentences = []
+                    word_data = []
     except Exception as e: print(f"  Transcribe err: {e}")
 
 if not sentences:
