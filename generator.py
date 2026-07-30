@@ -10,6 +10,12 @@ VIDEO FACTORY V4 - PRODUCTION ENGINE
 """
 
 import os, subprocess, sys, re, time, random, shutil, json
+# Force explicit reseed with high-entropy source. Kaggle kernels can
+# sometimes start with a low-entropy or reused random state between runs,
+# which was causing subtitle style selection to always pick the same
+# option instead of shuffling. os.urandom pulls from the OS entropy pool
+# directly, bypassing whatever default seeding Python did on interpreter start.
+random.seed(int.from_bytes(os.urandom(8), "big") ^ int(time.time() * 1000))
 import concurrent.futures, requests, gc
 from pathlib import Path
 
@@ -335,15 +341,24 @@ SUBTITLE_STYLES = {
 # larger MarginV to clear TikTok/Reels/YouTube Shorts UI (caption, like/
 # share buttons, progress bar) which occupies the bottom ~20-25% of frame.
 SHORT_SUBTITLE_STYLES = {
-    "short_punch": {"name":"Short Punch","font":"Arial Black","size":78,"bold":-1,
+    "short_punch": {"name":"Short Punch","font":"Arial Black","size":92,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&H00000000",
-        "border":1,"outline":6,"shadow":3,"margin":480,"spacing":1},
-    "short_neon": {"name":"Short Neon","font":"Arial Black","size":82,"bold":-1,
+        "border":1,"outline":8,"shadow":4,"margin":480,"spacing":1},
+    "short_neon": {"name":"Short Neon","font":"Arial Black","size":96,"bold":-1,
         "primary":"&H0000FFFF","outline_c":"&H00330033","back":"&H00000000",
-        "border":1,"outline":6,"shadow":4,"margin":480,"spacing":1.2},
-    "short_clean": {"name":"Short Clean","font":"Arial","size":74,"bold":-1,
-        "primary":"&H00FFFFFF","outline_c":"&H00111111","back":"&H80000000",
+        "border":1,"outline":8,"shadow":5,"margin":480,"spacing":1.2},
+    "short_clean": {"name":"Short Clean","font":"Arial","size":86,"bold":-1,
+        "primary":"&H00FFFFFF","outline_c":"&H00111111","back":"&H90000000",
         "border":3,"outline":0,"shadow":0,"margin":460,"spacing":0.6},
+    "short_fire": {"name":"Short Fire","font":"Arial Black","size":94,"bold":-1,
+        "primary":"&H0000A5FF","outline_c":"&H00001133","back":"&H00000000",
+        "border":1,"outline":9,"shadow":5,"margin":470,"spacing":1.3},
+    "short_royal": {"name":"Short Royal","font":"Arial Black","size":90,"bold":-1,
+        "primary":"&H00FFE0B0","outline_c":"&H00301040","back":"&H00000000",
+        "border":1,"outline":7,"shadow":4,"margin":480,"spacing":1},
+    "short_mint": {"name":"Short Mint","font":"Arial Black","size":88,"bold":-1,
+        "primary":"&H00D4FF9F","outline_c":"&H00102010","back":"&H00000000",
+        "border":1,"outline":7,"shadow":4,"margin":475,"spacing":1.1},
 }
 
 def _fmt(sec):
@@ -601,15 +616,33 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
                 f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v]")
         cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",visual_path,"-i",str(audio_path),
             "-filter_complex",filt,"-map","[v]","-map","1:a"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
-    subprocess.run(cmd, capture_output=True, timeout=300)
+    r = subprocess.run(cmd, capture_output=True, timeout=300)
 
     for p in [list_path, visual_path]:
         if os.path.exists(p): os.remove(p)
 
-    if os.path.exists(out_path):
-        print(f"  Short {short_idx+1}: {os.path.getsize(out_path)/(1024**2):.0f}MB")
-        return True
-    return False
+    if not os.path.exists(out_path):
+        print(f"  Short {short_idx+1}: mux failed - {r.stderr.decode(errors='ignore')[-400:]}")
+        return False
+
+    # Verify the output actually has an audio stream with real duration -
+    # a bad stream mapping or corrupt upstream audio could still produce a
+    # "successful" (file exists, exit 0) mp4 with silent/missing audio,
+    # which was the root cause of "voice in one short, no voice in
+    # another" going undetected.
+    try:
+        rp = subprocess.run(["ffprobe","-v","error","-select_streams","a:0",
+            "-show_entries","stream=duration","-of","default=noprint_wrappers=1:nokey=1",
+            str(out_path)], capture_output=True, text=True, timeout=15)
+        a_dur = float(rp.stdout.strip()) if rp.stdout.strip() else 0.0
+        if a_dur < 1.0:
+            print(f"  Short {short_idx+1}: output has no/near-empty audio stream ({a_dur:.2f}s) - treating as failed")
+            return False
+    except Exception as e:
+        print(f"  Short {short_idx+1}: audio-stream verification failed ({e}), proceeding cautiously")
+
+    print(f"  Short {short_idx+1}: {os.path.getsize(out_path)/(1024**2):.0f}MB")
+    return True
 
 
 def extract_short_audio(full_audio_path, start_sec, end_sec, out_path, fade=0.25):
@@ -622,9 +655,31 @@ def extract_short_audio(full_audio_path, start_sec, end_sec, out_path, fade=0.25
     af = f"afade=t=in:st=0:d={fade},afade=t=out:st={max(0,dur-fade):.2f}:d={fade}"
     cmd = ["ffmpeg","-y","-i",str(full_audio_path),
            "-ss",f"{start_sec:.3f}","-t",f"{dur:.3f}",
-           "-af",af,"-ar","44100",str(out_path)]
+           "-af",af,"-ar","44100","-ac","2",str(out_path)]
     r = subprocess.run(cmd, capture_output=True, timeout=60)
-    return os.path.exists(out_path) and os.path.getsize(out_path) > 1000
+
+    if not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
+        print(f"  extract_short_audio failed: {r.stderr.decode(errors='ignore')[-300:]}")
+        return False
+
+    # Validate ACTUAL audio duration, not just file existence/size. A
+    # corrupt or truncated extraction (e.g. seek landing past end of
+    # source, or a near-silent slice) can still produce a small-but-
+    # nonzero WAV file that passes the size check while being
+    # functionally silent or far too short - this was causing "voice in
+    # one short, no voice in another" with no visible error.
+    try:
+        rp = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
+            "-of","default=noprint_wrappers=1:nokey=1",str(out_path)],
+            capture_output=True, text=True, timeout=15)
+        actual_dur = float(rp.stdout.strip())
+        if actual_dur < dur * 0.5:
+            print(f"  extract_short_audio: got {actual_dur:.2f}s, expected ~{dur:.2f}s - extraction likely broken")
+            return False
+    except Exception as e:
+        print(f"  extract_short_audio: duration probe failed ({e}), proceeding cautiously")
+
+    return True
 
 
 
@@ -855,6 +910,33 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_nosub, out_sub)
             " -c:v libx264 -preset ultrafast -crf 18 visual.mp4",
             shell=True, capture_output=True)
     if not os.path.exists("visual.mp4"): return False
+
+    # Safety: stream-copy concat of many clips can lose small fractions of a
+    # second at clip boundaries (keyframe/GOP alignment), which compounds
+    # over dozens of clips. If the resulting visual track ends up shorter
+    # than the audio, -shortest below would truncate the LONGER stream
+    # (the audio) to match - silently cutting off the last spoken
+    # sentence(s). Get actual durations and pad the visual track with a
+    # frozen last frame if needed so audio is never the one getting cut.
+    def _probe_dur(path):
+        try:
+            r = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
+                "-of","default=noprint_wrappers=1:nokey=1",str(path)],
+                capture_output=True, text=True, timeout=15)
+            return float(r.stdout.strip())
+        except: return 0.0
+
+    vdur = _probe_dur("visual.mp4")
+    adur = _probe_dur(audio_path)
+    if vdur > 0 and adur > 0 and vdur < adur - 0.15:
+        pad_needed = (adur - vdur) + 0.3  # small extra buffer
+        print(f"  Visual track {vdur:.2f}s shorter than audio {adur:.2f}s, padding {pad_needed:.2f}s")
+        padded = "visual_padded.mp4"
+        subprocess.run(["ffmpeg","-y","-i","visual.mp4",
+            "-vf",f"tpad=stop_mode=clone:stop_duration={pad_needed:.2f}"] + _enc_args() + ["-an",padded],
+            capture_output=True, timeout=120)
+        if os.path.exists(padded):
+            os.replace(padded, "visual.mp4")
     
     # V1: No subs (900p, GPU)
     update_status(80, "Rendering V1 (900p)...")
@@ -1101,15 +1183,26 @@ if render_video(sentences, audio, ass, logo, o1, o2):
                     print(f"  Short {si+1}: audio extraction failed, skipping")
                     continue
 
-                # Vertical-tuned word data (re-based) for this short's subtitle window
+                # Vertical-tuned word data (re-based) for this short's subtitle window.
+                # Use overlap logic (word ends after t_start AND starts before t_end)
+                # rather than a strict start-only bound - a strict bound could exclude
+                # ALL words if ASR word timestamps sit slightly outside the sentence-
+                # derived t_start/t_end window, which was silently falling back to
+                # sentence-level (whole-sentence) highlighting instead of word-by-word.
                 short_word_data = None
                 if word_data:
-                    ww = [w for w in word_data if t_start <= w['start'] < t_end]
+                    ww = [w for w in word_data if w['end'] > t_start and w['start'] < t_end]
                     if ww:
-                        short_word_data = [
-                            {"text": w['text'], "start": w['start']-t_start, "end": w['end']-t_start}
-                            for w in ww
-                        ]
+                        short_word_data = []
+                        for w in ww:
+                            # Clamp to the short's [0, duration] range so no word
+                            # starts negative or extends past the clip end.
+                            rs = max(0.0, w['start'] - t_start)
+                            re_ = min(t_end - t_start, w['end'] - t_start)
+                            if re_ > rs:
+                                short_word_data.append({"text": w['text'], "start": rs, "end": re_})
+                        if not short_word_data:
+                            short_word_data = None
 
                 short_ass = TEMP_DIR / f"short_{si}_subs.ass"
                 create_subtitles(
@@ -1117,15 +1210,22 @@ if render_video(sentences, audio, ass, logo, o1, o2):
                     word_data=short_word_data,
                     style_set=SHORT_SUBTITLE_STYLES,
                     play_res=(1080, 1920),
-                    max_chars=26,   # narrower canvas than landscape -> tighter budget
+                    max_chars=20,   # narrower canvas + bigger font (86-96px) -> tighter budget
                 )
 
                 short_out = OUTPUT_DIR / f"short_{JOB_ID}_{si+1}.mp4"
-                if render_short(si, rebased, short_audio, short_ass, logo, short_out):
+                ok = render_short(si, rebased, short_audio, short_ass, logo, short_out)
+                if not ok:
+                    print(f"  Short {si+1}: retrying once (re-extracting audio)...")
+                    if extract_short_audio(audio, t_start, t_end, short_audio):
+                        ok = render_short(si, rebased, short_audio, short_ass, logo, short_out)
+                if ok:
                     link = upload_drive(short_out)
                     if link:
                         short_links.append(link)
                         msg += f"Short {si+1}: {link}\n"
+                else:
+                    print(f"  Short {si+1}: failed after retry, skipping")
         except Exception as e:
             print(f"  Shorts pipeline error: {e}")
 
