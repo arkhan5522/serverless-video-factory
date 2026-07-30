@@ -104,6 +104,7 @@ OUTPUT_DIR.mkdir(exist_ok=True); TEMP_DIR.mkdir(exist_ok=True)
 IS_SPANISH = LANGUAGE.lower().strip() in ["spanish","es","espanol"]
 USED_URLS = set()
 AI_QUERIES = []
+AI_BACKUPS = []
 
 # Shorts count by long-video duration:
 #   5 min  -> 2 shorts
@@ -125,13 +126,21 @@ SHORT_DUR_TARGET = 60  # seconds, target length per short
 def generate_queries_for_sentences(sentences):
     """
     Send ALL sentences to Groq, get back a mapping of each sentence to its
-    ideal visual search query. Batches into chunks of ~40 sentences per call
-    so long scripts (especially Spanish, which tends to run more characters
-    per sentence than English) never get silently truncated and dropped -
-    that was previously causing queries to desync from sentences.
+    ideal visual search query PLUS a topic-relevant backup query. Batches
+    into chunks of ~40 sentences per call so long scripts (especially
+    Spanish, which tends to run more characters per sentence than English)
+    never get silently truncated and dropped - that was previously causing
+    queries to desync from sentences.
+
+    Returns (queries, backups) - two parallel lists. `backups` gives a
+    still-on-topic alternate search term to try if the primary query
+    returns no usable stock footage, instead of falling back to the
+    generic FALLBACK list (which was the direct cause of unrelated
+    footage like ocean/waterfall clips appearing in e.g. medical topics).
     """
     if not GROQ_KEY or not sentences:
-        return [random.choice(FALLBACK) for _ in sentences]
+        qs = [random.choice(FALLBACK) for _ in sentences]
+        return qs, list(qs)
 
     n = len(sentences)
     print(f"  Groq: matching {n} sentences to visuals...")
@@ -141,6 +150,7 @@ def generate_queries_for_sentences(sentences):
 
     BATCH_SIZE = 40
     all_queries = [None] * n
+    all_backups = [None] * n
 
     for batch_start in range(0, n, BATCH_SIZE):
         batch = sentences[batch_start:batch_start + BATCH_SIZE]
@@ -151,19 +161,32 @@ def generate_queries_for_sentences(sentences):
         try:
             r = client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": """You are a professional video editor. For each numbered sentence from a script, you must provide the PERFECT stock footage search query that visually represents what is being said.
+                    {"role": "system", "content": """You are a professional video editor working with STOCK FOOTAGE ONLY (Pexels/Pixabay libraries) - you cannot commission custom footage, so you must pick queries that actually EXIST in stock libraries.
+
+For each numbered sentence from a script, provide the best STOCK-FINDABLE search query that visually represents what is being said.
 
 RULES:
 - Each query must be in ENGLISH (even if script is in another language)
 - Each query is 3-6 words describing what a CAMERA would film
-- The visual MUST match the sentence content:
+- The visual MUST match the sentence's MEANING/TOPIC, not just literal keywords:
   * "Technology is advancing rapidly" -> "futuristic circuit board closeup"
   * "The ocean is vast and mysterious" -> "deep ocean underwater darkness"
   * "Cities are growing faster" -> "aerial cityscape construction cranes"
   * "Ancient civilizations built pyramids" -> "egyptian pyramids aerial sunset"
-- NEVER default to generic nature unless the sentence is ABOUT nature
-- NO people/faces/bodies, NO religion, NO violence, NO NSFW
-- Return ONLY the queries, one per line, numbered to match (same numbers you were given)"""},
+- CRITICAL - STOCK SCARCITY AWARENESS: many topics (medical conditions, internal body processes, abstract science, specific diseases, niche technical concepts) have few literal stock footage. For these, do NOT search the literal term (e.g. "kidney stone" returns almost nothing usable and forces a random unrelated fallback). Instead pick the closest AVAILABLE stock category that still evokes the right idea:
+  * "Kidney stones form when minerals crystallize" -> "crystal formation macro closeup" (visually evokes crystallization, actually findable)
+  * "The kidney filters toxins from blood" -> "medical illustration human anatomy" or "doctor reviewing x-ray scan" (findable medical-adjacent stock)
+  * "A rare genetic disorder affects..." -> "dna helix medical research lab" (findable, thematically correct)
+  * "The economy is collapsing" -> "stock market crash graph red" (findable, matches meaning)
+- NEVER pick a generic/unrelated query (like nature, ocean, space) just because the literal topic has no footage - always find the CLOSEST THEMATICALLY RELEVANT stock-findable alternative instead. A query is only acceptable if it is both findable in stock libraries AND still clearly connects to the sentence's subject.
+- NO people/faces/bodies as the main subject, NO religion, NO violence, NO NSFW
+- For EACH sentence, also provide ONE backup query - a different but still thematically-relevant angle on the same sentence, in case the primary query returns no results. The backup must NEVER be a generic unrelated filler (no random nature/space/ocean unless the sentence is actually about that) - it must still connect to the sentence's actual subject.
+- Return in this EXACT format, one sentence per two lines:
+1. primary query here
+1b. backup query here
+2. primary query here
+2b. backup query here
+(continue for all sentences, no other text)"""},
                     {"role": "user", "content": f"Match each sentence to a video search query:\n\n{numbered}"}
                 ],
                 model="openai/gpt-oss-120b",
@@ -172,15 +195,24 @@ RULES:
             )
 
             result = r.choices[0].message.content
-            # Parse by EXPLICIT leading index (e.g. "1. some query" -> index 0),
-            # not by line order. This prevents misalignment: if Groq skips a
-            # number, returns a blank/rejected line, or the model merges two
-            # lines, sequential-order parsing would silently shift every
-            # subsequent query onto the WRONG sentence. That was the root
-            # cause of Spanish (and other long-sentence scripts) queries
-            # ending up mismatched with their actual sentence content.
+            # Parse by EXPLICIT leading index (e.g. "1. some query" -> index 0,
+            # "1b. backup query" -> backup for index 0), not by line order.
+            # This prevents misalignment: if Groq skips a number, returns a
+            # blank/rejected line, or merges lines, sequential-order parsing
+            # would silently shift every subsequent query onto the WRONG
+            # sentence. That was the root cause of Spanish (and other
+            # long-sentence scripts) queries ending up mismatched with
+            # their actual sentence content.
             for line in result.strip().split('\n'):
-                m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line.strip())
+                line = line.strip()
+                mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
+                if mb:
+                    local_idx = int(mb.group(1)) - 1
+                    cleaned = mb.group(2).strip().strip('"\'')
+                    if 3 < len(cleaned) < 60 and _safe(cleaned) and 0 <= local_idx < len(batch):
+                        all_backups[batch_start + local_idx] = cleaned
+                    continue
+                m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line)
                 if not m:
                     continue
                 local_idx = int(m.group(1)) - 1
@@ -192,13 +224,18 @@ RULES:
             print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
             # leave this batch's entries as None -> filled by fallback below
 
+    # Backups fall back to the primary query itself (still topic-relevant)
+    # rather than the generic FALLBACK list, if Groq didn't provide one -
+    # this ensures retries NEVER silently jump to unrelated filler (ocean/
+    # nature/space) just because a specific query found no stock results.
     queries = [q if q else random.choice(FALLBACK) for q in all_queries]
+    backups = [all_backups[i] if all_backups[i] else queries[i] for i in range(n)]
 
     # Show matching for debug
     for i in range(min(3, len(queries), len(sentences))):
-        print(f"    [{i+1}] '{sentences[i]['text'][:35]}...' -> '{queries[i]}'")
+        print(f"    [{i+1}] '{sentences[i]['text'][:35]}...' -> '{queries[i]}' (backup: '{backups[i]}')")
 
-    return queries
+    return queries, backups
 
 FALLBACK = [
     "technology data center servers", "futuristic city aerial night",
@@ -560,12 +597,14 @@ def search_and_download_vertical(query, idx, duration, tag=""):
 def process_short_clip(args):
     i, sent, tag = args
     dur = max(2.5, sent['end'] - sent['start'])
-    query = AI_QUERIES[sent.get('orig_idx', i)] if sent.get('orig_idx', i) < len(AI_QUERIES) else random.choice(FALLBACK)
+    orig_idx = sent.get('orig_idx', i)
+    primary = AI_QUERIES[orig_idx] if orig_idx < len(AI_QUERIES) else random.choice(FALLBACK)
+    backup = AI_BACKUPS[orig_idx] if orig_idx < len(AI_BACKUPS) else primary
 
-    for _ in range(3):
+    attempts = [primary, backup, random.choice(FALLBACK)]
+    for query in attempts:
         clip = search_and_download_vertical(query, i, dur, tag=tag)
         if clip: return (i, clip)
-        query = random.choice(FALLBACK)
         time.sleep(0.3)
     return (i, None)
 
@@ -884,12 +923,19 @@ def search_and_download(query, idx, duration):
 def process_clip(args):
     i, sent, total = args
     dur = max(3.5, sent['end'] - sent['start'])
-    query = AI_QUERIES[i] if i < len(AI_QUERIES) else random.choice(FALLBACK)
-    
-    for _ in range(3):
+    primary = AI_QUERIES[i] if i < len(AI_QUERIES) else random.choice(FALLBACK)
+    backup = AI_BACKUPS[i] if i < len(AI_BACKUPS) else primary
+
+    # Try order: primary query, then topic-aware backup query, then ONLY as
+    # a last resort the generic FALLBACK list. Previously this jumped
+    # straight to a fixed generic list (ocean/nature/space/etc.) on the
+    # very first retry, which is why scarce-footage topics (medical,
+    # niche technical) ended up with visually unrelated clips - the
+    # backup is chosen by the AI to still connect to the actual sentence.
+    attempts = [primary, backup, random.choice(FALLBACK)]
+    for query in attempts:
         clip = search_and_download(query, i, dur)
         if clip: return (i, clip)
-        query = random.choice(FALLBACK)
         time.sleep(0.3)
     return (i, None)
 
@@ -1198,7 +1244,7 @@ if not sentences:
 
 # Queries (sentence-matched via Groq JSON approach)
 update_status(50, "Matching visuals to sentences...")
-AI_QUERIES = generate_queries_for_sentences(sentences)
+AI_QUERIES, AI_BACKUPS = generate_queries_for_sentences(sentences)
 
 # Subtitles (word-level highlighting if available)
 update_status(52, "Subtitles...")
@@ -1296,12 +1342,14 @@ if render_video(sentences, audio, ass, logo, o2):
                 # --- AI visual-matching queries for THIS short's own sentences ---
                 # (independent from the main video's AI_QUERIES, since this is
                 # different, freshly-written content)
-                short_queries = generate_queries_for_sentences(short_sentences)
-                # Temporarily point AI_QUERIES at this short's queries so
-                # process_short_clip (which reads the global AI_QUERIES) picks
-                # the right query per sentence via orig_idx.
+                short_queries, short_backups = generate_queries_for_sentences(short_sentences)
+                # Temporarily point AI_QUERIES/AI_BACKUPS at this short's
+                # queries so process_short_clip (which reads the globals)
+                # picks the right query/backup per sentence via orig_idx.
                 saved_queries = AI_QUERIES
+                saved_backups = AI_BACKUPS
                 AI_QUERIES = short_queries
+                AI_BACKUPS = short_backups
 
                 short_out = OUTPUT_DIR / f"short_{JOB_ID}_{si+1}.mp4"
                 ok = render_short(si, short_sentences, short_audio, short_ass, logo, short_out)
@@ -1310,6 +1358,7 @@ if render_video(sentences, audio, ass, logo, o2):
                     ok = render_short(si, short_sentences, short_audio, short_ass, logo, short_out)
 
                 AI_QUERIES = saved_queries  # restore main video's queries
+                AI_BACKUPS = saved_backups  # restore main video's backups
 
                 if ok:
                     link = upload_drive(short_out)
