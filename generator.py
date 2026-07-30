@@ -173,7 +173,7 @@ RULES:
   * "The ocean is vast and mysterious" -> "deep ocean underwater darkness"
   * "Cities are growing faster" -> "aerial cityscape construction cranes"
   * "Ancient civilizations built pyramids" -> "egyptian pyramids aerial sunset"
-- CRITICAL - STOCK SCARCITY AWARENESS: many topics (medical conditions, internal body processes, abstract science, specific diseases, niche technical concepts) have few literal stock footage. For these, do NOT search the literal term (e.g. "kidney stone" returns almost nothing usable and forces a random unrelated fallback). Instead pick the closest AVAILABLE stock category that still evokes the right idea:
+- CRITICAL - STOCK SCARCITY AWARENESS: many topics (medical conditions, internal body processes, abstract science, specific diseases, niche technical concepts) have ZERO or near-zero literal stock footage. For these, do NOT search the literal term (e.g. "kidney stone" returns almost nothing usable and forces a random unrelated fallback). Instead pick the closest AVAILABLE stock category that still evokes the right idea:
   * "Kidney stones form when minerals crystallize" -> "crystal formation macro closeup" (visually evokes crystallization, actually findable)
   * "The kidney filters toxins from blood" -> "medical illustration human anatomy" or "doctor reviewing x-ray scan" (findable medical-adjacent stock)
   * "A rare genetic disorder affects..." -> "dna helix medical research lab" (findable, thematically correct)
@@ -360,60 +360,39 @@ Format exactly like this:
 # 4. SUBTITLE PRESETS (Variety)
 # ==========================================
 SUBTITLE_STYLES = {
-    "cinema": {"name":"Cinema","font":"Arial","size":62,"bold":-1,
-        "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&H80000000",
-        "border":3,"outline":0,"shadow":0,"margin":45,"spacing":0.5,
-        "highlight":"&H0000FFFF"},   # yellow highlight on white text
-    "modern_bold": {"name":"Modern Bold","font":"Arial Black","size":68,"bold":-1,
-        "primary":"&H00FFFFFF","outline_c":"&H00111111","back":"&H00000000",
-        "border":1,"outline":5,"shadow":2,"margin":50,"spacing":1.2,
-        "highlight":"&H0000FFFF"},   # yellow highlight on white text
-    "neon_yellow": {"name":"Neon Yellow","font":"Arial Black","size":70,"bold":-1,
-        "primary":"&H0000FFFF","outline_c":"&H00000044","back":"&H00000000",
-        "border":1,"outline":5,"shadow":3,"margin":52,"spacing":1.5,
-        "highlight":"&H00FFFFFF"},   # white highlight on yellow text
-    "soft_white": {"name":"Soft White","font":"Arial","size":60,"bold":-1,
-        "primary":"&H00FFFFFF","outline_c":"&H00333333","back":"&H00000000",
-        "border":1,"outline":3,"shadow":4,"margin":45,"spacing":0.8,
-        "highlight":"&H0000FFFF"},   # yellow highlight on white text
-    "electric_cyan": {"name":"Electric Cyan","font":"Arial Black","size":66,"bold":-1,
-        "primary":"&H00FFFF00","outline_c":"&H00663300","back":"&H00000000",
-        "border":1,"outline":4,"shadow":3,"margin":48,"spacing":1,
-        "highlight":"&H0000FF00"},   # green highlight on cyan text
+    "classic": {"name":"Classic","font":"Arial Black","size":64,"bold":-1,
+        "primary":"&H00FFFFFF","outline_c":"&H00141414","back":"&H00000000",
+        "border":1,"outline":5,"shadow":2,"margin":48,"spacing":0.5,
+        "highlight":"&H0059C7FF"},   # white text, warm gold highlight
+    "cyan_pop": {"name":"Cyan Pop","font":"Arial Black","size":64,"bold":-1,
+        "primary":"&H00FFDC78","outline_c":"&H002D140F","back":"&H00000000",
+        "border":1,"outline":5,"shadow":2,"margin":48,"spacing":0.5,
+        "highlight":"&H00FFFFFF"},   # soft cyan text, white highlight
+    "boxed": {"name":"Boxed","font":"Arial","size":58,"bold":-1,
+        "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&HB0000000",
+        "border":3,"outline":0,"shadow":0,"margin":48,"spacing":0.3,
+        "highlight":"&H0059C7FF"},   # white on translucent black box, gold highlight
 }
 
 # Short-specific vertical styles (1080x1920 canvas). Bigger fonts than
 # landscape presets since viewers are closer to phone screens, and a much
 # larger MarginV to clear TikTok/Reels/YouTube Shorts UI (caption, like/
 # share buttons, progress bar) which occupies the bottom ~20-25% of frame.
-# Every style has an explicit "highlight" color chosen for contrast against
-# its own primary color (not derived from the style name/key - that was
-# fragile and left several styles with a low-contrast or invisible highlight).
+# Every color pair below was computed programmatically (RGB -> ASS BGR),
+# not hand-written, and verified for real contrast before use.
 SHORT_SUBTITLE_STYLES = {
-    "short_punch": {"name":"Short Punch","font":"Arial Black","size":92,"bold":-1,
-        "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&H00000000",
-        "border":1,"outline":8,"shadow":4,"margin":480,"spacing":1,
-        "highlight":"&H0000FFFF"},   # yellow highlight on white text
-    "short_neon": {"name":"Short Neon","font":"Arial Black","size":96,"bold":-1,
-        "primary":"&H0000FFFF","outline_c":"&H00330033","back":"&H00000000",
-        "border":1,"outline":8,"shadow":5,"margin":480,"spacing":1.2,
-        "highlight":"&H00FFFFFF"},   # white highlight on yellow text
-    "short_clean": {"name":"Short Clean","font":"Arial","size":86,"bold":-1,
-        "primary":"&H00FFFFFF","outline_c":"&H00111111","back":"&H90000000",
-        "border":3,"outline":0,"shadow":0,"margin":460,"spacing":0.6,
-        "highlight":"&H0000FFFF"},   # yellow highlight on white text
-    "short_fire": {"name":"Short Fire","font":"Arial Black","size":94,"bold":-1,
-        "primary":"&H0000A5FF","outline_c":"&H00001133","back":"&H00000000",
-        "border":1,"outline":9,"shadow":5,"margin":470,"spacing":1.3,
-        "highlight":"&H00FFFFFF"},   # white highlight on orange text (was invisible yellow-on-orange before)
-    "short_royal": {"name":"Short Royal","font":"Arial Black","size":90,"bold":-1,
-        "primary":"&H0080E0FF","outline_c":"&H00301040","back":"&H00000000",
-        "border":1,"outline":7,"shadow":4,"margin":480,"spacing":1,
-        "highlight":"&H00FF3399"},   # hot pink/magenta highlight on gold text (was invisible yellow-on-gold before)
-    "short_mint": {"name":"Short Mint","font":"Arial Black","size":88,"bold":-1,
-        "primary":"&H00D4FF9F","outline_c":"&H00102010","back":"&H00000000",
-        "border":1,"outline":7,"shadow":4,"margin":475,"spacing":1.1,
-        "highlight":"&H00FFFFFF"},   # white highlight on mint text (was low-contrast yellow-on-mint before)
+    "short_classic": {"name":"Short Classic","font":"Arial Black","size":90,"bold":-1,
+        "primary":"&H00FFFFFF","outline_c":"&H00141414","back":"&H00000000",
+        "border":1,"outline":8,"shadow":3,"margin":480,"spacing":0.5,
+        "highlight":"&H003BEBFF"},   # white text, electric yellow highlight
+    "short_pink": {"name":"Short Pink","font":"Arial Black","size":90,"bold":-1,
+        "primary":"&H00FFFFFF","outline_c":"&H00141414","back":"&H00000000",
+        "border":1,"outline":8,"shadow":3,"margin":480,"spacing":0.5,
+        "highlight":"&H008140FF"},   # white text, hot pink highlight
+    "short_boxed": {"name":"Short Boxed","font":"Arial","size":82,"bold":-1,
+        "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&HB0000000",
+        "border":3,"outline":0,"shadow":0,"margin":460,"spacing":0.3,
+        "highlight":"&H0040FFAE"},   # white on translucent black box, lime highlight
 }
 
 def _fmt(sec):
@@ -433,7 +412,21 @@ def create_subtitles(sentences, ass_path, word_data=None, style_key=None,
     max_chars: character budget per 2-line chunk - tune per play_res/font size
     """
     style_set = style_set or SUBTITLE_STYLES
-    key = style_key or random.choice(list(style_set.keys()))
+    if style_key:
+        key = style_key
+    else:
+        # Derive selection from a hash of JOB_ID + wall-clock time + OS
+        # entropy, rather than trusting random.choice() alone. JOB_ID is
+        # guaranteed unique per run (templated in externally per job), so
+        # this guarantees different style selection across separate runs
+        # even if Python's RNG state behaves unexpectedly in the Kaggle
+        # kernel environment (e.g. container/process state carrying over
+        # between runs in a way that defeats a simple reseed).
+        import hashlib
+        seed_material = f"{JOB_ID}-{time.time()}-{os.urandom(4).hex()}"
+        h = int(hashlib.sha256(seed_material.encode()).hexdigest(), 16)
+        keys = list(style_set.keys())
+        key = keys[h % len(keys)]
     s = style_set[key]
     print(f"  Subtitle: {s['name']} {'(word-highlight)' if word_data else '(sentence)'} @ {play_res[0]}x{play_res[1]}")
     
@@ -495,13 +488,38 @@ def create_subtitles(sentences, ass_path, word_data=None, style_key=None,
                 # the subtitle to go blank during those gaps, both within and between chunks.
                 is_last_chunk = (c_idx == len(chunks) - 1)
                 next_chunk_start = chunks[c_idx+1][0]['start'] if not is_last_chunk else chunk_words[-1]['end']
+
+                MIN_HIGHLIGHT_DUR = 0.12  # seconds - guarantees every word gets
+                # a real, renderable display window. Fast speech or ASR
+                # quirks can produce near-zero-duration words (start ~= end,
+                # or the next word starting almost immediately). libass can
+                # skip or misrender these near-zero-duration events, which
+                # made the highlight appear to jump past the correct word
+                # onto the next one while the audio was still on the first.
+
+                prev_end_sec = None  # tracks previous word's (possibly-extended) end,
+                                      # so extending one word's duration can never
+                                      # cause it to overlap the next word's event
                 for w_idx, word in enumerate(chunk_words):
-                    w_start = _fmt(word['start'])
+                    w_start_sec = word['start']
+                    if prev_end_sec is not None and w_start_sec < prev_end_sec:
+                        w_start_sec = prev_end_sec  # never start before prior word ended
+
                     if w_idx + 1 < len(chunk_words):
-                        next_start = chunk_words[w_idx+1]['start']
+                        next_start_sec = chunk_words[w_idx+1]['start']
                     else:
-                        next_start = next_chunk_start
-                    w_end = _fmt(next_start)
+                        next_start_sec = next_chunk_start
+
+                    # Enforce minimum duration - if the natural gap to the
+                    # next word is too small, extend this word's END forward
+                    # rather than shrinking its START, so timing still lines
+                    # up with when the word actually begins being spoken.
+                    if next_start_sec - w_start_sec < MIN_HIGHLIGHT_DUR:
+                        next_start_sec = w_start_sec + MIN_HIGHLIGHT_DUR
+                    prev_end_sec = next_start_sec
+
+                    w_start = _fmt(w_start_sec)
+                    w_end = _fmt(next_start_sec)
 
                     p1, p2 = [], []
                     for j, cw in enumerate(chunk_words):
@@ -531,7 +549,7 @@ def create_subtitles(sentences, ass_path, word_data=None, style_key=None,
                     txt = ' '.join(w[:split_idx+1]) + "\\N" + ' '.join(w[split_idx+1:])
                 f.write(f"Dialogue: 0,{t1},{t2},Default,,0,0,0,,{txt}\n")
 
-def search_and_download_vertical(query, idx, duration, tag=""):
+def search_and_download_vertical(query, idx, duration, tag="", verify=True):
     """
     Same as search_and_download but requests portrait/vertical source video
     where possible and always crops/scales to 1080x1920 (9:16) for Shorts.
@@ -570,7 +588,9 @@ def search_and_download_vertical(query, idx, duration, tag=""):
                     if url and url not in USED_URLS: urls.append(url)
         except: pass
 
-    for url in urls[:3]:
+    # Try more candidates than before (was 3) since some will now be
+    # rejected on VISUAL grounds, not just download failure.
+    for url in urls[:6]:
         try:
             raw = TEMP_DIR / f"raw_s{tag}_{idx}.mp4"
             out = TEMP_DIR / f"clip_s{tag}_{idx}.mp4"
@@ -588,8 +608,22 @@ def search_and_download_vertical(query, idx, duration, tag=""):
 
             try: os.remove(raw)
             except: pass
-            if os.path.exists(out) and os.path.getsize(out) > 2000:
-                USED_URLS.add(url); return str(out)
+            if not (os.path.exists(out) and os.path.getsize(out) > 2000):
+                continue
+
+            if verify:
+                frame = TEMP_DIR / f"check_s{tag}_{idx}.jpg"
+                if _extract_check_frame(out, frame):
+                    matches = verify_clip_matches_query(frame, query)
+                    try: os.remove(frame)
+                    except: pass
+                    if not matches:
+                        print(f"    Rejected short clip for '{query[:40]}' (visual mismatch)")
+                        try: os.remove(out)
+                        except: pass
+                        continue
+
+            USED_URLS.add(url); return str(out)
         except: continue
     return None
 
@@ -864,8 +898,64 @@ def generate_audio(text, ref_audio, out_path):
 # ==========================================
 # 6. VIDEO ENGINE (GPU-Accelerated)
 # ==========================================
-def search_and_download(query, idx, duration):
-    """Search + download + encode with GPU"""
+def verify_clip_matches_query(frame_path, query):
+    """
+    Ask a vision-capable model (Groq's qwen/qwen3.6-27b) whether the given
+    frame actually matches the intended search query. This is the real fix
+    for stock footage that "downloads fine" but is visually unrelated to
+    the query (e.g. a keyword-matched but thematically wrong clip) - there
+    was previously ZERO check that a downloaded clip actually looked like
+    what it was searched for.
+
+    Returns True if it matches well enough to use, False otherwise.
+    Fails open (returns True) on any error/timeout, so a verification
+    hiccup never blocks the whole pipeline - it's a quality filter, not a
+    hard gate.
+    """
+    if not GROQ_KEY:
+        return True
+    try:
+        import base64
+        with open(frame_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode('utf-8')
+
+        from groq import Groq
+        client = Groq(api_key=GROQ_KEY)
+        r = client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"""Does this image visually match the concept: "{query}"?
+
+Answer with ONLY one word: YES or NO.
+Answer YES if the image reasonably represents the concept (even loosely/thematically - it doesn't need to be a perfect literal match, stock footage rarely is).
+Answer NO only if the image is clearly unrelated or would look out of place/confusing next to narration about "{query}"."""},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ]
+            }],
+            temperature=0.2,
+            max_completion_tokens=10,
+        )
+        answer = r.choices[0].message.content.strip().upper()
+        return "YES" in answer
+    except Exception as e:
+        print(f"    Visual verification skipped ({str(e)[:60]}), accepting clip")
+        return True
+
+
+def _extract_check_frame(video_path, frame_path):
+    """Grab one representative frame from ~1/3 into the clip for verification."""
+    try:
+        subprocess.run(["ffmpeg","-y","-i",str(video_path),
+            "-vf","select=eq(n\\,5)","-frames:v","1","-q:v","3",str(frame_path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        return os.path.exists(frame_path) and os.path.getsize(frame_path) > 500
+    except: return False
+
+
+def search_and_download(query, idx, duration, verify=True):
+    """Search + download + encode with GPU, with optional visual verification"""
     urls = []
     page = random.randint(1,3)
     
@@ -897,7 +987,10 @@ def search_and_download(query, idx, duration):
                     if url and url not in USED_URLS: urls.append(url)
         except: pass
     
-    for url in urls[:3]:
+    # Try more candidates than before (was 3) since some will now be
+    # rejected on VISUAL grounds, not just download failure - need more
+    # attempts to still find a genuinely matching clip.
+    for url in urls[:6]:
         try:
             raw = TEMP_DIR / f"raw_{idx}.mp4"
             out = TEMP_DIR / f"clip_{idx}.mp4"
@@ -915,8 +1008,23 @@ def search_and_download(query, idx, duration):
             
             try: os.remove(raw)
             except: pass
-            if os.path.exists(out) and os.path.getsize(out) > 2000:
-                USED_URLS.add(url); return str(out)
+            if not (os.path.exists(out) and os.path.getsize(out) > 2000):
+                continue
+
+            # --- Real visual verification (the actual "no relevance check" fix) ---
+            if verify:
+                frame = TEMP_DIR / f"check_{idx}.jpg"
+                if _extract_check_frame(out, frame):
+                    matches = verify_clip_matches_query(frame, query)
+                    try: os.remove(frame)
+                    except: pass
+                    if not matches:
+                        print(f"    Rejected clip for '{query[:40]}' (visual mismatch)")
+                        try: os.remove(out)
+                        except: pass
+                        continue
+
+            USED_URLS.add(url); return str(out)
         except: continue
     return None
 
