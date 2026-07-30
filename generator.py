@@ -105,11 +105,15 @@ IS_SPANISH = LANGUAGE.lower().strip() in ["spanish","es","espanol"]
 USED_URLS = set()
 AI_QUERIES = []
 
-# Shorts count by long-video duration: 15min->5, 10min->3, 5min->2
+# Shorts count by long-video duration:
+#   5 min  -> 2 shorts
+#   10 min -> 3 shorts
+#   15 min -> 5 shorts
+#   15min+ -> capped at 5 (confirmed intentional - does not keep scaling up)
 def get_shorts_count(mins):
-    if mins >= 13: return 5
-    if mins >= 8: return 3
-    return 2
+    if mins >= 13: return 5   # covers 15min and anything above, capped here
+    if mins >= 8: return 3    # covers 10min
+    return 2                  # covers 5min (and anything shorter)
 SHORTS_COUNT = get_shorts_count(DURATION_MINS)
 SHORT_DUR_TARGET = 60  # seconds, target length per short
 
@@ -217,101 +221,101 @@ def _safe(q):
 
 
 # ==========================================
-# 3B. AI SHORT-CUTTING (Groq oss-120b picks best 1-min hook moments)
+# 3B. AI SHORT SCRIPT WRITER (Groq oss-120b writes standalone short scripts)
 # ==========================================
-def select_short_segments(sentences, n_shorts, target_seconds=60):
+def generate_short_scripts(sentences, topic, n_shorts, target_seconds=60):
     """
-    Ask oss-120b to pick the N most engaging/hook-worthy ~60s windows from
-    anywhere in the full sentence list (not sequential chunks - best moments,
-    can skip filler and overlap thematically). Returns a list of dicts:
-    {"start_idx":int, "end_idx":int, "reason":str} (inclusive sentence indices).
-    Falls back to evenly-spaced windows if Groq is unavailable or output is malformed.
+    Two-step process using Groq oss-120b:
+      1. Identify the N best hook-worthy themes/moments from the full
+         long-form script (grounds the shorts in the actual video content).
+      2. For each theme, WRITE a fresh, standalone, hook-first short-form
+         script (~130-160 words for ~60s of narration at normal pace) -
+         NOT a cut/excerpt of the original audio. This gets its own TTS
+         pass, so it never depends on the main audio's timing/quality.
+
+    Returns a list of dicts: {"script": str, "theme": str}
     """
-    def _fallback_windows():
-        # Evenly space fallback windows across the script, sized by duration
-        windows = []
-        total_dur = sentences[-1]['end'] if sentences else 0
-        if total_dur <= 0:
-            return windows
-        step = total_dur / (n_shorts + 1)
+    words_target = int(target_seconds / 60 * 150)  # ~150 wpm normal pace
+    full_text = " ".join(s['text'] for s in sentences)[:15000]
+
+    def _fallback_scripts():
+        # If Groq is unavailable, fall back to lightly-summarized chunks of
+        # the original script text, evenly spaced, rewritten as a short
+        # standalone paragraph (still not a literal audio cut - this is
+        # text, which gets its own fresh TTS regardless of this path).
+        out = []
+        step = max(1, len(sentences) // (n_shorts + 1))
         for k in range(n_shorts):
-            center = step * (k + 1)
-            lo, hi = center - target_seconds/2, center + target_seconds/2
-            s_idx = next((i for i,s in enumerate(sentences) if s['end'] >= lo), 0)
-            e_idx = next((i for i,s in enumerate(sentences) if s['start'] >= hi), len(sentences)-1)
-            e_idx = max(e_idx, s_idx)
-            windows.append({"start_idx": s_idx, "end_idx": e_idx, "reason": "evenly-spaced fallback"})
-        return windows
+            start = min(k * step, max(0, len(sentences)-3))
+            chunk = sentences[start:start+4]
+            text = " ".join(s['text'] for s in chunk)
+            out.append({"script": text, "theme": "fallback excerpt"})
+        return out
 
     if not GROQ_KEY or not sentences:
-        return _fallback_windows()
+        return _fallback_scripts()
 
-    print(f"  Groq: selecting {n_shorts} best ~{target_seconds}s hook moments from {len(sentences)} sentences...")
+    print(f"  Groq: writing {n_shorts} standalone short scripts (~{words_target} words each)...")
     try:
         from groq import Groq
         client = Groq(api_key=GROQ_KEY)
-
-        numbered = "\n".join([
-            f"{i} [{s['start']:.1f}s-{s['end']:.1f}s]: {s['text'][:140]}"
-            for i, s in enumerate(sentences)
-        ])
+        lang_instruction = "Write in Spanish." if IS_SPANISH else "Write in English."
 
         r = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": f"""You are an expert short-form video editor (TikTok/Reels/Shorts).
-You will be given a numbered list of sentences from a long-form narration script, each with its timestamp.
+                {"role": "system", "content": f"""You are an expert short-form (TikTok/Reels/Shorts) scriptwriter.
 
-Your job: pick the {n_shorts} BEST standalone moments to turn into ~{target_seconds}-second short videos.
+You will be given the full text of a long-form documentary/narration script. Your job: write {n_shorts} COMPLETELY STANDALONE short-form scripts inspired by the best hooks, surprising facts, emotional peaks, or claims in the source material.
 
 RULES:
-- Pick moments ANYWHERE in the script - do NOT just chunk it sequentially. Prioritize hooks, surprising facts, emotional peaks, cliffhangers, or strong claims - whatever would make someone stop scrolling.
-- Each selected window's total duration (end timestamp - start timestamp) should be close to {target_seconds} seconds (between {int(target_seconds*0.7)}s and {int(target_seconds*1.3)}s).
-- Each window must be a CONTINUOUS range of sentence indices (start_idx to end_idx inclusive) - do not skip sentences within a single short.
-- Windows for different shorts MAY overlap or reuse similar sentences if that content is strong enough to work twice, but prefer variety across the {n_shorts} shorts when possible.
-- Each window must make sense on its own without needing earlier context (avoid starting mid-thought on a pronoun like "it" or "this" referring to something far earlier).
-- Return ONLY a JSON array, nothing else. No markdown, no explanation outside the JSON.
+- Each script must be a SELF-CONTAINED mini-narration, NOT a literal excerpt or copy-paste of the source text. Rewrite/condense the idea into a tight, punchy standalone script.
+- Each script should be approximately {words_target} words (for ~{target_seconds} seconds of narration at normal pace).
+- Start with a strong HOOK in the first sentence - something that stops someone scrolling (a surprising claim, a question, a cliffhanger).
+- {lang_instruction}
+- Each script must make complete sense on its own with zero external context needed.
+- Family-friendly, no NSFW, no violence, no religion-baiting content.
+- Return ONLY a JSON array, nothing else. No markdown, no explanation.
 
 Format exactly like this:
-[{{"start_idx": 4, "end_idx": 9, "reason": "strong opening claim + payoff"}}, {{"start_idx": 22, "end_idx": 27, "reason": "surprising statistic"}}]"""},
-                {"role": "user", "content": f"Sentences:\n\n{numbered[:40000]}\n\nPick the {n_shorts} best windows as JSON."}
+[{{"script": "full standalone narration text here...", "theme": "short label like 'the vanishing lake'"}}]"""},
+                {"role": "user", "content": f"Source script:\n\n{full_text}\n\nWrite {n_shorts} standalone short scripts as JSON."}
             ],
             model="openai/gpt-oss-120b",
-            max_tokens=1500,
-            temperature=0.6
+            max_tokens=4000,
+            temperature=0.75
         )
 
         raw = r.choices[0].message.content.strip()
-        # Strip potential markdown fences
         raw = re.sub(r'^```json\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE).strip()
         match = re.search(r'\[.*\]', raw, re.DOTALL)
         if not match:
-            print("  Groq short-selection: no JSON array found, using fallback windows")
-            return _fallback_windows()
+            print("  Groq short-script: no JSON array found, using fallback")
+            return _fallback_scripts()
 
         picks = json.loads(match.group(0))
-        windows = []
+        scripts = []
         for p in picks:
-            s_idx = int(p.get("start_idx", -1))
-            e_idx = int(p.get("end_idx", -1))
-            if 0 <= s_idx <= e_idx < len(sentences):
-                windows.append({"start_idx": s_idx, "end_idx": e_idx, "reason": p.get("reason","")})
+            txt = str(p.get("script","")).strip()
+            if len(txt) > 20:
+                scripts.append({"script": txt, "theme": p.get("theme","")})
 
-        if not windows:
-            print("  Groq short-selection: parsed JSON had no valid windows, using fallback")
-            return _fallback_windows()
+        if not scripts:
+            print("  Groq short-script: parsed JSON had no valid scripts, using fallback")
+            return _fallback_scripts()
 
-        for w in windows[:n_shorts]:
-            dur = sentences[w['end_idx']]['end'] - sentences[w['start_idx']]['start']
-            print(f"    Short: sentences {w['start_idx']}-{w['end_idx']} (~{dur:.0f}s) - {w['reason'][:50]}")
+        for s in scripts[:n_shorts]:
+            wc = len(s['script'].split())
+            print(f"    Short script: '{s['theme'][:40]}' ({wc} words)")
 
-        while len(windows) < n_shorts:
-            windows.append(random.choice(_fallback_windows() or [{"start_idx":0,"end_idx":min(5,len(sentences)-1),"reason":"padding fallback"}]))
+        fb = _fallback_scripts()
+        while len(scripts) < n_shorts:
+            scripts.append(fb[len(scripts) % len(fb)] if fb else {"script": topic, "theme": "padding"})
 
-        return windows[:n_shorts]
+        return scripts[:n_shorts]
 
     except Exception as e:
-        print(f"  Groq short-selection error: {e}")
-        return _fallback_windows()
+        print(f"  Groq short-script error: {e}")
+        return _fallback_scripts()
 
 
 
@@ -321,44 +325,58 @@ Format exactly like this:
 SUBTITLE_STYLES = {
     "cinema": {"name":"Cinema","font":"Arial","size":62,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&H80000000",
-        "border":3,"outline":0,"shadow":0,"margin":45,"spacing":0.5},
+        "border":3,"outline":0,"shadow":0,"margin":45,"spacing":0.5,
+        "highlight":"&H0000FFFF"},   # yellow highlight on white text
     "modern_bold": {"name":"Modern Bold","font":"Arial Black","size":68,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00111111","back":"&H00000000",
-        "border":1,"outline":5,"shadow":2,"margin":50,"spacing":1.2},
+        "border":1,"outline":5,"shadow":2,"margin":50,"spacing":1.2,
+        "highlight":"&H0000FFFF"},   # yellow highlight on white text
     "neon_yellow": {"name":"Neon Yellow","font":"Arial Black","size":70,"bold":-1,
         "primary":"&H0000FFFF","outline_c":"&H00000044","back":"&H00000000",
-        "border":1,"outline":5,"shadow":3,"margin":52,"spacing":1.5},
+        "border":1,"outline":5,"shadow":3,"margin":52,"spacing":1.5,
+        "highlight":"&H00FFFFFF"},   # white highlight on yellow text
     "soft_white": {"name":"Soft White","font":"Arial","size":60,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00333333","back":"&H00000000",
-        "border":1,"outline":3,"shadow":4,"margin":45,"spacing":0.8},
+        "border":1,"outline":3,"shadow":4,"margin":45,"spacing":0.8,
+        "highlight":"&H0000FFFF"},   # yellow highlight on white text
     "electric_cyan": {"name":"Electric Cyan","font":"Arial Black","size":66,"bold":-1,
         "primary":"&H00FFFF00","outline_c":"&H00663300","back":"&H00000000",
-        "border":1,"outline":4,"shadow":3,"margin":48,"spacing":1},
+        "border":1,"outline":4,"shadow":3,"margin":48,"spacing":1,
+        "highlight":"&H0000FF00"},   # green highlight on cyan text
 }
 
 # Short-specific vertical styles (1080x1920 canvas). Bigger fonts than
 # landscape presets since viewers are closer to phone screens, and a much
 # larger MarginV to clear TikTok/Reels/YouTube Shorts UI (caption, like/
 # share buttons, progress bar) which occupies the bottom ~20-25% of frame.
+# Every style has an explicit "highlight" color chosen for contrast against
+# its own primary color (not derived from the style name/key - that was
+# fragile and left several styles with a low-contrast or invisible highlight).
 SHORT_SUBTITLE_STYLES = {
     "short_punch": {"name":"Short Punch","font":"Arial Black","size":92,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00000000","back":"&H00000000",
-        "border":1,"outline":8,"shadow":4,"margin":480,"spacing":1},
+        "border":1,"outline":8,"shadow":4,"margin":480,"spacing":1,
+        "highlight":"&H0000FFFF"},   # yellow highlight on white text
     "short_neon": {"name":"Short Neon","font":"Arial Black","size":96,"bold":-1,
         "primary":"&H0000FFFF","outline_c":"&H00330033","back":"&H00000000",
-        "border":1,"outline":8,"shadow":5,"margin":480,"spacing":1.2},
+        "border":1,"outline":8,"shadow":5,"margin":480,"spacing":1.2,
+        "highlight":"&H00FFFFFF"},   # white highlight on yellow text
     "short_clean": {"name":"Short Clean","font":"Arial","size":86,"bold":-1,
         "primary":"&H00FFFFFF","outline_c":"&H00111111","back":"&H90000000",
-        "border":3,"outline":0,"shadow":0,"margin":460,"spacing":0.6},
+        "border":3,"outline":0,"shadow":0,"margin":460,"spacing":0.6,
+        "highlight":"&H0000FFFF"},   # yellow highlight on white text
     "short_fire": {"name":"Short Fire","font":"Arial Black","size":94,"bold":-1,
         "primary":"&H0000A5FF","outline_c":"&H00001133","back":"&H00000000",
-        "border":1,"outline":9,"shadow":5,"margin":470,"spacing":1.3},
+        "border":1,"outline":9,"shadow":5,"margin":470,"spacing":1.3,
+        "highlight":"&H00FFFFFF"},   # white highlight on orange text (was invisible yellow-on-orange before)
     "short_royal": {"name":"Short Royal","font":"Arial Black","size":90,"bold":-1,
-        "primary":"&H00FFE0B0","outline_c":"&H00301040","back":"&H00000000",
-        "border":1,"outline":7,"shadow":4,"margin":480,"spacing":1},
+        "primary":"&H0080E0FF","outline_c":"&H00301040","back":"&H00000000",
+        "border":1,"outline":7,"shadow":4,"margin":480,"spacing":1,
+        "highlight":"&H00FF3399"},   # hot pink/magenta highlight on gold text (was invisible yellow-on-gold before)
     "short_mint": {"name":"Short Mint","font":"Arial Black","size":88,"bold":-1,
         "primary":"&H00D4FF9F","outline_c":"&H00102010","back":"&H00000000",
-        "border":1,"outline":7,"shadow":4,"margin":475,"spacing":1.1},
+        "border":1,"outline":7,"shadow":4,"margin":475,"spacing":1.1,
+        "highlight":"&H00FFFFFF"},   # white highlight on mint text (was low-contrast yellow-on-mint before)
 }
 
 def _fmt(sec):
@@ -382,10 +400,9 @@ def create_subtitles(sentences, ass_path, word_data=None, style_key=None,
     s = style_set[key]
     print(f"  Subtitle: {s['name']} {'(word-highlight)' if word_data else '(sentence)'} @ {play_res[0]}x{play_res[1]}")
     
-    # Highlight color (the word currently being spoken)
-    highlight = "&H0000FFFF"  # Yellow highlight
-    if "cyan" in key: highlight = "&H0000FF00"  # Green for cyan style
-    if "yellow" in key or "neon" in key: highlight = "&H00FFFFFF"  # White for yellow/neon styles
+    # Highlight color (the word currently being spoken) - explicit per-style,
+    # chosen for contrast against that style's own primary text color.
+    highlight = s.get("highlight", "&H0000FFFF")
     
     with open(ass_path, "w", encoding="utf-8-sig") as f:
         f.write(f"[Script Info]\nScriptType: v4.00+\nPlayResX: {play_res[0]}\nPlayResY: {play_res[1]}\n")
@@ -881,7 +898,7 @@ def process_clip(args):
 # ==========================================
 # 7. RENDER ENGINE (GPU-Accelerated)
 # ==========================================
-def render_video(sentences, audio_path, ass_path, logo_path, out_nosub, out_sub):
+def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
     n = len(sentences)
     print(f"\n  Rendering {n} clips (5 workers)...")
     
@@ -997,34 +1014,29 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_nosub, out_sub)
                     try: os.remove(tmp)
                     except: pass
     
-    # V1: No subs (900p, GPU)
-    update_status(80, "Rendering V1 (900p)...")
+    # Render final video WITH subtitles only (no-subs version removed - not needed)
+    update_status(85, "Rendering final video (1080p + subs)...")
     enc = _enc_args()
-    if logo_path and os.path.exists(logo_path):
-        filt = "[0:v]scale=1600:900:force_original_aspect_ratio=decrease,pad=1600:900:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=160:-1[l];[bg][l]overlay=20:20[v]"
-        cmd = ["ffmpeg","-y","-hwaccel","cuda","-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","2:a"] + enc + ["-c:a","aac","-b:a","128k","-shortest",str(out_nosub)]
-    else:
-        cmd = ["ffmpeg","-y","-hwaccel","cuda","-i","visual.mp4","-i",str(audio_path),
-            "-vf","scale=1600:900:force_original_aspect_ratio=decrease,pad=1600:900:(ow-iw)/2:(oh-ih)/2"
-            ] + enc + ["-c:a","aac","-b:a","128k","-shortest",str(out_nosub)]
-    subprocess.run(cmd, capture_output=True, timeout=600)
-    if not os.path.exists(out_nosub): return False
-    print(f"  V1: {os.path.getsize(out_nosub)/(1024**2):.0f}MB")
-    
-    # V2: With subs (1080p, GPU)
-    update_status(88, "Rendering V2 (1080p + subs)...")
     ass_esc = str(ass_path).replace('\\','/').replace(':','\\\\:')
     if logo_path and os.path.exists(logo_path):
-        filt = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[1:v]scale=180:-1[l];[bg][l]overlay=25:25[wl];[wl]subtitles='{ass_esc}'[v]"
+        filt = (f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+                f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];"
+                f"[1:v]scale=180:-1[l];[bg][l]overlay=25:25[wl];"
+                f"[wl]subtitles='{ass_esc}'[v];"
+                f"[2:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
         cmd = ["ffmpeg","-y","-hwaccel","cuda","-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","2:a"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
+            "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
     else:
-        filt = f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v]"
+        filt = (f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+                f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v];"
+                f"[1:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
         cmd = ["ffmpeg","-y","-hwaccel","cuda","-i","visual.mp4","-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","1:a"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
-    subprocess.run(cmd, capture_output=True, timeout=600)
-    if os.path.exists(out_sub): print(f"  V2: {os.path.getsize(out_sub)/(1024**2):.0f}MB")
+            "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
+    r = subprocess.run(cmd, capture_output=True, timeout=600)
+    if not os.path.exists(out_sub):
+        print(f"  Final render failed - {r.stderr.decode(errors='ignore')[-400:]}")
+        return False
+    print(f"  Final: {os.path.getsize(out_sub)/(1024**2):.0f}MB")
     return True
 
 
@@ -1195,15 +1207,13 @@ create_subtitles(sentences, ass, word_data=word_data if word_data else None)
 
 # Render
 update_status(54, "Processing video...")
-o1 = OUTPUT_DIR/f"final_{JOB_ID}_NO_SUBS.mp4"
 o2 = OUTPUT_DIR/f"final_{JOB_ID}_WITH_SUBS.mp4"
 
-if render_video(sentences, audio, ass, logo, o1, o2):
+if render_video(sentences, audio, ass, logo, o2):
     update_status(93, "Uploading...")
-    l1 = upload_drive(o1); l2 = upload_drive(o2)
+    l2 = upload_drive(o2)
     msg = "Done!\n"
-    if l1: msg += f"No Subs: {l1}\n"
-    if l2: msg += f"With Subs: {l2}\n"
+    if l2: msg += f"Video: {l2}\n"
 
     # ==========================================
     # SHORTS PIPELINE
@@ -1214,94 +1224,93 @@ if render_video(sentences, audio, ass, logo, o1, o2):
     if sentences and sentences[-1]['end'] >= SHORT_DUR_TARGET * 0.6:
         update_status(95, f"Generating {SHORTS_COUNT} shorts...")
         try:
-            windows = select_short_segments(sentences, SHORTS_COUNT, SHORT_DUR_TARGET)
-            print(f"  Shorts: {len(windows)} windows selected (requested {SHORTS_COUNT})")
+            short_scripts = generate_short_scripts(sentences, TOPIC if MODE=="topic" else text[:100], SHORTS_COUNT, SHORT_DUR_TARGET)
+            print(f"  Shorts: {len(short_scripts)} scripts generated (requested {SHORTS_COUNT})")
             short_links = []
             short_failures = []  # (short_num, reason) for end-of-run summary
-            for si, win in enumerate(windows):
-                update_status(95, f"Short {si+1}/{len(windows)}...")
-                s_idx, e_idx = win['start_idx'], win['end_idx']
-                seg_sentences = sentences[s_idx:e_idx+1]
-                if not seg_sentences:
-                    short_failures.append((si+1, "empty sentence range"))
+
+            for si, sc in enumerate(short_scripts):
+                update_status(95, f"Short {si+1}/{len(short_scripts)}...")
+                script_text = sc['script'].strip()
+                if len(script_text) < 20:
+                    short_failures.append((si+1, "empty/too-short script"))
                     continue
 
-                sent_t_start = seg_sentences[0]['start']
-                sent_t_end = seg_sentences[-1]['end']
-
-                # IMPORTANT: snap the window to actual WORD-level timestamps
-                # (not sentence-level ones) if word_data is available. Sentence
-                # boundaries from AssemblyAI can differ slightly (tens of ms)
-                # from the real first/last word timestamps within that range.
-                # Using sentence boundaries for extraction while rebasing
-                # word_data against them caused small mismatches - words near
-                # the edges getting clamped/collided - which showed up as
-                # the WRONG word being highlighted relative to the audio.
-                # Anchoring both to the same source (word_data) eliminates
-                # that drift entirely.
-                if word_data:
-                    in_range = [w for w in word_data if w['end'] > sent_t_start and w['start'] < sent_t_end]
-                    if in_range:
-                        t_start = min(w['start'] for w in in_range)
-                        t_end = max(w['end'] for w in in_range)
-                    else:
-                        t_start, t_end = sent_t_start, sent_t_end
-                else:
-                    t_start, t_end = sent_t_start, sent_t_end
-
-                # Re-base timestamps to 0 for this short, keep original index
-                # for AI_QUERIES lookups (queries were generated per full-script sentence).
-                rebased = []
-                for orig_i, s in enumerate(seg_sentences, start=s_idx):
-                    rebased.append({
-                        "text": s['text'],
-                        "start": max(0.0, s['start'] - t_start),
-                        "end": max(0.0, s['end'] - t_start),
-                        "orig_idx": orig_i,
-                    })
-
+                # --- Independent TTS for this short (same voice, own audio file) ---
                 short_audio = TEMP_DIR / f"short_{si}_audio.wav"
-                if not extract_short_audio(audio, t_start, t_end, short_audio):
-                    print(f"  Short {si+1}: audio extraction failed, skipping")
-                    short_failures.append((si+1, "audio extraction failed"))
+                if not generate_audio(script_text, voice, short_audio):
+                    print(f"  Short {si+1}: TTS failed, skipping")
+                    short_failures.append((si+1, "TTS failed"))
                     continue
 
-                # Vertical-tuned word data (re-based) for this short's subtitle window.
-                # Use overlap logic (word ends after t_start AND starts before t_end)
-                # rather than a strict start-only bound - a strict bound could exclude
-                # ALL words if ASR word timestamps sit slightly outside the sentence-
-                # derived t_start/t_end window, which was silently falling back to
-                # sentence-level (whole-sentence) highlighting instead of word-by-word.
-                short_word_data = None
-                if word_data:
-                    ww = [w for w in word_data if w['end'] > t_start and w['start'] < t_end]
-                    if ww:
-                        short_word_data = []
-                        for w in ww:
-                            # Clamp to the short's [0, duration] range so no word
-                            # starts negative or extends past the clip end.
-                            rs = max(0.0, w['start'] - t_start)
-                            re_ = min(t_end - t_start, w['end'] - t_start)
-                            if re_ > rs:
-                                short_word_data.append({"text": w['text'], "start": rs, "end": re_})
-                        if not short_word_data:
-                            short_word_data = None
+                # --- Independent transcription for accurate word-level timing ---
+                # Re-transcribing THIS short's own audio (instead of reusing/cutting
+                # from the main video's word_data) guarantees the subtitle timing is
+                # always perfectly matched to what's actually in this short's audio -
+                # no cross-file drift, no boundary mismatches.
+                short_sentences, short_word_data = [], []
+                if ASSEMBLY_KEY:
+                    try:
+                        tx_config = aai.TranscriptionConfig(
+                            language_code="es" if IS_SPANISH else "en",
+                            punctuate=True, format_text=True,
+                        )
+                        tx = aai.Transcriber(config=tx_config).transcribe(str(short_audio))
+                        if tx.status != aai.TranscriptStatus.error:
+                            for s in tx.get_sentences():
+                                short_sentences.append({"text": s.text, "start": s.start/1000, "end": s.end/1000})
+                            if short_sentences: short_sentences[-1]['end'] += 0.3
+                            for w in tx.words:
+                                short_word_data.append({"text": w.text, "start": w.start/1000, "end": w.end/1000})
+                    except Exception as e:
+                        print(f"  Short {si+1}: transcription error ({e}), using estimated timing")
 
+                # Fallback: if transcription failed/unavailable, estimate timing
+                # by splitting the script into sentences and spacing them evenly
+                # across the actual audio duration (probed via ffprobe).
+                if not short_sentences:
+                    try:
+                        rp = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
+                            "-of","default=noprint_wrappers=1:nokey=1", str(short_audio)],
+                            capture_output=True, text=True, timeout=15)
+                        total_dur = float(rp.stdout.strip())
+                    except: total_dur = SHORT_DUR_TARGET
+                    parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', script_text) if len(p.strip()) > 2]
+                    if not parts: parts = [script_text]
+                    per = total_dur / len(parts)
+                    for i, p in enumerate(parts):
+                        short_sentences.append({"text": p, "start": i*per, "end": (i+1)*per})
+
+                # --- Vertical-tuned subtitles for this short ---
+                for i, s in enumerate(short_sentences):
+                    s['orig_idx'] = i
                 short_ass = TEMP_DIR / f"short_{si}_subs.ass"
                 create_subtitles(
-                    rebased, short_ass,
-                    word_data=short_word_data,
+                    short_sentences, short_ass,
+                    word_data=short_word_data if short_word_data else None,
                     style_set=SHORT_SUBTITLE_STYLES,
                     play_res=(1080, 1920),
                     max_chars=20,   # narrower canvas + bigger font (86-96px) -> tighter budget
                 )
 
+                # --- AI visual-matching queries for THIS short's own sentences ---
+                # (independent from the main video's AI_QUERIES, since this is
+                # different, freshly-written content)
+                short_queries = generate_queries_for_sentences(short_sentences)
+                # Temporarily point AI_QUERIES at this short's queries so
+                # process_short_clip (which reads the global AI_QUERIES) picks
+                # the right query per sentence via orig_idx.
+                saved_queries = AI_QUERIES
+                AI_QUERIES = short_queries
+
                 short_out = OUTPUT_DIR / f"short_{JOB_ID}_{si+1}.mp4"
-                ok = render_short(si, rebased, short_audio, short_ass, logo, short_out)
+                ok = render_short(si, short_sentences, short_audio, short_ass, logo, short_out)
                 if not ok:
-                    print(f"  Short {si+1}: retrying once (re-extracting audio)...")
-                    if extract_short_audio(audio, t_start, t_end, short_audio):
-                        ok = render_short(si, rebased, short_audio, short_ass, logo, short_out)
+                    print(f"  Short {si+1}: retrying once...")
+                    ok = render_short(si, short_sentences, short_audio, short_ass, logo, short_out)
+
+                AI_QUERIES = saved_queries  # restore main video's queries
+
                 if ok:
                     link = upload_drive(short_out)
                     if link:
@@ -1313,14 +1322,14 @@ if render_video(sentences, audio, ass, logo, o1, o2):
                     print(f"  Short {si+1}: failed after retry, skipping")
                     short_failures.append((si+1, "render failed after retry"))
 
-            print(f"  Shorts summary: {len(short_links)}/{len(windows)} succeeded")
+            print(f"  Shorts summary: {len(short_links)}/{len(short_scripts)} succeeded")
             if short_failures:
                 print(f"  Shorts failures: {short_failures}")
                 msg += f"({len(short_failures)} short(s) failed - check logs)\n"
         except Exception as e:
             print(f"  Shorts pipeline error: {e}")
 
-    update_status(100, msg, "completed", l1 or l2)
+    update_status(100, msg, "completed", l2)
     print(f"\n  {msg}")
 else:
     update_status(0, "Render failed", "failed")
