@@ -273,7 +273,7 @@ RULES:
 
 Format exactly like this:
 [{{"start_idx": 4, "end_idx": 9, "reason": "strong opening claim + payoff"}}, {{"start_idx": 22, "end_idx": 27, "reason": "surprising statistic"}}]"""},
-                {"role": "user", "content": f"Sentences:\n\n{numbered[:12000]}\n\nPick the {n_shorts} best windows as JSON."}
+                {"role": "user", "content": f"Sentences:\n\n{numbered[:40000]}\n\nPick the {n_shorts} best windows as JSON."}
             ],
             model="openai/gpt-oss-120b",
             max_tokens=1500,
@@ -608,14 +608,16 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
         filt = (f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
                 f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2[bg];"
                 f"[1:v]scale=280:-1[l];[bg][l]overlay=30:40[wl];"
-                f"[wl]subtitles='{ass_esc}'[v]")
+                f"[wl]subtitles='{ass_esc}'[v];"
+                f"[2:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
         cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",visual_path,"-i",str(logo_path),"-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","2:a"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
+            "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
     else:
         filt = (f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
-                f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v]")
+                f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v];"
+                f"[1:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
         cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",visual_path,"-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","1:a"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
+            "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
     r = subprocess.run(cmd, capture_output=True, timeout=300)
 
     for p in [list_path, visual_path]:
@@ -1213,16 +1215,39 @@ if render_video(sentences, audio, ass, logo, o1, o2):
         update_status(95, f"Generating {SHORTS_COUNT} shorts...")
         try:
             windows = select_short_segments(sentences, SHORTS_COUNT, SHORT_DUR_TARGET)
+            print(f"  Shorts: {len(windows)} windows selected (requested {SHORTS_COUNT})")
             short_links = []
+            short_failures = []  # (short_num, reason) for end-of-run summary
             for si, win in enumerate(windows):
                 update_status(95, f"Short {si+1}/{len(windows)}...")
                 s_idx, e_idx = win['start_idx'], win['end_idx']
                 seg_sentences = sentences[s_idx:e_idx+1]
                 if not seg_sentences:
+                    short_failures.append((si+1, "empty sentence range"))
                     continue
 
-                t_start = seg_sentences[0]['start']
-                t_end = seg_sentences[-1]['end']
+                sent_t_start = seg_sentences[0]['start']
+                sent_t_end = seg_sentences[-1]['end']
+
+                # IMPORTANT: snap the window to actual WORD-level timestamps
+                # (not sentence-level ones) if word_data is available. Sentence
+                # boundaries from AssemblyAI can differ slightly (tens of ms)
+                # from the real first/last word timestamps within that range.
+                # Using sentence boundaries for extraction while rebasing
+                # word_data against them caused small mismatches - words near
+                # the edges getting clamped/collided - which showed up as
+                # the WRONG word being highlighted relative to the audio.
+                # Anchoring both to the same source (word_data) eliminates
+                # that drift entirely.
+                if word_data:
+                    in_range = [w for w in word_data if w['end'] > sent_t_start and w['start'] < sent_t_end]
+                    if in_range:
+                        t_start = min(w['start'] for w in in_range)
+                        t_end = max(w['end'] for w in in_range)
+                    else:
+                        t_start, t_end = sent_t_start, sent_t_end
+                else:
+                    t_start, t_end = sent_t_start, sent_t_end
 
                 # Re-base timestamps to 0 for this short, keep original index
                 # for AI_QUERIES lookups (queries were generated per full-script sentence).
@@ -1230,14 +1255,15 @@ if render_video(sentences, audio, ass, logo, o1, o2):
                 for orig_i, s in enumerate(seg_sentences, start=s_idx):
                     rebased.append({
                         "text": s['text'],
-                        "start": s['start'] - t_start,
-                        "end": s['end'] - t_start,
+                        "start": max(0.0, s['start'] - t_start),
+                        "end": max(0.0, s['end'] - t_start),
                         "orig_idx": orig_i,
                     })
 
                 short_audio = TEMP_DIR / f"short_{si}_audio.wav"
                 if not extract_short_audio(audio, t_start, t_end, short_audio):
                     print(f"  Short {si+1}: audio extraction failed, skipping")
+                    short_failures.append((si+1, "audio extraction failed"))
                     continue
 
                 # Vertical-tuned word data (re-based) for this short's subtitle window.
@@ -1281,8 +1307,16 @@ if render_video(sentences, audio, ass, logo, o1, o2):
                     if link:
                         short_links.append(link)
                         msg += f"Short {si+1}: {link}\n"
+                    else:
+                        short_failures.append((si+1, "upload failed (render succeeded)"))
                 else:
                     print(f"  Short {si+1}: failed after retry, skipping")
+                    short_failures.append((si+1, "render failed after retry"))
+
+            print(f"  Shorts summary: {len(short_links)}/{len(windows)} succeeded")
+            if short_failures:
+                print(f"  Shorts failures: {short_failures}")
+                msg += f"({len(short_failures)} short(s) failed - check logs)\n"
         except Exception as e:
             print(f"  Shorts pipeline error: {e}")
 
