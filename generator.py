@@ -35,14 +35,30 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 # t3_model= kwarg needed for the V3 multilingual checkpoint - that only
 # exists on the GitHub master branch (confirmed by inspecting the actual
 # wheel contents). Install from source to get real V3 support.
-# Moondream2 - local vision-language model for clip visual verification.
+# SmolVLM2 - local vision-language model for clip visual verification.
 # Replaces the earlier Groq-based vision check, which hit constant rate
 # limits at scale (100+ clips per video, each needing a verification call).
 # This runs locally on the Kaggle GPU with zero API limits. Query
 # GENERATION still uses Groq (openai/gpt-oss-120b) unchanged - that part
 # works well and isn't being replaced, only the per-clip visual check.
-subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-    "transformers>=4.50.0", "einops", "pyvips-binary", "num2words"], capture_output=True)
+# NOTE: "av" (PyAV) is REQUIRED for SmolVLM2's video-loading path - without
+# it, every single verification call fails at frame-decode time and
+# silently falls back to accepting the clip unverified. This previously
+# went undetected for an entire run since the failure message looked like
+# a generic skip rather than a missing-dependency error.
+_vision_deps = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+    "transformers>=4.50.0", "einops", "pyvips-binary", "num2words", "av"],
+    capture_output=True, text=True)
+if _vision_deps.returncode != 0:
+    print(f"  WARNING: vision verification dependencies failed to install - "
+          f"clip verification will not work this run: {_vision_deps.stderr[-300:]}")
+else:
+    try:
+        import av as _av_check
+        print(f"  Vision verification deps OK (PyAV {_av_check.__version__})")
+    except ImportError as e:
+        print(f"  WARNING: PyAV still not importable after install ({e}) - "
+              f"verification will silently fail open for every clip this run")
 
 print("  Installing chatterbox-tts from GitHub (master) for V3 support...")
 _cb_installed = subprocess.run(
@@ -942,15 +958,23 @@ def _load_smolvlm():
     ).to("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def verify_clip_matches_query(clip_path, query):
+def verify_clip_matches_query(clip_path, query, filter_women=True):
     """
     Ask the local SmolVLM2 model whether the given video CLIP (not just a
-    single frame) actually matches the intended search query. This is the
-    real fix for stock footage that "downloads fine" but is visually
-    unrelated to the query - there was previously ZERO check that a
-    downloaded clip actually looked like what it was searched for.
+    single frame) actually matches the intended search query, AND whether
+    it shows a woman (if filter_women is True) - combined into ONE model
+    call for efficiency rather than two separate passes.
 
-    Returns True if it matches well enough to use, False otherwise.
+    This is the real fix for stock footage that "downloads fine" but is
+    visually unrelated to the query - there was previously ZERO check
+    that a downloaded clip actually looked like what it was searched for,
+    and no check on content restrictions beyond the query TEXT (a neutral
+    query like "person walking city" could still return a clip showing a
+    woman, since the restriction was only ever applied to search terms,
+    not actual visual content).
+
+    Returns True if the clip should be USED (topic matches AND, if
+    filter_women, no woman detected), False if it should be rejected.
     Fails open (returns True) on any error, so a model hiccup never blocks
     the whole pipeline - it's a quality filter, not a hard gate. No rate
     limiting needed since this runs 100% locally.
@@ -963,15 +987,25 @@ def verify_clip_matches_query(clip_path, query):
 
     try:
         with _smolvlm_lock:  # serialize GPU access across worker threads
+            if filter_women:
+                prompt = f"""Look at this video clip and answer two questions, each on its own line, in this EXACT format:
+1. <YES or NO>
+2. <YES or NO>
+
+1. Does this video clip visually match the concept: "{query}"? Answer YES if it reasonably represents the concept (even loosely/thematically - stock footage rarely is a perfect literal match). Answer NO only if it's clearly unrelated.
+2. Does the clip show any woman or women as a visible person in frame (not just implied)? Answer YES or NO."""
+            else:
+                prompt = f"""Look at this video clip and answer, in this EXACT format:
+1. <YES or NO>
+2. NO
+
+1. Does this video clip visually match the concept: "{query}"? Answer YES if it reasonably represents the concept (even loosely/thematically - stock footage rarely is a perfect literal match). Answer NO only if it's clearly unrelated."""
+
             messages = [{
                 "role": "user",
                 "content": [
                     {"type": "video", "path": str(clip_path)},
-                    {"type": "text", "text": f"""Does this video clip visually match the concept: "{query}"?
-
-Answer with ONLY one word: YES or NO.
-Answer YES if the clip reasonably represents the concept (even loosely/thematically - stock footage rarely is a perfect literal match).
-Answer NO only if the clip is clearly unrelated or would look out of place next to narration about "{query}"."""}
+                    {"type": "text", "text": prompt}
                 ]
             }]
             inputs = _smolvlm_processor.apply_chat_template(
@@ -981,15 +1015,29 @@ Answer NO only if the clip is clearly unrelated or would look out of place next 
 
             input_len = inputs["input_ids"].shape[1]
             with torch.no_grad():
-                generated_ids = _smolvlm_model.generate(**inputs, do_sample=False, max_new_tokens=6)
+                generated_ids = _smolvlm_model.generate(**inputs, do_sample=False, max_new_tokens=20)
             # Slice off the input tokens so we only decode the model's NEW
             # output, not the full prompt+answer text. This is the correct,
-            # robust way to isolate the answer - the earlier approach
-            # (decoding everything, then taking the string's tail) risked
-            # misparsing if the prompt itself contained YES/NO-like text.
+            # robust way to isolate the answer.
             new_tokens = generated_ids[:, input_len:]
             answer = _smolvlm_processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip().upper()
-            return "YES" in answer or "NO" not in answer
+
+            # Parse line 1 (topic match) and line 2 (woman detection)
+            # independently - don't just search the whole blob for "YES",
+            # since that would conflate the two answers if the model
+            # returns e.g. "1. NO / 2. YES" (topic mismatch AND a woman -
+            # searching the whole string for "YES" would wrongly pass it).
+            lines = [l.strip() for l in answer.split('\n') if l.strip()]
+            line1 = lines[0] if len(lines) > 0 else ""
+            line2 = lines[1] if len(lines) > 1 else ""
+
+            topic_match = "YES" in line1 or "NO" not in line1
+            has_woman = filter_women and "YES" in line2
+
+            if has_woman:
+                print(f"    Rejected clip for '{query[:40]}' (woman detected in frame)")
+                return False
+            return topic_match
     except Exception as e:
         print(f"    Visual verification skipped ({str(e)[:60]}), accepting clip")
         return True
