@@ -35,6 +35,15 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 # t3_model= kwarg needed for the V3 multilingual checkpoint - that only
 # exists on the GitHub master branch (confirmed by inspecting the actual
 # wheel contents). Install from source to get real V3 support.
+# Moondream2 - local vision-language model for clip visual verification.
+# Replaces the earlier Groq-based vision check, which hit constant rate
+# limits at scale (100+ clips per video, each needing a verification call).
+# This runs locally on the Kaggle GPU with zero API limits. Query
+# GENERATION still uses Groq (openai/gpt-oss-120b) unchanged - that part
+# works well and isn't being replaced, only the per-clip visual check.
+subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+    "transformers>=4.50.0", "einops", "pyvips-binary", "num2words"], capture_output=True)
+
 print("  Installing chatterbox-tts from GitHub (master) for V3 support...")
 _cb_installed = subprocess.run(
     [sys.executable, "-m", "pip", "install", "--quiet",
@@ -625,16 +634,12 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True):
                 continue
 
             if verify:
-                frame = TEMP_DIR / f"check_s{tag}_{idx}.jpg"
-                if _extract_check_frame(out, frame):
-                    matches = verify_clip_matches_query(frame, query)
-                    try: os.remove(frame)
+                matches = verify_clip_matches_query(out, query)
+                if not matches:
+                    print(f"    Rejected short clip for '{query[:40]}' (visual mismatch)")
+                    try: os.remove(out)
                     except: pass
-                    if not matches:
-                        print(f"    Rejected short clip for '{query[:40]}' (visual mismatch)")
-                        try: os.remove(out)
-                        except: pass
-                        continue
+                    continue
 
             USED_URLS.add(url); return str(out)
         except: continue
@@ -911,97 +916,86 @@ def generate_audio(text, ref_audio, out_path):
 # ==========================================
 # 6. VIDEO ENGINE (GPU-Accelerated)
 # ==========================================
-# Shared rate limiter for Groq vision calls across all worker threads.
-# 5 concurrent workers all hitting the vision endpoint at once was causing
-# a 429 storm where most calls failed and silently "failed open" (accepted
-# the clip unverified) - defeating the point of verification for a large
-# fraction of clips. This enforces a global minimum gap between requests
-# regardless of how many threads are calling concurrently.
-_vision_rate_lock = threading.Lock()
-_vision_last_call = [0.0]
-_VISION_MIN_INTERVAL = 2.2  # seconds between vision calls, tuned to Groq's free-tier rate limit
+# Local video-chunk verification model (SmolVLM2-500M-Video-Instruct).
+# Replaces the earlier Groq vision-based single-frame check, which hit
+# constant rate limits at scale (100+ verification calls per video) and
+# only ever looked at ONE static frame per clip, missing motion/scene
+# changes across the chunk. This model takes the actual video file
+# directly and reasons about the whole chunk. Runs 100% locally on the
+# Kaggle GPU - zero API calls, zero rate limits. Query GENERATION still
+# uses Groq (openai/gpt-oss-120b) unchanged, since that part works well.
+_smolvlm_model = None
+_smolvlm_processor = None
+_smolvlm_lock = threading.Lock()  # model isn't thread-safe for concurrent .generate() calls
 
-def _throttle_vision_call():
-    with _vision_rate_lock:
-        now = time.time()
-        wait = _VISION_MIN_INTERVAL - (now - _vision_last_call[0])
-        if wait > 0:
-            time.sleep(wait)
-        _vision_last_call[0] = time.time()
+def _load_smolvlm():
+    global _smolvlm_model, _smolvlm_processor
+    if _smolvlm_model is not None:
+        return
+    from transformers import AutoProcessor, AutoModelForImageTextToText
+    model_path = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+    print("  Loading local video verification model (SmolVLM2-500M)...")
+    _smolvlm_processor = AutoProcessor.from_pretrained(model_path)
+    _smolvlm_model = AutoModelForImageTextToText.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+    ).to("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def verify_clip_matches_query(frame_path, query, max_retries=2):
+def verify_clip_matches_query(clip_path, query):
     """
-    Ask a vision-capable model (Groq's qwen/qwen3.6-27b) whether the given
-    frame actually matches the intended search query. This is the real fix
-    for stock footage that "downloads fine" but is visually unrelated to
-    the query (e.g. a keyword-matched but thematically wrong clip) - there
-    was previously ZERO check that a downloaded clip actually looked like
-    what it was searched for.
+    Ask the local SmolVLM2 model whether the given video CLIP (not just a
+    single frame) actually matches the intended search query. This is the
+    real fix for stock footage that "downloads fine" but is visually
+    unrelated to the query - there was previously ZERO check that a
+    downloaded clip actually looked like what it was searched for.
 
     Returns True if it matches well enough to use, False otherwise.
-    Retries on rate limits (429) with backoff before giving up and failing
-    open - a single rate-limit hit no longer silently skips verification.
+    Fails open (returns True) on any error, so a model hiccup never blocks
+    the whole pipeline - it's a quality filter, not a hard gate. No rate
+    limiting needed since this runs 100% locally.
     """
-    if not GROQ_KEY:
-        return True
     try:
-        import base64
-        with open(frame_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode('utf-8')
+        _load_smolvlm()
     except Exception as e:
-        print(f"    Visual verification skipped (frame read error: {str(e)[:60]}), accepting clip")
+        print(f"    Video verification model unavailable ({str(e)[:60]}), accepting clip")
         return True
 
-    from groq import Groq
-    client = Groq(api_key=GROQ_KEY)
-
-    for attempt in range(max_retries + 1):
-        _throttle_vision_call()
-        try:
-            r = client.chat.completions.create(
-                model="qwen/qwen3.6-27b",
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"""Does this image visually match the concept: "{query}"?
+    try:
+        with _smolvlm_lock:  # serialize GPU access across worker threads
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "video", "path": str(clip_path)},
+                    {"type": "text", "text": f"""Does this video clip visually match the concept: "{query}"?
 
 Answer with ONLY one word: YES or NO.
-Answer YES if the image reasonably represents the concept (even loosely/thematically - it doesn't need to be a perfect literal match, stock footage rarely is).
-Answer NO only if the image is clearly unrelated or would look out of place/confusing next to narration about "{query}"."""},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                    ]
-                }],
-                temperature=0.2,
-                max_completion_tokens=10,
-            )
-            answer = r.choices[0].message.content.strip().upper()
-            return "YES" in answer
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "rate limit" in err_str.lower():
-                if attempt < max_retries:
-                    backoff = 3.0 * (attempt + 1)
-                    print(f"    Vision rate limited, retrying in {backoff:.0f}s (attempt {attempt+1}/{max_retries})...")
-                    time.sleep(backoff)
-                    continue
-                else:
-                    print(f"    Vision verification: rate limit persisted after {max_retries} retries, accepting clip unverified")
-                    return True
-            else:
-                print(f"    Visual verification skipped ({err_str[:60]}), accepting clip")
-                return True
-    return True
+Answer YES if the clip reasonably represents the concept (even loosely/thematically - stock footage rarely is a perfect literal match).
+Answer NO only if the clip is clearly unrelated or would look out of place next to narration about "{query}"."""}
+                ]
+            }]
+            inputs = _smolvlm_processor.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=True,
+                return_dict=True, return_tensors="pt",
+            ).to(_smolvlm_model.device, dtype=torch.bfloat16)
 
-
-def _extract_check_frame(video_path, frame_path):
-    """Grab one representative frame from ~1/3 into the clip for verification."""
-    try:
-        subprocess.run(["ffmpeg","-y","-i",str(video_path),
-            "-vf","select=eq(n\\,5)","-frames:v","1","-q:v","3",str(frame_path)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-        return os.path.exists(frame_path) and os.path.getsize(frame_path) > 500
-    except: return False
+            input_len = inputs["input_ids"].shape[1]
+            with torch.no_grad():
+                generated_ids = _smolvlm_model.generate(**inputs, do_sample=False, max_new_tokens=6)
+            # Slice off the input tokens so we only decode the model's NEW
+            # output, not the full prompt+answer text. This is the correct,
+            # robust way to isolate the answer - the earlier approach
+            # (decoding everything, then taking the string's tail) risked
+            # misparsing if the prompt itself contained YES/NO-like text.
+            new_tokens = generated_ids[:, input_len:]
+            answer = _smolvlm_processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip().upper()
+            return "YES" in answer or "NO" not in answer
+    except Exception as e:
+        print(f"    Visual verification skipped ({str(e)[:60]}), accepting clip")
+        return True
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def search_and_download(query, idx, duration, verify=True):
@@ -1063,16 +1057,12 @@ def search_and_download(query, idx, duration, verify=True):
 
             # --- Real visual verification (the actual "no relevance check" fix) ---
             if verify:
-                frame = TEMP_DIR / f"check_{idx}.jpg"
-                if _extract_check_frame(out, frame):
-                    matches = verify_clip_matches_query(frame, query)
-                    try: os.remove(frame)
+                matches = verify_clip_matches_query(out, query)
+                if not matches:
+                    print(f"    Rejected clip for '{query[:40]}' (visual mismatch)")
+                    try: os.remove(out)
                     except: pass
-                    if not matches:
-                        print(f"    Rejected clip for '{query[:40]}' (visual mismatch)")
-                        try: os.remove(out)
-                        except: pass
-                        continue
+                    continue
 
             USED_URLS.add(url); return str(out)
         except: continue
