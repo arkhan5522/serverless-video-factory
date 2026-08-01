@@ -946,27 +946,38 @@ def generate_audio(text, ref_audio, out_path):
 # that part works well and wasn't the problem.
 _llava_model = None
 _llava_processor = None
-_llava_lock = threading.Lock()  # model isn't thread-safe for concurrent .generate() calls
+_llava_lock = threading.Lock()      # serializes generate() calls (model isn't thread-safe for concurrent generation)
+_llava_load_lock = threading.Lock() # separately serializes the LOAD itself, so concurrent
+                                     # calls to _load_llava() can't race past the
+                                     # "already loaded?" check and each start loading
+                                     # a full 7B model simultaneously (this was the
+                                     # actual bug: 5 worker threads each loaded their
+                                     # own copy, OOMing the GPU even on tiny allocations)
 
 def _load_llava():
     global _llava_model, _llava_processor
     if _llava_model is not None:
         return
-    from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration, BitsAndBytesConfig
-    model_path = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
-    print("  Loading local video verification model (LLaVA-OneVision-Qwen2-7B, 4-bit)...")
-    _llava_processor = AutoProcessor.from_pretrained(model_path)
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_use_double_quant=True,
-    )
-    _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-        model_path,
-        quantization_config=quantization_config,
-        device_map="auto",
-    )
+    with _llava_load_lock:
+        # Re-check after acquiring the lock - another thread may have
+        # finished loading while this thread was waiting for the lock.
+        if _llava_model is not None:
+            return
+        from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration, BitsAndBytesConfig
+        model_path = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+        print("  Loading local video verification model (LLaVA-OneVision-Qwen2-7B, 4-bit)...")
+        _llava_processor = AutoProcessor.from_pretrained(model_path)
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+        )
+        _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+            model_path,
+            quantization_config=quantization_config,
+            device_map="auto",
+        )
 
 
 def verify_clip_matches_query(clip_path, query, filter_women=True):
@@ -1483,6 +1494,25 @@ create_subtitles(sentences, ass, word_data=word_data if word_data else None)
 
 # Render
 update_status(54, "Processing video...")
+
+# Load the clip-verification model ONCE here, deliberately, on the main
+# thread - BEFORE the render step spins up its 5 parallel worker threads.
+# The old lazy-load-on-first-use pattern let all 5 workers race to call
+# _load_llava() at nearly the same instant (the lock only covered the
+# generate() call, not the load itself), so all 5 threads tried to load
+# a full 7B model onto the GPU simultaneously - 5x duplicate memory
+# allocation, causing OOM even on tiny 20-130MB allocations afterward.
+# By this point in the pipeline, Chatterbox TTS and resemble-enhance have
+# already freed their GPU memory (see generate_audio()'s explicit
+# del+empty_cache+gc.collect calls), so this is the right moment to load
+# the verification model into that freed VRAM, once, before any threads exist.
+try:
+    _load_llava()
+    print("  Video verification model loaded once (main thread, before parallel rendering)")
+except Exception as e:
+    print(f"  WARNING: Video verification model failed to load ({str(e)[:100]}) - "
+          f"clips will render unverified this run (fail-open at model level)")
+
 o2 = OUTPUT_DIR/f"final_{JOB_ID}_WITH_SUBS.mp4"
 
 if render_video(sentences, audio, ass, logo, o2):
