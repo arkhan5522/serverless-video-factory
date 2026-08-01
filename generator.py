@@ -1166,16 +1166,26 @@ def search_and_download(query, idx, duration, verify=True):
                     if chunk: f.write(chunk)
             if os.path.getsize(raw) < 5000: continue
             
-            # Encode with GPU (h264_nvenc) or CPU fallback
+            # Normalize verification inputs on CPU only. LLaVA owns the GPU during
+            # verification, and CUDA/NVENC preprocessing can leave a zero-byte
+            # destination when FFmpeg is interrupted or cannot initialize.
             vf = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30"
-            cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",str(raw),"-t",str(duration),
-                   "-vf",vf] + _enc_args() + ["-an",str(out)]
-            with _gpu_lock:  # never run concurrently with another encode or with LLaVA verification
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+            cmd = ["ffmpeg","-y","-i",str(raw),"-t",str(duration),
+                   "-vf",vf,"-c:v","libx264","-preset","fast","-crf","18",
+                   "-an",str(out)]
+            encode = subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, timeout=120
+            )
+            if encode.returncode != 0:
+                detail = (encode.stderr or "").strip().splitlines()
+                print(f"    Clip {idx} query '{query[:40]}' FFmpeg failed ({encode.returncode}): {detail[-1][:120] if detail else 'no stderr'}")
+                continue
             
             try: os.remove(raw)
             except: pass
             if not (os.path.exists(out) and os.path.getsize(out) > 2000):
+                print(f"    Clip {idx} query '{query[:40]}' FFmpeg produced no usable output")
                 continue
 
             # --- Real visual verification (the actual "no relevance check" fix) ---
@@ -1188,7 +1198,10 @@ def search_and_download(query, idx, duration, verify=True):
                     continue
 
             USED_URLS.add(url); return str(out)
-        except: continue
+        except Exception as e:
+            print(f"    Clip {idx} query '{query[:40]}' failed: {type(e).__name__}: {str(e)[:100]}")
+            continue
+    print(f"    Clip {idx} query '{query[:40]}' exhausted all candidates")
     return None
 
 def process_clip(args):
@@ -1208,8 +1221,8 @@ def process_clip(args):
         clip = search_and_download(query, i, dur)
         if clip: return (i, clip)
         time.sleep(0.3)
+    print(f"    Clip {i} exhausted all query attempts")
     return (i, None)
-
 
 
 # ==========================================
@@ -1228,9 +1241,8 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                 idx, path = f.result()
                 if path: clips[idx]=path; done+=1
                 update_status(55+int((done/n)*22), f"Clips {done}/{n}")
-            except: pass
-    
-    # Fill gaps
+            except Exception as e:
+                print(f"    Clip worker failed: {type(e).__name__}: {str(e)[:120]}")
     valid = [i for i,c in enumerate(clips) if c and os.path.exists(c)]
     if not valid: return False
     for i in range(n):
