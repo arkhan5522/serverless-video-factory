@@ -35,19 +35,18 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 # t3_model= kwarg needed for the V3 multilingual checkpoint - that only
 # exists on the GitHub master branch (confirmed by inspecting the actual
 # wheel contents). Install from source to get real V3 support.
-# SmolVLM2 - local vision-language model for clip visual verification.
-# Replaces the earlier Groq-based vision check, which hit constant rate
-# limits at scale (100+ clips per video, each needing a verification call).
-# This runs locally on the Kaggle GPU with zero API limits. Query
-# GENERATION still uses Groq (openai/gpt-oss-120b) unchanged - that part
-# works well and isn't being replaced, only the per-clip visual check.
-# NOTE: "av" (PyAV) is REQUIRED for SmolVLM2's video-loading path - without
-# it, every single verification call fails at frame-decode time and
-# silently falls back to accepting the clip unverified. This previously
-# went undetected for an entire run since the failure message looked like
-# a generic skip rather than a missing-dependency error.
+# LLaVA-OneVision-Qwen2-7B - local vision-language model for clip visual
+# verification. Replaces the earlier Groq-based vision check (rate limits
+# at scale) AND the earlier SmolVLM2-500M attempt (hallucinated on
+# combined questions, miscounted people). This model was tested directly
+# in Colab against real clips and confirmed reliable for query-matching
+# and woman/person detection. Loaded in 4-bit via bitsandbytes (confirmed
+# working, unlike the AWQ+GPTQModel combo which hit repeated kernel
+# compatibility errors on this class of model). Query GENERATION still
+# uses Groq (openai/gpt-oss-120b) unchanged - that part works well and
+# isn't being replaced, only the per-clip visual check.
 _vision_deps = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-    "transformers>=4.50.0", "einops", "pyvips-binary", "num2words", "av"],
+    "transformers>=4.49.0", "accelerate", "av", "bitsandbytes"],
     capture_output=True, text=True)
 if _vision_deps.returncode != 0:
     print(f"  WARNING: vision verification dependencies failed to install - "
@@ -59,6 +58,7 @@ else:
     except ImportError as e:
         print(f"  WARNING: PyAV still not importable after install ({e}) - "
               f"verification will silently fail open for every clip this run")
+
 
 print("  Installing chatterbox-tts from GitHub (master) for V3 support...")
 _cb_installed = subprocess.run(
@@ -626,9 +626,11 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True):
                     if url and url not in USED_URLS: urls.append(url)
         except: pass
 
-    # Try more candidates than before (was 3) since some will now be
-    # rejected on VISUAL grounds, not just download failure.
-    for url in urls[:6]:
+    # Accuracy-first: try more candidates (was 6, now 10) since some will
+    # be rejected on VISUAL grounds, not just download failure. More
+    # candidates = better odds of finding a genuinely well-matching clip
+    # before falling back to the backup/generic query.
+    for url in urls[:10]:
         try:
             raw = TEMP_DIR / f"raw_s{tag}_{idx}.mp4"
             out = TEMP_DIR / f"clip_s{tag}_{idx}.mp4"
@@ -932,38 +934,47 @@ def generate_audio(text, ref_audio, out_path):
 # ==========================================
 # 6. VIDEO ENGINE (GPU-Accelerated)
 # ==========================================
-# Local video-chunk verification model (SmolVLM2-500M-Video-Instruct).
-# Replaces the earlier Groq vision-based single-frame check, which hit
-# constant rate limits at scale (100+ verification calls per video) and
-# only ever looked at ONE static frame per clip, missing motion/scene
-# changes across the chunk. This model takes the actual video file
-# directly and reasons about the whole chunk. Runs 100% locally on the
-# Kaggle GPU - zero API calls, zero rate limits. Query GENERATION still
-# uses Groq (openai/gpt-oss-120b) unchanged, since that part works well.
-_smolvlm_model = None
-_smolvlm_processor = None
-_smolvlm_lock = threading.Lock()  # model isn't thread-safe for concurrent .generate() calls
+# Local video verification model (LLaVA-OneVision-Qwen2-7B, 4-bit).
+# Replaces the earlier Groq vision-based single-frame check (rate limits
+# at scale) and SmolVLM2-500M (hallucinated on combined questions,
+# miscounted people). This model was directly tested in Colab against
+# real clips and confirmed reliable for query-matching and woman/person
+# detection. Loaded via bitsandbytes 4-bit - confirmed working, unlike
+# the AWQ+GPTQModel combo which hit repeated kernel compatibility errors
+# on this class of model (ExLlamaV2 shape-divisibility failures).
+# Query GENERATION still uses Groq (openai/gpt-oss-120b) unchanged, since
+# that part works well and wasn't the problem.
+_llava_model = None
+_llava_processor = None
+_llava_lock = threading.Lock()  # model isn't thread-safe for concurrent .generate() calls
 
-def _load_smolvlm():
-    global _smolvlm_model, _smolvlm_processor
-    if _smolvlm_model is not None:
+def _load_llava():
+    global _llava_model, _llava_processor
+    if _llava_model is not None:
         return
-    from transformers import AutoProcessor, AutoModelForImageTextToText
-    model_path = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
-    print("  Loading local video verification model (SmolVLM2-500M)...")
-    _smolvlm_processor = AutoProcessor.from_pretrained(model_path)
-    _smolvlm_model = AutoModelForImageTextToText.from_pretrained(
+    from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration, BitsAndBytesConfig
+    model_path = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+    print("  Loading local video verification model (LLaVA-OneVision-Qwen2-7B, 4-bit)...")
+    _llava_processor = AutoProcessor.from_pretrained(model_path)
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
+    _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
         model_path,
-        torch_dtype=torch.bfloat16,
-    ).to("cuda" if torch.cuda.is_available() else "cpu")
+        quantization_config=quantization_config,
+        device_map="auto",
+    )
 
 
 def verify_clip_matches_query(clip_path, query, filter_women=True):
     """
-    Ask the local SmolVLM2 model whether the given video CLIP (not just a
-    single frame) actually matches the intended search query, AND whether
-    it shows a woman (if filter_women is True) - combined into ONE model
-    call for efficiency rather than two separate passes.
+    Ask the local LLaVA-OneVision model whether the given video CLIP (not
+    just a single frame) actually matches the intended search query, AND
+    whether it shows a woman (if filter_women is True) - combined into ONE
+    model call for efficiency rather than two separate passes.
 
     This is the real fix for stock footage that "downloads fine" but is
     visually unrelated to the query - there was previously ZERO check
@@ -975,18 +986,27 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
 
     Returns True if the clip should be USED (topic matches AND, if
     filter_women, no woman detected), False if it should be rejected.
-    Fails open (returns True) on any error, so a model hiccup never blocks
-    the whole pipeline - it's a quality filter, not a hard gate. No rate
-    limiting needed since this runs 100% locally.
+
+    Fail-open vs fail-closed distinction (accuracy-first priority):
+    - If the MODEL ITSELF fails to load (happens once, affects every
+      clip), fails OPEN (returns True) - otherwise the whole pipeline
+      would produce zero usable clips if the model can't load at all,
+      which is worse than proceeding unverified.
+    - If a PER-CLIP generation call errors out (transient, specific to
+      one clip), fails CLOSED (returns False) - the caller will try the
+      next candidate URL/query instead of silently accepting an
+      unverified clip. This matches the decision that a clip should never
+      slip through unverified when verification itself is working but
+      this particular attempt failed.
     """
     try:
-        _load_smolvlm()
+        _load_llava()
     except Exception as e:
-        print(f"    Video verification model unavailable ({str(e)[:60]}), accepting clip")
+        print(f"    Video verification model unavailable ({str(e)[:60]}), accepting clip (model-level failure, fail-open)")
         return True
 
     try:
-        with _smolvlm_lock:  # serialize GPU access across worker threads
+        with _llava_lock:  # serialize GPU access across worker threads
             if filter_women:
                 prompt = f"""Look at this video clip and answer two questions, each on its own line, in this EXACT format:
 1. <YES or NO>
@@ -1001,36 +1021,47 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
 
 1. Does this video clip visually match the concept: "{query}"? Answer YES if it reasonably represents the concept (even loosely/thematically - stock footage rarely is a perfect literal match). Answer NO only if it's clearly unrelated."""
 
-            messages = [{
+            conversation = [{
                 "role": "user",
                 "content": [
                     {"type": "video", "path": str(clip_path)},
-                    {"type": "text", "text": prompt}
-                ]
+                    {"type": "text", "text": prompt},
+                ],
             }]
-            inputs = _smolvlm_processor.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=True,
-                return_dict=True, return_tensors="pt",
-            ).to(_smolvlm_model.device, dtype=torch.bfloat16)
+            inputs = _llava_processor.apply_chat_template(
+                conversation,
+                num_frames=8,  # matches the exact config tested and confirmed
+                               # working against real clips - do not change
+                               # without re-testing, since a different frame
+                               # count could behave differently on the
+                               # counting/detection behavior already validated
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            ).to(_llava_model.device, _llava_model.dtype)
 
-            input_len = inputs["input_ids"].shape[1]
             with torch.no_grad():
-                generated_ids = _smolvlm_model.generate(**inputs, do_sample=False, max_new_tokens=20)
-            # Slice off the input tokens so we only decode the model's NEW
-            # output, not the full prompt+answer text. This is the correct,
-            # robust way to isolate the answer.
-            new_tokens = generated_ids[:, input_len:]
-            answer = _smolvlm_processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip().upper()
+                out = _llava_model.generate(**inputs, max_new_tokens=20, do_sample=False)
+
+            full_text = _llava_processor.batch_decode(
+                out, skip_special_tokens=True, clean_up_tokenization_spaces=True
+            )[0]
+            # Response follows "assistant\n" in the decoded text (chat
+            # template format) - slice to isolate just the model's answer.
+            answer = full_text.split("assistant")[-1].strip("\n: ").upper()
+
+            del inputs, out
+
+            lines = [l.strip() for l in answer.split('\n') if l.strip()]
+            line1 = lines[0] if len(lines) > 0 else ""
+            line2 = lines[1] if len(lines) > 1 else ""
 
             # Parse line 1 (topic match) and line 2 (woman detection)
             # independently - don't just search the whole blob for "YES",
             # since that would conflate the two answers if the model
             # returns e.g. "1. NO / 2. YES" (topic mismatch AND a woman -
             # searching the whole string for "YES" would wrongly pass it).
-            lines = [l.strip() for l in answer.split('\n') if l.strip()]
-            line1 = lines[0] if len(lines) > 0 else ""
-            line2 = lines[1] if len(lines) > 1 else ""
-
             topic_match = "YES" in line1 or "NO" not in line1
             has_woman = filter_women and "YES" in line2
 
@@ -1039,8 +1070,11 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
                 return False
             return topic_match
     except Exception as e:
-        print(f"    Visual verification skipped ({str(e)[:60]}), accepting clip")
-        return True
+        # Per-call error (not a model-load failure) - fail CLOSED per the
+        # accuracy-first decision: reject this clip so the caller tries
+        # the next candidate rather than silently accepting an unverified one.
+        print(f"    Visual verification error for '{query[:40]}' ({str(e)[:60]}), rejecting clip (fail-closed)")
+        return False
     finally:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1079,10 +1113,10 @@ def search_and_download(query, idx, duration, verify=True):
                     if url and url not in USED_URLS: urls.append(url)
         except: pass
     
-    # Try more candidates than before (was 3) since some will now be
-    # rejected on VISUAL grounds, not just download failure - need more
+    # Accuracy-first: try more candidates (was 6, now 10) since some will
+    # be rejected on VISUAL grounds, not just download failure - need more
     # attempts to still find a genuinely matching clip.
-    for url in urls[:6]:
+    for url in urls[:10]:
         try:
             raw = TEMP_DIR / f"raw_{idx}.mp4"
             out = TEMP_DIR / f"clip_{idx}.mp4"
