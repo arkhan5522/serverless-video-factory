@@ -967,7 +967,9 @@ _llava_load_lock = threading.Lock() # separately serializes the LOAD itself, so 
                                      # a full 7B model simultaneously (this was the
                                      # actual bug: 5 worker threads each loaded their
                                      # own copy, OOMing the GPU even on tiny allocations)
-_llava_poisoned = False  # set True if a generate() call ever times out - see note below
+# LLaVA inference stays synchronous, matching the tested notebook. A watchdog
+# thread cannot safely cancel a CUDA generate() call and can leave a live
+# generation thread using the shared model after the caller has moved on.
 
 def _load_llava():
     global _llava_model, _llava_processor
@@ -1025,16 +1027,6 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
       slip through unverified when verification itself is working but
       this particular attempt failed.
     """
-    global _llava_poisoned
-    if _llava_poisoned:
-        # A previous generate() call timed out and its background thread
-        # may still be running against the shared model with no safe way
-        # to cancel it - using the model again risks racing a second
-        # concurrent call against that zombie thread. Treat as
-        # model-unavailable for the rest of this run (fail-open, since
-        # this is a model-level failure, not a per-clip one).
-        return True
-
     try:
         _load_llava()
     except Exception as e:
@@ -1082,45 +1074,15 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
                 return_tensors="pt",
             ).to(_llava_model.device, _llava_model.dtype)
 
-            # generate() has NO built-in timeout, unlike every other network/
-            # subprocess call in this file. If this call hangs (or is simply
-            # much slower on this GPU than during testing), every worker
-            # thread queues up indefinitely behind the shared _llava_lock,
-            # and NOTHING in the pipeline can ever progress - this was the
-            # actual cause of "Clips 0/126" staying at zero forever. Since
-            # generate() is a synchronous, non-interruptible GPU call (not
-            # I/O), we can't safely kill it mid-flight without risking
-            # corrupting CUDA state for other threads - so instead we run
-            # it in a watchdog thread and give up waiting on it after a
-            # bounded timeout, treating a hang as a verification failure
-            # (fail-closed) rather than blocking forever.
-            GENERATE_TIMEOUT_SEC = 30
-            _gen_result = {}
-            def _run_generate():
-                try:
-                    with torch.no_grad():
-                        _gen_result["out"] = _llava_model.generate(**inputs, max_new_tokens=20, do_sample=False)
-                except Exception as gen_err:
-                    _gen_result["error"] = gen_err
-
-            gen_thread = threading.Thread(target=_run_generate, daemon=True)
-            gen_thread.start()
-            gen_thread.join(timeout=GENERATE_TIMEOUT_SEC)
-
-            if gen_thread.is_alive():
-                # Still running after the timeout - the model is now
-                # considered poisoned: this background thread is still
-                # executing against the shared model with no safe way to
-                # cancel it, so any future call would risk racing a second
-                # concurrent generate() against it. Disable verification
-                # for the rest of this run rather than risk that.
-                _llava_poisoned = True
-                print(f"    WARNING: verification model hung (>{GENERATE_TIMEOUT_SEC}s) - "
-                      f"disabling verification for the rest of this run (fail-open)")
-                raise TimeoutError(f"generate() exceeded {GENERATE_TIMEOUT_SEC}s timeout")
-            if "error" in _gen_result:
-                raise _gen_result["error"]
-            out = _gen_result["out"]
+            # Keep generation synchronous, exactly as in the tested notebook.
+            # CUDA generate() cannot be safely cancelled from a watchdog
+            # thread; leaving such a thread alive can continue using the
+            # shared model and GPU after this call has returned, preventing
+            # clip workers from completing.
+            with torch.no_grad():
+                out = _llava_model.generate(
+                    **inputs, max_new_tokens=20, do_sample=False
+                )
 
             full_text = _llava_processor.batch_decode(
                 out, skip_special_tokens=True, clean_up_tokenization_spaces=True
