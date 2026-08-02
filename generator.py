@@ -287,14 +287,74 @@ RULES:
             print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
             # leave this batch's entries as None -> filled by fallback below
 
+    # Recover incomplete batches without changing index alignment. The first
+    # request can occasionally omit a few numbered lines even when Groq is
+    # otherwise healthy; re-request only those exact global sentence numbers
+    # instead of aborting immediately or inserting generic footage.
+    missing_indices = [i for i, query in enumerate(all_queries) if not query]
+    for recovery_round in range(1, 4):
+        if not missing_indices:
+            break
+        print(f"  Groq: recovering {len(missing_indices)} missing sentence queries "
+              f"(attempt {recovery_round}/3)...")
+        requested = set(missing_indices)
+        numbered_missing = "\n".join(
+            f"{i + 1}. {sentences[i]['text'][:140]}" for i in missing_indices
+        )
+        try:
+            recovery = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": """Return one primary and one backup STOCK FOOTAGE query for every numbered sentence. The numbers are global sentence numbers and must not be changed or skipped.
+
+Rules:
+- Queries must be in English, 3-6 words, and describe something a camera can film.
+- They must clearly represent the exact sentence meaning and remain thematically related.
+- For abstract or medical ideas, choose the closest findable visual category, not random nature, ocean, space, or other filler.
+- No people, faces, bodies, women, religion, violence, or NSFW.
+- Output ONLY these two lines per sentence:
+14. primary query
+14b. backup query"""},
+                    {"role": "user", "content":
+                     f"Recover queries for these missing global sentence numbers:\n\n{numbered_missing}"}
+                ],
+                model="openai/gpt-oss-120b",
+                max_tokens=max(600, len(missing_indices) * 120),
+                temperature=0.2,
+            )
+            result = recovery.choices[0].message.content
+            recovered = 0
+            for line in result.strip().split("\n"):
+                line = line.strip()
+                mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
+                if mb:
+                    global_idx = int(mb.group(1)) - 1
+                    cleaned = mb.group(2).strip().strip('"\'')
+                    if (global_idx in requested and 3 < len(cleaned) < 60
+                            and _safe(cleaned)):
+                        all_backups[global_idx] = cleaned
+                    continue
+                m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line)
+                if not m:
+                    continue
+                global_idx = int(m.group(1)) - 1
+                cleaned = m.group(2).strip().strip('"\'')
+                if (global_idx in requested and 3 < len(cleaned) < 60
+                        and _safe(cleaned)):
+                    if not all_queries[global_idx]:
+                        recovered += 1
+                    all_queries[global_idx] = cleaned
+            print(f"  Groq: recovered {recovered}/{len(missing_indices)} primary queries")
+        except Exception as e:
+            print(f"  Groq recovery attempt {recovery_round} failed: {e}")
+        missing_indices = [i for i, query in enumerate(all_queries) if not query]
+
     # A missing primary query is not safe to replace with generic footage:
     # that would break sentence-to-visual alignment. A missing backup may
     # repeat the primary because it remains semantically tied to the sentence.
-    missing = [i + 1 for i, query in enumerate(all_queries) if not query]
-    if missing:
+    if missing_indices:
         raise RuntimeError(
             "Groq did not return sentence-specific queries for positions "
-            f"{missing}; refusing unmatched visual substitutions"
+            f"{[i + 1 for i in missing_indices]}; refusing unmatched visual substitutions"
         )
     queries = list(all_queries)
     backups = [all_backups[i] if all_backups[i] else queries[i] for i in range(n)]
