@@ -88,13 +88,18 @@ def _has_nvenc():
     return "h264_nvenc" in r.stdout
 
 USE_GPU = _has_nvenc()
+_nvenc_runtime_failed = False
 print(f"  GPU Encoding: {'h264_nvenc' if USE_GPU else 'libx264 (CPU)'}")
 
 def _enc_args():
-    """Return encoder args based on GPU availability"""
-    if USE_GPU:
+    """Return encoder args based on currently usable GPU availability."""
+    if USE_GPU and not _nvenc_runtime_failed:
         return ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M", "-maxrate", "10M", "-bufsize", "16M"]
     return ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]
+
+def _hwaccel_args():
+    """Use CUDA input only while the runtime NVENC path is healthy."""
+    return ["-hwaccel", "cuda"] if USE_GPU and not _nvenc_runtime_failed else []
 
 
 
@@ -581,7 +586,7 @@ def create_subtitles(sentences, ass_path, word_data=None, style_key=None,
                     txt = ' '.join(w[:split_idx+1]) + "\\N" + ' '.join(w[split_idx+1:])
                 f.write(f"Dialogue: 0,{t1},{t2},Default,,0,0,0,,{txt}\n")
 
-def search_and_download_vertical(query, idx, duration, tag="", verify=True):
+def search_and_download_vertical(query, idx, duration, tag="", verify=True, normalize=True):
     """
     Same as search_and_download but requests portrait/vertical source video
     where possible and always crops/scales to 1080x1920 (9:16) for Shorts.
@@ -632,30 +637,41 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True):
             with open(raw,"wb") as f:
                 for chunk in r.iter_content(8192):
                     if chunk: f.write(chunk)
-            if os.path.getsize(raw) < 5000: continue
-
-            # Force crop/scale to 1080x1920 regardless of source orientation
-            vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
-            cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",str(raw),"-t",str(duration),
-                   "-vf",vf] + _enc_args() + ["-an",str(out)]
-            with _gpu_lock:  # never run concurrently with another encode or with LLaVA verification
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
-
-            try: os.remove(raw)
-            except: pass
-            if not (os.path.exists(out) and os.path.getsize(out) > 2000):
+            if os.path.getsize(raw) < 5000:
+                try: os.remove(raw)
+                except OSError: pass
                 continue
 
+            # Verify the raw vertical video before paying the normalization
+            # cost. Shorts use the same authoritative LLaVA checks as the
+            # landscape pipeline.
             if verify:
-                matches = verify_clip_matches_query(out, query)
+                matches = verify_clip_matches_query(raw, query)
                 if not matches:
                     print(f"    Rejected short clip for '{query[:40]}' (visual mismatch)")
-                    try: os.remove(out)
-                    except: pass
+                    try: os.remove(raw)
+                    except OSError: pass
                     continue
 
-            USED_URLS.add(url); return str(out)
-        except: continue
+            if not normalize:
+                USED_URLS.add(url)
+                return str(raw)
+
+            normalized = _normalize_vertical_clip(raw, out, duration)
+            try: os.remove(raw)
+            except OSError: pass
+            if not normalized:
+                continue
+
+            USED_URLS.add(url)
+            return normalized
+        except Exception:
+            for stale in (raw, out):
+                try:
+                    if stale.exists(): stale.unlink()
+                except OSError:
+                    pass
+            continue
     return None
 
 
@@ -674,6 +690,16 @@ def process_short_clip(args):
     return (i, None)
 
 
+def _prepare_short_candidate(args):
+    """Download one raw vertical candidate without FFmpeg normalization."""
+    i, sent, attempt, query, tag = args
+    dur = max(2.5, sent['end'] - sent['start'])
+    raw = search_and_download_vertical(
+        query, i, dur, tag=tag, verify=False, normalize=False
+    )
+    return i, attempt, query, raw
+
+
 def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, out_path):
     """
     Render a single 1080x1920 short: fetch fresh vertical stock clips for
@@ -686,13 +712,84 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
     print(f"\n  Short {short_idx+1}: fetching {n} vertical clips...")
 
     clips = [None]*n
+    query_sets = []
+    for i, sent in enumerate(sentences_slice):
+        orig_idx = sent.get('orig_idx', i)
+        primary = AI_QUERIES[orig_idx] if orig_idx < len(AI_QUERIES) else random.choice(FALLBACK)
+        backup = AI_BACKUPS[orig_idx] if orig_idx < len(AI_BACKUPS) else primary
+        query_sets.append([primary, backup, random.choice(FALLBACK)])
+
+    # Phase 1: download and verify all raw vertical candidates before any
+    # Shorts normalization. LLaVA remains serialized through its existing
+    # locks; rejected raw files are deleted and query retries are preserved.
+    print(f"  Short {short_idx+1}: phase 1/2 verifying raw clips...")
+    verified_raw = [None] * n
+    verified_count = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-        futs = {ex.submit(process_short_clip, (i,s,tag)): i for i,s in enumerate(sentences_slice)}
-        for f in concurrent.futures.as_completed(futs):
-            try:
-                idx, path = f.result()
-                if path: clips[idx]=path
-            except: pass
+        pending = {}
+        for i, sent in enumerate(sentences_slice):
+            future = ex.submit(
+                _prepare_short_candidate,
+                (i, sent, 0, query_sets[i][0], tag),
+            )
+            pending[future] = (i, sent, 0, query_sets[i][0])
+
+        while pending:
+            finished, _ = concurrent.futures.wait(
+                tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for future in finished:
+                i, sent, attempt, query = pending.pop(future)
+                accepted = False
+                raw = None
+                try:
+                    _, _, _, raw = future.result()
+                    if raw:
+                        accepted = verify_clip_matches_query(raw, query)
+                        if accepted:
+                            verified_raw[i] = raw
+                            verified_count += 1
+                            print(f"    Short {short_idx+1} clip {i} accepted by LLaVA")
+                        else:
+                            print(f"    Rejected short clip for '{query[:40]}' (visual mismatch)")
+                            try: os.remove(raw)
+                            except OSError: pass
+                except Exception as e:
+                    if raw:
+                        try: os.remove(raw)
+                        except OSError: pass
+                    print(f"    Short {short_idx+1} clip {i} verification failed: {type(e).__name__}: {str(e)[:120]}")
+
+                if accepted:
+                    continue
+                next_attempt = attempt + 1
+                if next_attempt < len(query_sets[i]):
+                    next_query = query_sets[i][next_attempt]
+                    next_future = ex.submit(
+                        _prepare_short_candidate,
+                        (i, sent, next_attempt, next_query, tag),
+                    )
+                    pending[next_future] = (i, sent, next_attempt, next_query)
+                else:
+                    print(f"    Short {short_idx+1} clip {i} exhausted verification attempts")
+
+    # Phase 2: normalize only raw vertical clips accepted by LLaVA.
+    print(f"  Short {short_idx+1}: phase 2/2 normalizing {verified_count} accepted clips...")
+    normalized_count = 0
+    for i, raw in enumerate(verified_raw):
+        if not raw:
+            continue
+        dur = max(2.5, sentences_slice[i]['end'] - sentences_slice[i]['start'])
+        normalized = _normalize_vertical_clip(
+            raw, TEMP_DIR / f"clip_s{tag}_{i}.mp4", dur
+        )
+        try: os.remove(raw)
+        except OSError: pass
+        if normalized:
+            clips[i] = normalized
+            normalized_count += 1
+        else:
+            print(f"    Short {short_idx+1} clip {i} normalization failed after verification")
 
     valid = [i for i,c in enumerate(clips) if c and os.path.exists(c)]
     if not valid:
@@ -716,9 +813,8 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
     subprocess.run(f"ffmpeg -y -f concat -safe 0 -i {list_path} -c copy {visual_path}",
         shell=True, capture_output=True, timeout=60)
     if not os.path.exists(visual_path):
-        subprocess.run(f"ffmpeg -y -f concat -safe 0 -i {list_path}"
-            f" -c:v libx264 -preset ultrafast -crf 18 {visual_path}",
-            shell=True, capture_output=True)
+        fallback_cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path] + _enc_args() + [visual_path]
+        subprocess.run(fallback_cmd, capture_output=True, timeout=60)
     if not os.path.exists(visual_path): return False
 
     enc = _enc_args()
@@ -731,13 +827,13 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
                 f"[1:v]scale=280:-1[l];[bg][l]overlay=30:40[wl];"
                 f"[wl]subtitles='{ass_esc}'[v];"
                 f"[2:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
-        cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",visual_path,"-i",str(logo_path),"-i",str(audio_path),
+        cmd = ["ffmpeg","-y"] + _hwaccel_args() + ["-i",visual_path,"-i",str(logo_path),"-i",str(audio_path),
             "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
     else:
         filt = (f"[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
                 f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v];"
                 f"[1:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
-        cmd = ["ffmpeg","-y","-hwaccel","cuda","-i",visual_path,"-i",str(audio_path),
+        cmd = ["ffmpeg","-y"] + _hwaccel_args() + ["-i",visual_path,"-i",str(audio_path),
             "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_path)]
     r = subprocess.run(cmd, capture_output=True, timeout=300)
 
@@ -980,12 +1076,39 @@ def _load_llava():
             bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
         )
-        _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-            model_path,
+        load_kwargs = dict(
             quantization_config=quantization_config,
             device_map="auto",
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
         )
-        print(f"  LLaVA optimized verification: {_LLAVA_NUM_FRAMES} frames, {_LLAVA_MAX_NEW_TOKENS} max output tokens, direct Decord")
+        selected_attention = "eager"
+        # Prefer the model-card Flash Attention 2 path when the already
+        # installed environment supports it. Never install/build it here:
+        # failed flash-attn builds previously blocked the whole run.
+        try:
+            import flash_attn  # noqa: F401
+            _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+                model_path, attn_implementation="flash_attention_2", **load_kwargs
+            )
+            selected_attention = "flash_attention_2"
+        except Exception as flash_error:
+            print(f"  Flash Attention 2 unavailable ({type(flash_error).__name__}); trying PyTorch SDPA")
+            try:
+                _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+                    model_path, attn_implementation="sdpa", **load_kwargs
+                )
+                selected_attention = "sdpa"
+            except Exception as sdpa_error:
+                print(f"  PyTorch SDPA unavailable ({type(sdpa_error).__name__}); using model default attention")
+                _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+                    model_path, **load_kwargs
+                )
+        _llava_model.eval()
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        print(f"  LLaVA optimized verification: {_LLAVA_NUM_FRAMES} frames, {_LLAVA_MAX_NEW_TOKENS} max output tokens, direct Decord, attention={selected_attention}")
 
 
 # LLaVA video settings validated in the optimized Colab benchmark.
@@ -1179,68 +1302,95 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
         return False
 
 
-def _normalize_landscape_clip(raw_path, output_path, duration):
-    """Normalize an accepted landscape clip with validated GPU encoding."""
+def _normalize_clip_with_recovery(raw_path, output_path, duration, vf, label):
+    """Encode one accepted clip, retrying with CPU only if NVENC fails."""
+    global _nvenc_runtime_failed
     raw_path = Path(raw_path)
     output_path = Path(output_path)
-    # Keep the final .mp4 suffix so FFmpeg can infer the output muxer while
-    # the file is still temporary. os.replace() below makes the publish step
-    # atomic after the output has passed validation.
     partial_path = output_path.with_name(output_path.stem + ".part" + output_path.suffix)
+
+    if not raw_path.exists() or raw_path.stat().st_size < 5000:
+        print(f"    {label} input is missing or too small: {raw_path}")
+        return None
+
     try:
         if partial_path.exists(): partial_path.unlink()
         if output_path.exists(): output_path.unlink()
     except OSError:
         pass
 
-    vf = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30"
-    # Use CPU decode/filter plus NVENC encode. This avoids the CUDA decode/
-    # filter initialization path that previously produced zero-byte outputs,
-    # while still moving the expensive H.264 encoding work to the GPU.
-    encoder = _enc_args() if USE_GPU else ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]
-    cmd = ["ffmpeg", "-y", "-nostdin", "-i", str(raw_path), "-t", str(duration),
-           "-vf", vf] + encoder + ["-an", str(partial_path)]
-    started = time.perf_counter()
-    try:
-        if USE_GPU:
-            with _gpu_lock:
+    encoders = []
+    if USE_GPU and not _nvenc_runtime_failed:
+        encoders.append(("NVENC", _enc_args()))
+    # This is an automatic recovery path, not the normal path. It prevents a
+    # transient/unsupported NVENC initialization from discarding every clip
+    # that LLaVA already accepted.
+    encoders.append(("CPU fallback", ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]))
+
+    for encoder_name, encoder in encoders:
+        cmd = [
+            "ffmpeg", "-y", "-nostdin", "-i", str(raw_path), "-t", str(duration),
+            "-vf", vf,
+        ] + encoder + ["-pix_fmt", "yuv420p", "-an", str(partial_path)]
+        started = time.perf_counter()
+        try:
+            with _gpu_lock if encoder_name == "NVENC" else _nullcontext():
                 result = subprocess.run(
                     cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                     text=True, timeout=120
                 )
-        else:
-            result = subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True, timeout=120
-            )
-    except Exception as e:
-        print(f"    Landscape normalization exception for '{raw_path.name}': {type(e).__name__}: {str(e)[:120]}")
-        try: partial_path.unlink()
-        except OSError: pass
-        return None
+        except Exception as e:
+            if encoder_name == "NVENC":
+                _nvenc_runtime_failed = True
+            print(f"    {label} {encoder_name} exception: {type(e).__name__}: {str(e)[:160]}")
+            result = None
 
-    elapsed = time.perf_counter() - started
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip().splitlines()
-        print(f"    Landscape normalization failed ({result.returncode}) for '{raw_path.name}': {detail[-1][:160] if detail else 'no stderr'}")
-        try: partial_path.unlink()
-        except OSError: pass
-        return None
-    if not (partial_path.exists() and partial_path.stat().st_size > 2000):
-        print(f"    Landscape normalization produced no usable output for '{raw_path.name}'")
-        try: partial_path.unlink()
-        except OSError: pass
-        return None
+        if result is not None and result.returncode == 0 and partial_path.exists() and partial_path.stat().st_size > 2000:
+            try:
+                os.replace(partial_path, output_path)
+                elapsed = time.perf_counter() - started
+                print(f"    {label}: {output_path.name} in {elapsed:.1f}s ({encoder_name})")
+                return str(output_path)
+            except OSError as e:
+                print(f"    {label} publish failed ({encoder_name}): {type(e).__name__}: {str(e)[:120]}")
 
-    try:
-        os.replace(partial_path, output_path)
-    except OSError as e:
-        print(f"    Landscape normalization publish failed for '{raw_path.name}': {type(e).__name__}: {str(e)[:120]}")
+        if result is not None:
+            stderr = (result.stderr or "").strip()
+            detail = " | ".join(stderr.splitlines()[-4:])
+            if encoder_name == "NVENC":
+                # Stop retrying a broken runtime encoder for every remaining
+                # clip. The current clip is immediately retried with CPU,
+                # while later clips use the same reliable fallback directly.
+                _nvenc_runtime_failed = True
+            print(f"    {label} {encoder_name} failed ({result.returncode}): {detail[-700:] or 'no FFmpeg stderr'}")
         try: partial_path.unlink()
         except OSError: pass
-        return None
-    print(f"    Landscape normalization: {output_path.name} in {elapsed:.1f}s ({'NVENC' if USE_GPU else 'CPU'})")
-    return str(output_path)
+
+    return None
+
+
+def _normalize_landscape_clip(raw_path, output_path, duration):
+    """Normalize an accepted landscape clip with validated GPU encoding."""
+    vf = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30"
+    return _normalize_clip_with_recovery(
+        raw_path, output_path, duration, vf, "Landscape normalization"
+    )
+
+
+def _normalize_vertical_clip(raw_path, output_path, duration):
+    """Normalize an accepted vertical clip with the same recovery policy."""
+    vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
+    return _normalize_clip_with_recovery(
+        raw_path, output_path, duration, vf, "Vertical normalization"
+    )
+
+
+def _nullcontext():
+    """Tiny local context manager to avoid importing contextlib in hot code."""
+    class _Context:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+    return _Context()
 
 
 def search_and_download(query, idx, duration, verify=True):
@@ -1420,6 +1570,9 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                 else:
                     print(f"    Clip {i} exhausted all query attempts during verification")
 
+    missing_after_verification = n - verified_count
+    print(f"  Phase 1 complete: {verified_count}/{n} raw clips accepted; {missing_after_verification} positions will use accepted-clip fallback")
+
     # Phase 2: only after the verification phase has completely drained,
     # normalize accepted raw files. The helper uses h264_nvenc when available
     # and publishes only validated MP4 output. No unverified raw path can
@@ -1560,13 +1713,13 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                 f"[1:v]scale=180:-1[l];[bg][l]overlay=25:25[wl];"
                 f"[wl]subtitles='{ass_esc}'[v];"
                 f"[2:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
-        cmd = ["ffmpeg","-y","-hwaccel","cuda","-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
+        cmd = ["ffmpeg","-y"] + _hwaccel_args() + ["-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
             "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
     else:
         filt = (f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
                 f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v];"
                 f"[1:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
-        cmd = ["ffmpeg","-y","-hwaccel","cuda","-i","visual.mp4","-i",str(audio_path),
+        cmd = ["ffmpeg","-y"] + _hwaccel_args() + ["-i","visual.mp4","-i",str(audio_path),
             "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
     r = subprocess.run(cmd, capture_output=True, timeout=600)
     if not os.path.exists(out_sub):
