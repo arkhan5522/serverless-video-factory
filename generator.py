@@ -39,7 +39,8 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 # SmolVLM2-500M video model is used only as a fast, high-recall candidate
 # prefilter and asks two independent questions; it is never the final judge.
 _vision_deps = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-    "transformers>=4.49.0", "accelerate", "av", "decord==0.6.0", "bitsandbytes"],
+    "transformers>=4.49.0", "accelerate", "av", "decord==0.6.0",
+    "num2words==0.5.14", "bitsandbytes"],
     capture_output=True, text=True)
 if _vision_deps.returncode != 0:
     print(f"  WARNING: vision verification dependencies failed to install - "
