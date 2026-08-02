@@ -127,6 +127,11 @@ OUTPUT_DIR.mkdir(exist_ok=True); TEMP_DIR.mkdir(exist_ok=True)
 
 IS_SPANISH = LANGUAGE.lower().strip() in ["spanish","es","espanol"]
 USED_URLS = set()
+_USED_URLS_LOCK = threading.Lock()
+# Stock API lookup is deliberately shorter than media download. Running the
+# two independent providers in parallel avoids serial 12-second stalls while
+# still giving each provider enough time for normal network conditions.
+_STOCK_API_TIMEOUT = (3, 5)
 AI_QUERIES = []
 AI_BACKUPS = []
 
@@ -586,6 +591,129 @@ def create_subtitles(sentences, ass_path, word_data=None, style_key=None,
                     txt = ' '.join(w[:split_idx+1]) + "\\N" + ' '.join(w[split_idx+1:])
                 f.write(f"Dialogue: 0,{t1},{t2},Default,,0,0,0,,{txt}\n")
 
+def _mark_url_used(url):
+    with _USED_URLS_LOCK:
+        USED_URLS.add(url)
+
+
+def _search_stock_provider(provider, query, page, orientation):
+    """Search one stock provider and return candidate video URLs."""
+    try:
+        if provider == "pexels":
+            keys = [key for key in PEXELS_KEYS if key]
+            if not keys:
+                return []
+            response = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers={"Authorization": random.choice(keys)},
+                params={
+                    "query": query,
+                    "per_page": 15,
+                    "page": page,
+                    "orientation": orientation,
+                },
+                timeout=_STOCK_API_TIMEOUT,
+            )
+            if response.status_code != 200:
+                return []
+
+            urls = []
+            for video in response.json().get("videos", []):
+                files = video.get("video_files", [])
+                if orientation == "portrait":
+                    preferred = [
+                        file for file in files
+                        if file.get("height", 0) > file.get("width", 0)
+                        and file.get("height", 0) >= 1280
+                    ]
+                    candidates = preferred or [
+                        file for file in files
+                        if file.get("quality") in ["hd", "large"]
+                    ]
+                else:
+                    candidates = [
+                        file for file in files
+                        if file.get("quality") == "hd"
+                        and file.get("width", 0) >= 1280
+                    ]
+                    if not candidates:
+                        candidates = [
+                            file for file in files
+                            if file.get("quality") in ["hd", "large"]
+                        ]
+
+                if candidates:
+                    url = random.choice(candidates).get("link")
+                    if url:
+                        urls.append(url)
+            return urls
+
+        if provider == "pixabay":
+            keys = [key for key in PIXABAY_KEYS if key]
+            if not keys:
+                return []
+            response = requests.get(
+                "https://pixabay.com/api/videos/",
+                params={
+                    "key": random.choice(keys),
+                    "q": query,
+                    "per_page": 15,
+                    "page": page,
+                },
+                timeout=_STOCK_API_TIMEOUT,
+            )
+            if response.status_code != 200:
+                return []
+
+            urls = []
+            for video in response.json().get("hits", []):
+                video_files = video.get("videos", {})
+                selected = video_files.get("large", video_files.get("medium", {}))
+                url = selected.get("url") if selected else None
+                if url:
+                    urls.append(url)
+            return urls
+    except Exception:
+        # A provider outage/timeout should only remove that provider's
+        # candidates; the other provider and the caller's query retries remain.
+        return []
+
+    return []
+
+
+def _search_stock_urls(query, page, orientation):
+    """Search Pexels and Pixabay concurrently, preserving provider order."""
+    providers = []
+    if any(PEXELS_KEYS):
+        providers.append("pexels")
+    if any(PIXABAY_KEYS):
+        providers.append("pixabay")
+    if not providers:
+        return []
+
+    results = {provider: [] for provider in providers}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as executor:
+        futures = {
+            executor.submit(_search_stock_provider, provider, query, page, orientation): provider
+            for provider in providers
+        }
+        for future in concurrent.futures.as_completed(futures):
+            provider = futures[future]
+            try:
+                results[provider] = future.result()
+            except Exception:
+                results[provider] = []
+
+    urls = []
+    with _USED_URLS_LOCK:
+        used = set(USED_URLS)
+    for provider in providers:
+        for url in results[provider]:
+            if url and url not in used and url not in urls:
+                urls.append(url)
+    return urls
+
+
 def search_and_download_vertical(query, idx, duration, tag="", verify=True, normalize=True):
     """
     Same as search_and_download but requests portrait/vertical source video
@@ -593,37 +721,7 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
     Uses a distinct USED_URLS-safe idx namespace via `tag` so long-video and
     shorts clip fetching never collide on temp filenames.
     """
-    urls = []
-    page = random.randint(1,3)
-
-    if PEXELS_KEYS and PEXELS_KEYS[0]:
-        try:
-            key = random.choice([k for k in PEXELS_KEYS if k])
-            r = requests.get("https://api.pexels.com/videos/search",
-                headers={"Authorization":key},
-                params={"query":query,"per_page":15,"page":page,"orientation":"portrait"}, timeout=12)
-            if r.status_code == 200:
-                for v in r.json().get('videos',[]):
-                    files = v.get('video_files',[])
-                    # Prefer genuinely portrait files (height > width), else take any hd/large
-                    portrait = [f for f in files if f.get('height',0) > f.get('width',0) and f.get('height',0)>=1280]
-                    hd = portrait or [f for f in files if f.get('quality') in ['hd','large']]
-                    if hd:
-                        url = random.choice(hd)['link']
-                        if url not in USED_URLS: urls.append(url)
-        except: pass
-
-    if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-        try:
-            key = random.choice([k for k in PIXABAY_KEYS if k])
-            r = requests.get("https://pixabay.com/api/videos/",
-                params={"key":key,"q":query,"per_page":15,"page":page}, timeout=12)
-            if r.status_code == 200:
-                for v in r.json().get('hits',[]):
-                    vd = v.get('videos',{})
-                    url = vd.get('large',vd.get('medium',{})).get('url')
-                    if url and url not in USED_URLS: urls.append(url)
-        except: pass
+    urls = _search_stock_urls(query, random.randint(1, 3), "portrait")
 
     # Accuracy-first: try more candidates (was 6, now 10) since some will
     # be rejected on VISUAL grounds, not just download failure. More
@@ -654,7 +752,7 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
                     continue
 
             if not normalize:
-                USED_URLS.add(url)
+                _mark_url_used(url)
                 return str(raw)
 
             normalized = _normalize_vertical_clip(raw, out, duration)
@@ -663,7 +761,7 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
             if not normalized:
                 continue
 
-            USED_URLS.add(url)
+            _mark_url_used(url)
             return normalized
         except Exception:
             for stale in (raw, out):
@@ -1393,38 +1491,28 @@ def _nullcontext():
     return _Context()
 
 
+def _release_llava_for_encoding():
+    """Release LLaVA VRAM before long FFmpeg encoding stages."""
+    global _llava_model, _llava_processor
+    model = None
+    with _llava_load_lock:
+        model = _llava_model
+        _llava_model = None
+        _llava_processor = None
+    if model is not None:
+        del model
+    gc.collect()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+
+
 def search_and_download(query, idx, duration, verify=True):
     """Search/download; raw-first for streaming, normalized for verify=True callers."""
-    urls = []
-    page = random.randint(1,3)
-    
-    if PEXELS_KEYS and PEXELS_KEYS[0]:
-        try:
-            key = random.choice([k for k in PEXELS_KEYS if k])
-            r = requests.get("https://api.pexels.com/videos/search",
-                headers={"Authorization":key},
-                params={"query":query,"per_page":15,"page":page,"orientation":"landscape"}, timeout=12)
-            if r.status_code == 200:
-                for v in r.json().get('videos',[]):
-                    files = v.get('video_files',[])
-                    hd = [f for f in files if f.get('quality')=='hd' and f.get('width',0)>=1280]
-                    if not hd: hd = [f for f in files if f.get('quality') in ['hd','large']]
-                    if hd:
-                        url = random.choice(hd)['link']
-                        if url not in USED_URLS: urls.append(url)
-        except: pass
-    
-    if PIXABAY_KEYS and PIXABAY_KEYS[0]:
-        try:
-            key = random.choice([k for k in PIXABAY_KEYS if k])
-            r = requests.get("https://pixabay.com/api/videos/",
-                params={"key":key,"q":query,"per_page":15,"page":page}, timeout=12)
-            if r.status_code == 200:
-                for v in r.json().get('hits',[]):
-                    vd = v.get('videos',{})
-                    url = vd.get('large',vd.get('medium',{})).get('url')
-                    if url and url not in USED_URLS: urls.append(url)
-        except: pass
+    urls = _search_stock_urls(query, random.randint(1, 3), "landscape")
     
     # Accuracy-first: try more candidates (was 6, now 10) since some will
     # be rejected on VISUAL grounds, not just download failure - need more
@@ -1450,7 +1538,7 @@ def search_and_download(query, idx, duration, verify=True):
                 # LLaVA will inspect it first; rejected candidates never pay
                 # the expensive normalization cost.
                 print(f"    Clip {idx} candidate {candidate_no}: download={download_seconds:.1f}s raw-ready={time.perf_counter() - candidate_started:.1f}s")
-                USED_URLS.add(url)
+                _mark_url_used(url)
                 return str(raw)
 
             # Non-streaming callers (for example final audio-gap padding) still
@@ -1471,7 +1559,7 @@ def search_and_download(query, idx, duration, verify=True):
                     except OSError: pass
                     continue
 
-            USED_URLS.add(url)
+            _mark_url_used(url)
             return normalized
         except Exception as e:
             for stale in (raw, out):
@@ -1497,6 +1585,7 @@ def prepare_clip_candidate(args):
 # 7. RENDER ENGINE (GPU-Accelerated)
 # ==========================================
 def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
+    global _nvenc_runtime_failed
     n = len(sentences)
     print(f"\n  Rendering {n} clips (phase 1: 5 raw-download workers + serialized LLaVA; phase 2: accepted-only GPU normalization)...")
 
@@ -1569,6 +1658,16 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                     pending[next_future] = (i, sent, next_attempt, next_query)
                 else:
                     print(f"    Clip {i} exhausted all query attempts during verification")
+
+    # Verification is complete. Release the 4-bit LLaVA model before any
+    # long encode so NVENC can create its CUDA context without competing for
+    # the model's VRAM. Reset only this runtime flag here: the first NVENC
+    # attempt was made while LLaVA was resident, so it is not a reliable
+    # verdict about the encoder after cleanup.
+    _release_llava_for_encoding()
+    if USE_GPU:
+        _nvenc_runtime_failed = False
+        print("  LLaVA released; retrying NVENC with the verifier unloaded")
 
     missing_after_verification = n - verified_count
     print(f"  Phase 1 complete: {verified_count}/{n} raw clips accepted; {missing_after_verification} positions will use accepted-clip fallback")
@@ -1703,30 +1802,89 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                     try: os.remove(tmp)
                     except: pass
     
-    # Render final video WITH subtitles only (no-subs version removed - not needed)
+    # Final render: visual.mp4 is already normalized to 1920x1080, so do not
+    # rescale the entire nine-minute stream again. Burn the logo/subtitles and
+    # encode with NVENC after LLaVA has been released. If the runtime encoder
+    # still cannot initialize, retry the exact same render with CPU x264.
+    _release_llava_for_encoding()
+    if USE_GPU:
+        _nvenc_runtime_failed = False
+        print("  Final render: GPU memory cleared; attempting NVENC")
+
     update_status(85, "Rendering final video (1080p + subs)...")
-    enc = _enc_args()
     ass_esc = str(ass_path).replace('\\','/').replace(':','\\\\:')
     if logo_path and os.path.exists(logo_path):
-        filt = (f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-                f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];"
+        filt = (f"[0:v]setsar=1[bg];"
                 f"[1:v]scale=180:-1[l];[bg][l]overlay=25:25[wl];"
                 f"[wl]subtitles='{ass_esc}'[v];"
                 f"[2:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
-        cmd = ["ffmpeg","-y"] + _hwaccel_args() + ["-i","visual.mp4","-i",str(logo_path),"-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
+        input_args = ["-i", "visual.mp4", "-i", str(logo_path), "-i", str(audio_path)]
+        maps = ["-map", "[v]", "-map", "[a]"]
     else:
-        filt = (f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-                f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2[bg];[bg]subtitles='{ass_esc}'[v];"
+        filt = (f"[0:v]setsar=1[bg];"
+                f"[bg]subtitles='{ass_esc}'[v];"
                 f"[1:a]aresample=async=1:min_hard_comp=0.100000:first_pts=0[a]")
-        cmd = ["ffmpeg","-y"] + _hwaccel_args() + ["-i","visual.mp4","-i",str(audio_path),
-            "-filter_complex",filt,"-map","[v]","-map","[a]"] + enc + ["-c:a","aac","-b:a","192k","-shortest",str(out_sub)]
-    r = subprocess.run(cmd, capture_output=True, timeout=600)
-    if not os.path.exists(out_sub):
-        print(f"  Final render failed - {r.stderr.decode(errors='ignore')[-400:]}")
-        return False
-    print(f"  Final: {os.path.getsize(out_sub)/(1024**2):.0f}MB")
-    return True
+        input_args = ["-i", "visual.mp4", "-i", str(audio_path)]
+        maps = ["-map", "[v]", "-map", "[a]"]
+
+    encoders = []
+    if USE_GPU:
+        # Do not request CUDA decode here. Subtitle rendering is CPU-side and
+        # the already-normalized input needs no GPU scaling; keeping decode
+        # on CPU leaves more VRAM for NVENC and makes the P100 path reliable.
+        encoders.append(("NVENC", [
+            "-c:v", "h264_nvenc", "-preset", "p4",
+            "-b:v", "8M", "-maxrate", "10M", "-bufsize", "16M",
+        ], 300))
+    encoders.append(("CPU fallback", ["-c:v", "libx264", "-preset", "fast", "-crf", "18"], 1800))
+
+    partial_out = Path(str(out_sub) + ".part.mp4")
+    for encoder_name, encoder_args, timeout_seconds in encoders:
+        for stale in (partial_out, out_sub):
+            try:
+                if Path(stale).exists(): Path(stale).unlink()
+            except OSError:
+                pass
+
+        cmd = (['ffmpeg', '-y', '-nostdin', '-hide_banner', '-loglevel', 'error']
+               + input_args + ['-filter_complex', filt] + maps + encoder_args
+               + ['-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+                  '-shortest', str(partial_out)])
+        started = time.perf_counter()
+        try:
+            # Serialize NVENC with any other possible GPU work. CPU fallback
+            # does not need the lock and can continue without GPU contention.
+            with _gpu_lock if encoder_name == "NVENC" else _nullcontext():
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout_seconds
+                )
+        except Exception as e:
+            result = None
+            detail = f"{type(e).__name__}: {str(e)[:240]}"
+            if encoder_name == "NVENC":
+                _nvenc_runtime_failed = True
+            print(f"  Final render {encoder_name} exception after {time.perf_counter() - started:.1f}s: {detail}")
+        else:
+            detail = " | ".join((result.stderr or "").splitlines()[-4:])[-900:]
+            if result.returncode == 0 and partial_out.exists() and partial_out.stat().st_size > 10000:
+                try:
+                    os.replace(partial_out, out_sub)
+                    elapsed = time.perf_counter() - started
+                    print(f"  Final: {os.path.getsize(out_sub)/(1024**2):.0f}MB in {elapsed:.1f}s ({encoder_name})")
+                    return True
+                except OSError as e:
+                    detail = f"output publish failed: {type(e).__name__}: {e}"
+            if encoder_name == "NVENC":
+                _nvenc_runtime_failed = True
+            print(f"  Final render {encoder_name} failed after {time.perf_counter() - started:.1f}s: {detail or 'no FFmpeg stderr'}")
+
+        try:
+            if partial_out.exists(): partial_out.unlink()
+        except OSError:
+            pass
+
+    print("  Final render failed with both NVENC and CPU fallback")
+    return False
 
 
 
