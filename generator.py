@@ -1179,8 +1179,72 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
         return False
 
 
+def _normalize_landscape_clip(raw_path, output_path, duration):
+    """Normalize an accepted landscape clip with validated GPU encoding."""
+    raw_path = Path(raw_path)
+    output_path = Path(output_path)
+    # Keep the final .mp4 suffix so FFmpeg can infer the output muxer while
+    # the file is still temporary. os.replace() below makes the publish step
+    # atomic after the output has passed validation.
+    partial_path = output_path.with_name(output_path.stem + ".part" + output_path.suffix)
+    try:
+        if partial_path.exists(): partial_path.unlink()
+        if output_path.exists(): output_path.unlink()
+    except OSError:
+        pass
+
+    vf = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30"
+    # Use CPU decode/filter plus NVENC encode. This avoids the CUDA decode/
+    # filter initialization path that previously produced zero-byte outputs,
+    # while still moving the expensive H.264 encoding work to the GPU.
+    encoder = _enc_args() if USE_GPU else ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]
+    cmd = ["ffmpeg", "-y", "-nostdin", "-i", str(raw_path), "-t", str(duration),
+           "-vf", vf] + encoder + ["-an", str(partial_path)]
+    started = time.perf_counter()
+    try:
+        if USE_GPU:
+            with _gpu_lock:
+                result = subprocess.run(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    text=True, timeout=120
+                )
+        else:
+            result = subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, timeout=120
+            )
+    except Exception as e:
+        print(f"    Landscape normalization exception for '{raw_path.name}': {type(e).__name__}: {str(e)[:120]}")
+        try: partial_path.unlink()
+        except OSError: pass
+        return None
+
+    elapsed = time.perf_counter() - started
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()
+        print(f"    Landscape normalization failed ({result.returncode}) for '{raw_path.name}': {detail[-1][:160] if detail else 'no stderr'}")
+        try: partial_path.unlink()
+        except OSError: pass
+        return None
+    if not (partial_path.exists() and partial_path.stat().st_size > 2000):
+        print(f"    Landscape normalization produced no usable output for '{raw_path.name}'")
+        try: partial_path.unlink()
+        except OSError: pass
+        return None
+
+    try:
+        os.replace(partial_path, output_path)
+    except OSError as e:
+        print(f"    Landscape normalization publish failed for '{raw_path.name}': {type(e).__name__}: {str(e)[:120]}")
+        try: partial_path.unlink()
+        except OSError: pass
+        return None
+    print(f"    Landscape normalization: {output_path.name} in {elapsed:.1f}s ({'NVENC' if USE_GPU else 'CPU'})")
+    return str(output_path)
+
+
 def search_and_download(query, idx, duration, verify=True):
-    """Search + download + encode with GPU, with optional visual verification"""
+    """Search/download; raw-first for streaming, normalized for verify=True callers."""
     urls = []
     page = random.randint(1,3)
     
@@ -1226,58 +1290,56 @@ def search_and_download(query, idx, duration, verify=True):
                 for chunk in r.iter_content(8192):
                     if chunk: f.write(chunk)
             download_seconds = time.perf_counter() - download_started
-            if os.path.getsize(raw) < 5000: continue
-
-            # The 7B LLaVA verifier is the only visual judge. Candidates are
-            # normalized here and verified by the streaming coordinator below.
-            # Normalize verification inputs on CPU only. LLaVA owns the GPU during
-            # verification, and CUDA/NVENC preprocessing can leave a zero-byte
-            # destination when FFmpeg is interrupted or cannot initialize.
-            vf = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30"
-            cmd = ["ffmpeg","-y","-i",str(raw),"-t",str(duration),
-                   "-vf",vf,"-c:v","libx264","-preset","fast","-crf","18",
-                   "-an",str(out)]
-            normalize_started = time.perf_counter()
-            encode = subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True, timeout=120
-            )
-            normalize_seconds = time.perf_counter() - normalize_started
-            if encode.returncode != 0:
-                detail = (encode.stderr or "").strip().splitlines()
-                print(f"    Clip {idx} query '{query[:40]}' FFmpeg failed ({encode.returncode}): {detail[-1][:120] if detail else 'no stderr'}")
+            if os.path.getsize(raw) < 5000:
+                try: os.remove(raw)
+                except OSError: pass
                 continue
-            
+
+            if not verify:
+                # Main streaming path: return the raw download immediately.
+                # LLaVA will inspect it first; rejected candidates never pay
+                # the expensive normalization cost.
+                print(f"    Clip {idx} candidate {candidate_no}: download={download_seconds:.1f}s raw-ready={time.perf_counter() - candidate_started:.1f}s")
+                USED_URLS.add(url)
+                return str(raw)
+
+            # Non-streaming callers (for example final audio-gap padding) still
+            # receive a normalized, verified clip as before.
+            normalized = _normalize_landscape_clip(raw, out, duration)
+            if not normalized:
+                try: os.remove(raw)
+                except OSError: pass
+                continue
             try: os.remove(raw)
-            except: pass
-            if not (os.path.exists(out) and os.path.getsize(out) > 2000):
-                print(f"    Clip {idx} query '{query[:40]}' FFmpeg produced no usable output")
-                continue
+            except OSError: pass
 
-            # --- Real visual verification (the actual "no relevance check" fix) ---
-            print(f"    Clip {idx} candidate {candidate_no}: download={download_seconds:.1f}s normalize={normalize_seconds:.1f}s ready={time.perf_counter() - candidate_started:.1f}s")
             if verify:
-                matches = verify_clip_matches_query(out, query)
+                matches = verify_clip_matches_query(normalized, query)
                 if not matches:
                     print(f"    Rejected clip for '{query[:40]}' (visual mismatch)")
-                    try: os.remove(out)
-                    except: pass
+                    try: os.remove(normalized)
+                    except OSError: pass
                     continue
 
-            USED_URLS.add(url); return str(out)
+            USED_URLS.add(url)
+            return normalized
         except Exception as e:
+            for stale in (raw, out):
+                try:
+                    if stale.exists(): stale.unlink()
+                except OSError:
+                    pass
             print(f"    Clip {idx} query '{query[:40]}' failed: {type(e).__name__}: {str(e)[:100]}")
             continue
     print(f"    Clip {idx} query '{query[:40]}' exhausted all candidates")
     return None
 
 def prepare_clip_candidate(args):
-    """Download and normalize one candidate without waiting for LLaVA."""
+    """Download one raw candidate without waiting for LLaVA or FFmpeg."""
     i, sent, attempt, query = args
-    dur = max(3.5, sent['end'] - sent['start'])
     attempt_started = time.perf_counter()
-    clip = search_and_download(query, i, dur, verify=False)
-    print(f"    Clip {i} candidate preparation finished in {time.perf_counter() - attempt_started:.1f}s: {'ready' if clip else 'unavailable'}")
+    clip = search_and_download(query, i, max(3.5, sent['end'] - sent['start']), verify=False)
+    print(f"    Clip {i} raw candidate preparation finished in {time.perf_counter() - attempt_started:.1f}s: {'ready' if clip else 'unavailable'}")
     return i, attempt, query, clip
 
 
@@ -1286,7 +1348,7 @@ def prepare_clip_candidate(args):
 # ==========================================
 def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
     n = len(sentences)
-    print(f"\n  Rendering {n} clips (5 download/prep workers + 1 LLaVA verifier)...")
+    print(f"\n  Rendering {n} clips (5 raw-download workers + 1 LLaVA verifier + accepted-clip GPU normalization)...")
 
     clips = [None]*n
     query_sets = []
@@ -1295,12 +1357,10 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
         backup = AI_BACKUPS[i] if i < len(AI_BACKUPS) else primary
         query_sets.append([primary, backup, random.choice(FALLBACK)])
 
-    # Preparation is asynchronous, but verification remains serialized by the
-    # existing LLaVA/GPU locks and the validated optimized invocation
-    # (direct Decord frames, 4 frames, 8 deterministic output tokens).
-    # This prevents workers from sitting idle behind generate(): while one
-    # candidate is being verified, the other workers keep downloading and
-    # normalizing the next candidates.
+    # Raw downloads are prepared asynchronously. LLaVA verifies each raw file
+    # first; only an accepted candidate is normalized with GPU FFmpeg and then
+    # placed in clips[]. This avoids spending 20-90s encoding rejected videos.
+    # Verification and NVENC normalization share _gpu_lock and never overlap.
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
         pending = {}
         for i, sent in enumerate(sentences):
@@ -1321,11 +1381,25 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                     _, _, _, path = future.result()
                     if path:
                         accepted = verify_clip_matches_query(path, query)
+                        if accepted:
+                            dur = max(3.5, sent['end'] - sent['start'])
+                            normalized = _normalize_landscape_clip(
+                                path, TEMP_DIR / f"clip_{i}.mp4", dur
+                            )
+                            if normalized:
+                                try: os.remove(path)
+                                except OSError: pass
+                                path = normalized
+                            else:
+                                accepted = False
                         if not accepted:
-                            print(f"    Rejected clip for '{query[:40]}' (visual mismatch)")
+                            print(f"    Rejected clip for '{query[:40]}' (visual mismatch or normalization failure)")
                             try: os.remove(path)
-                            except: pass
+                            except OSError: pass
                 except Exception as e:
+                    if path:
+                        try: os.remove(path)
+                        except OSError: pass
                     print(f"    Clip {i} candidate pipeline failed: {type(e).__name__}: {str(e)[:120]}")
 
                 if accepted and path:
