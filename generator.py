@@ -35,18 +35,11 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 # t3_model= kwarg needed for the V3 multilingual checkpoint - that only
 # exists on the GitHub master branch (confirmed by inspecting the actual
 # wheel contents). Install from source to get real V3 support.
-# LLaVA-OneVision-Qwen2-7B - local vision-language model for clip visual
-# verification. Replaces the earlier Groq-based vision check (rate limits
-# at scale) AND the earlier SmolVLM2-500M attempt (hallucinated on
-# combined questions, miscounted people). This model was tested directly
-# in Colab against real clips and confirmed reliable for query-matching
-# and woman/person detection. Loaded in 4-bit via bitsandbytes (confirmed
-# working, unlike the AWQ+GPTQModel combo which hit repeated kernel
-# compatibility errors on this class of model). Query GENERATION still
-# uses Groq (openai/gpt-oss-120b) unchanged - that part works well and
-# isn't being replaced, only the per-clip visual check.
+# LLaVA-OneVision-Qwen2-7B remains the final local video verifier. A separate
+# SmolVLM2-500M video model is used only as a fast, high-recall candidate
+# prefilter and asks two independent questions; it is never the final judge.
 _vision_deps = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-    "transformers>=4.49.0", "accelerate", "av", "bitsandbytes"],
+    "transformers>=4.49.0", "accelerate", "av", "decord==0.6.0", "bitsandbytes"],
     capture_output=True, text=True)
 if _vision_deps.returncode != 0:
     print(f"  WARNING: vision verification dependencies failed to install - "
@@ -997,6 +990,100 @@ def _load_llava():
         )
 
 
+# Fast video prefilter. It uses the actual normalized video, not a thumbnail,
+# and asks two separate YES/NO questions because this small model is less
+# reliable on combined questions. The 7B LLaVA check remains authoritative.
+_small_video_model = None
+_small_video_processor = None
+_small_video_lock = threading.Lock()
+_small_video_load_lock = threading.Lock()
+_SMALL_VIDEO_MODEL_PATH = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+
+
+def _load_small_video_model():
+    global _small_video_model, _small_video_processor
+    if _small_video_model is not None:
+        return True
+    with _small_video_load_lock:
+        if _small_video_model is not None:
+            return True
+        try:
+            from transformers import AutoProcessor, AutoModelForImageTextToText
+            print("  Loading fast video prefilter (SmolVLM2-500M)...")
+            _small_video_processor = AutoProcessor.from_pretrained(_SMALL_VIDEO_MODEL_PATH)
+            _small_video_model = AutoModelForImageTextToText.from_pretrained(
+                _SMALL_VIDEO_MODEL_PATH,
+                torch_dtype=torch.float16,
+                device_map="auto",
+            )
+            _small_video_model.eval()
+            print("  Fast video prefilter loaded")
+            return True
+        except Exception as e:
+            print(f"  Fast video prefilter unavailable ({type(e).__name__}: {str(e)[:120]}) - continuing with 7B verification")
+            _small_video_model = None
+            _small_video_processor = None
+            return False
+
+
+def _small_video_yes_no(clip_path, question):
+    """Ask one simple question about actual video frames; never combine questions."""
+    conversation = [{
+        "role": "user",
+        "content": [
+            {"type": "video", "path": str(clip_path)},
+            {"type": "text", "text": question},
+        ],
+    }]
+    with _small_video_lock, _gpu_lock:
+        try:
+            inputs = _small_video_processor.apply_chat_template(
+                conversation,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            ).to(_small_video_model.device, dtype=torch.float16)
+            with torch.inference_mode():
+                output = _small_video_model.generate(
+                    **inputs, max_new_tokens=4, do_sample=False
+                )
+            text = _small_video_processor.batch_decode(
+                output, skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )[0]
+            answer = text.split("assistant")[-1].strip().upper()
+            del inputs, output
+            first_token = re.search(r"\b(YES|NO)\b", answer)
+            # An unexpected response is not evidence that the clip failed;
+            # return None so the caller fails open and lets the authoritative
+            # 7B verifier make the decision.
+            return first_token.group(1) if first_token else None
+        except Exception as e:
+            print(f"    Small video prefilter error ({type(e).__name__}: {str(e)[:80]})")
+            return None
+
+
+def prefilter_video_candidate(clip_path, query):
+    """Use two separate small-model questions before expensive 7B verification."""
+    if not _load_small_video_model():
+        return True
+    started = time.perf_counter()
+    relevance = _small_video_yes_no(
+        clip_path,
+        f"Does this video visually show or strongly represent the concept: {query}? Reply only YES or NO.",
+    )
+    woman = _small_video_yes_no(
+        clip_path,
+        "Does this video show any visible woman or women as a person in the frames? Reply only YES or NO.",
+    )
+    if relevance is None or woman is None:
+        return True
+    passed = relevance == "YES" and woman != "YES"
+    print(f"    Small prefilter {'passed' if passed else 'rejected'} '{query[:40]}' (relevance={relevance}, woman={woman}, {time.perf_counter() - started:.1f}s)")
+    return passed
+
+
 def verify_clip_matches_query(clip_path, query, filter_women=True):
     """
     Ask the local LLaVA-OneVision model whether the given video CLIP (not
@@ -1027,6 +1114,7 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
       slip through unverified when verification itself is working but
       this particular attempt failed.
     """
+    verify_started = time.perf_counter()
     try:
         _load_llava()
     except Exception as e:
@@ -1061,6 +1149,7 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
                     {"type": "text", "text": prompt},
                 ],
             }]
+            inputs_started = time.perf_counter()
             inputs = _llava_processor.apply_chat_template(
                 conversation,
                 num_frames=8,  # matches the exact config tested and confirmed
@@ -1073,16 +1162,20 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
                 return_dict=True,
                 return_tensors="pt",
             ).to(_llava_model.device, _llava_model.dtype)
+            inputs_seconds = time.perf_counter() - inputs_started
 
             # Keep generation synchronous, exactly as in the tested notebook.
             # CUDA generate() cannot be safely cancelled from a watchdog
             # thread; leaving such a thread alive can continue using the
             # shared model and GPU after this call has returned, preventing
             # clip workers from completing.
+            generation_started = time.perf_counter()
             with torch.no_grad():
                 out = _llava_model.generate(
                     **inputs, max_new_tokens=20, do_sample=False
                 )
+            generation_seconds = time.perf_counter() - generation_started
+            print(f"    LLaVA timing: prepare={inputs_seconds:.1f}s generate={generation_seconds:.1f}s total={time.perf_counter() - verify_started:.1f}s")
 
             full_text = _llava_processor.batch_decode(
                 out, skip_special_tokens=True, clean_up_tokenization_spaces=True
@@ -1156,15 +1249,26 @@ def search_and_download(query, idx, duration, verify=True):
     # Accuracy-first: try more candidates (was 6, now 10) since some will
     # be rejected on VISUAL grounds, not just download failure - need more
     # attempts to still find a genuinely matching clip.
-    for url in urls[:10]:
+    for candidate_no, url in enumerate(urls[:10], 1):
         try:
+            candidate_started = time.perf_counter()
             raw = TEMP_DIR / f"raw_{idx}.mp4"
             out = TEMP_DIR / f"clip_{idx}.mp4"
+            download_started = time.perf_counter()
             r = requests.get(url, timeout=25, stream=True)
             with open(raw,"wb") as f:
                 for chunk in r.iter_content(8192):
                     if chunk: f.write(chunk)
+            download_seconds = time.perf_counter() - download_started
             if os.path.getsize(raw) < 5000: continue
+
+            # Run the fast video model on the actual downloaded source before
+            # spending CPU time normalizing it. Only candidates that pass this
+            # high-recall prefilter reach the expensive 7B verifier.
+            if not verify and not prefilter_video_candidate(raw, query):
+                try: os.remove(raw)
+                except: pass
+                continue
             
             # Normalize verification inputs on CPU only. LLaVA owns the GPU during
             # verification, and CUDA/NVENC preprocessing can leave a zero-byte
@@ -1173,10 +1277,12 @@ def search_and_download(query, idx, duration, verify=True):
             cmd = ["ffmpeg","-y","-i",str(raw),"-t",str(duration),
                    "-vf",vf,"-c:v","libx264","-preset","fast","-crf","18",
                    "-an",str(out)]
+            normalize_started = time.perf_counter()
             encode = subprocess.run(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 text=True, timeout=120
             )
+            normalize_seconds = time.perf_counter() - normalize_started
             if encode.returncode != 0:
                 detail = (encode.stderr or "").strip().splitlines()
                 print(f"    Clip {idx} query '{query[:40]}' FFmpeg failed ({encode.returncode}): {detail[-1][:120] if detail else 'no stderr'}")
@@ -1189,6 +1295,7 @@ def search_and_download(query, idx, duration, verify=True):
                 continue
 
             # --- Real visual verification (the actual "no relevance check" fix) ---
+            print(f"    Clip {idx} candidate {candidate_no}: download={download_seconds:.1f}s normalize={normalize_seconds:.1f}s ready={time.perf_counter() - candidate_started:.1f}s")
             if verify:
                 matches = verify_clip_matches_query(out, query)
                 if not matches:
@@ -1204,25 +1311,14 @@ def search_and_download(query, idx, duration, verify=True):
     print(f"    Clip {idx} query '{query[:40]}' exhausted all candidates")
     return None
 
-def process_clip(args):
-    i, sent, total = args
+def prepare_clip_candidate(args):
+    """Download and normalize one candidate without waiting for LLaVA."""
+    i, sent, attempt, query = args
     dur = max(3.5, sent['end'] - sent['start'])
-    primary = AI_QUERIES[i] if i < len(AI_QUERIES) else random.choice(FALLBACK)
-    backup = AI_BACKUPS[i] if i < len(AI_BACKUPS) else primary
-
-    # Try order: primary query, then topic-aware backup query, then ONLY as
-    # a last resort the generic FALLBACK list. Previously this jumped
-    # straight to a fixed generic list (ocean/nature/space/etc.) on the
-    # very first retry, which is why scarce-footage topics (medical,
-    # niche technical) ended up with visually unrelated clips - the
-    # backup is chosen by the AI to still connect to the actual sentence.
-    attempts = [primary, backup, random.choice(FALLBACK)]
-    for query in attempts:
-        clip = search_and_download(query, i, dur)
-        if clip: return (i, clip)
-        time.sleep(0.3)
-    print(f"    Clip {i} exhausted all query attempts")
-    return (i, None)
+    attempt_started = time.perf_counter()
+    clip = search_and_download(query, i, dur, verify=False)
+    print(f"    Clip {i} candidate preparation finished in {time.perf_counter() - attempt_started:.1f}s: {'ready' if clip else 'unavailable'}")
+    return i, attempt, query, clip
 
 
 # ==========================================
@@ -1230,19 +1326,65 @@ def process_clip(args):
 # ==========================================
 def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
     n = len(sentences)
-    print(f"\n  Rendering {n} clips (5 workers)...")
-    
+    print(f"\n  Rendering {n} clips (5 download/prep workers + 1 LLaVA verifier)...")
+
     clips = [None]*n
+    query_sets = []
+    for i in range(n):
+        primary = AI_QUERIES[i] if i < len(AI_QUERIES) else random.choice(FALLBACK)
+        backup = AI_BACKUPS[i] if i < len(AI_BACKUPS) else primary
+        query_sets.append([primary, backup, random.choice(FALLBACK)])
+
+    # Preparation is asynchronous, but verification remains serialized by the
+    # existing LLaVA/GPU locks and uses the exact tested model invocation.
+    # This prevents workers from sitting idle behind generate(): while one
+    # candidate is being verified, the other workers keep downloading and
+    # normalizing the next candidates.
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-        futs = {ex.submit(process_clip, (i,s,n)): i for i,s in enumerate(sentences)}
+        pending = {}
+        for i, sent in enumerate(sentences):
+            query = query_sets[i][0]
+            future = ex.submit(prepare_clip_candidate, (i, sent, 0, query))
+            pending[future] = (i, sent, 0, query)
+
         done = 0
-        for f in concurrent.futures.as_completed(futs):
-            try:
-                idx, path = f.result()
-                if path: clips[idx]=path; done+=1
-                update_status(55+int((done/n)*22), f"Clips {done}/{n}")
-            except Exception as e:
-                print(f"    Clip worker failed: {type(e).__name__}: {str(e)[:120]}")
+        while pending:
+            finished, _ = concurrent.futures.wait(
+                tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for future in finished:
+                i, sent, attempt, query = pending.pop(future)
+                accepted = False
+                path = None
+                try:
+                    _, _, _, path = future.result()
+                    if path:
+                        accepted = verify_clip_matches_query(path, query)
+                        if not accepted:
+                            print(f"    Rejected clip for '{query[:40]}' (visual mismatch)")
+                            try: os.remove(path)
+                            except: pass
+                except Exception as e:
+                    print(f"    Clip {i} candidate pipeline failed: {type(e).__name__}: {str(e)[:120]}")
+
+                if accepted and path:
+                    clips[i] = path
+                    done += 1
+                    update_status(55+int((done/n)*22), f"Clips {done}/{n}")
+                    print(f"    Clip {i} accepted after query attempt {attempt + 1}")
+                    continue
+
+                next_attempt = attempt + 1
+                if next_attempt < len(query_sets[i]):
+                    next_query = query_sets[i][next_attempt]
+                    next_future = ex.submit(
+                        prepare_clip_candidate,
+                        (i, sent, next_attempt, next_query),
+                    )
+                    pending[next_future] = (i, sent, next_attempt, next_query)
+                else:
+                    print(f"    Clip {i} exhausted all query attempts")
+
     valid = [i for i,c in enumerate(clips) if c and os.path.exists(c)]
     if not valid: return False
     for i in range(n):
