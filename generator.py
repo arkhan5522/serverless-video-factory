@@ -35,12 +35,12 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
 # t3_model= kwarg needed for the V3 multilingual checkpoint - that only
 # exists on the GitHub master branch (confirmed by inspecting the actual
 # wheel contents). Install from source to get real V3 support.
-# LLaVA-OneVision-Qwen2-7B remains the final local video verifier. A separate
-# SmolVLM2-500M video model is used only as a fast, high-recall candidate
-# prefilter and asks two independent questions; it is never the final judge.
+# LLaVA-OneVision-Qwen2-7B is the only local video verifier. The optimized
+# production path uses direct Decord frame sampling and keeps all visual
+# decisions in this authoritative 7B model; no secondary video model is run.
 _vision_deps = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
     "transformers>=4.49.0", "accelerate", "av", "decord==0.6.0",
-    "num2words==0.5.14", "bitsandbytes"],
+    "bitsandbytes"],
     capture_output=True, text=True)
 if _vision_deps.returncode != 0:
     print(f"  WARNING: vision verification dependencies failed to install - "
@@ -930,13 +930,9 @@ def generate_audio(text, ref_audio, out_path):
 # 6. VIDEO ENGINE (GPU-Accelerated)
 # ==========================================
 # Local video verification model (LLaVA-OneVision-Qwen2-7B, 4-bit).
-# Replaces the earlier Groq vision-based single-frame check (rate limits
-# at scale) and SmolVLM2-500M (hallucinated on combined questions,
-# miscounted people). This model was directly tested in Colab against
-# real clips and confirmed reliable for query-matching and woman/person
-# detection. Loaded via bitsandbytes 4-bit - confirmed working, unlike
-# the AWQ+GPTQModel combo which hit repeated kernel compatibility errors
-# on this class of model (ExLlamaV2 shape-divisibility failures).
+# Replaces the earlier Groq vision-based single-frame check and the unused
+# SmolVLM2 experiment. This model was directly tested in Colab against real
+# clips and remains the authoritative query-matching and woman/person check.
 # Query GENERATION still uses Groq (openai/gpt-oss-120b) unchanged, since
 # that part works well and wasn't the problem.
 _llava_model = None
@@ -989,100 +985,84 @@ def _load_llava():
             quantization_config=quantization_config,
             device_map="auto",
         )
+        print(f"  LLaVA optimized verification: {_LLAVA_NUM_FRAMES} frames, {_LLAVA_MAX_NEW_TOKENS} max output tokens, direct Decord")
 
 
-# Fast video prefilter. It uses the actual normalized video, not a thumbnail,
-# and asks two separate YES/NO questions because this small model is less
-# reliable on combined questions. The 7B LLaVA check remains authoritative.
-_small_video_model = None
-_small_video_processor = None
-_small_video_lock = threading.Lock()
-_small_video_load_lock = threading.Lock()
-_SMALL_VIDEO_MODEL_PATH = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+# LLaVA video settings validated in the optimized Colab benchmark.
+# Four frames and a short deterministic answer reached approximately 1.0-1.3s
+# steady-state generation on a T4 while preserving the tested clip verdicts.
+_LLAVA_NUM_FRAMES = 4
+_LLAVA_MAX_NEW_TOKENS = 8
+_llava_direct_video_failed = False
 
 
-def _load_small_video_model():
-    global _small_video_model, _small_video_processor
-    if _small_video_model is not None:
-        return True
-    with _small_video_load_lock:
-        if _small_video_model is not None:
-            return True
-        try:
-            from transformers import AutoProcessor, AutoModelForImageTextToText
-            print("  Loading fast video prefilter (SmolVLM2-500M)...")
-            _small_video_processor = AutoProcessor.from_pretrained(_SMALL_VIDEO_MODEL_PATH)
-            _small_video_model = AutoModelForImageTextToText.from_pretrained(
-                _SMALL_VIDEO_MODEL_PATH,
-                torch_dtype=torch.float16,
-                device_map="auto",
-            )
-            _small_video_model.eval()
-            print("  Fast video prefilter loaded")
-            return True
-        except Exception as e:
-            print(f"  Fast video prefilter unavailable ({type(e).__name__}: {str(e)[:120]}) - continuing with 7B verification")
-            _small_video_model = None
-            _small_video_processor = None
-            return False
-
-
-def _small_video_yes_no(clip_path, question):
-    """Ask one simple question about actual video frames; never combine questions."""
+def _prepare_llava_inputs(clip_path, prompt):
+    """Prepare exactly four video frames, with a path-based fallback."""
+    global _llava_direct_video_failed
     conversation = [{
         "role": "user",
         "content": [
             {"type": "video", "path": str(clip_path)},
-            {"type": "text", "text": question},
+            {"type": "text", "text": prompt},
         ],
     }]
-    with _small_video_lock, _gpu_lock:
-        try:
-            inputs = _small_video_processor.apply_chat_template(
-                conversation,
+
+    try:
+        # Match the validated Colab path: decode only the selected frames with
+        # Decord, then pass those frames to the processor so the video is not
+        # decoded and sampled a second time by Transformers.
+        if not _llava_direct_video_failed:
+            import numpy as np
+            from decord import VideoReader, cpu
+            reader = VideoReader(str(clip_path), ctx=cpu(0), num_threads=1)
+            if len(reader) == 0:
+                raise RuntimeError("Decord returned an empty video")
+            indices = np.linspace(
+                0, len(reader) - 1, _LLAVA_NUM_FRAMES, dtype=np.int64
+            )
+            frames = reader.get_batch(indices).asnumpy()
+            direct_conversation = [{
+                "role": "user",
+                "content": [
+                    {"type": "video", "video": frames},
+                    {"type": "text", "text": prompt},
+                ],
+            }]
+            formatted = _llava_processor.apply_chat_template(
+                direct_conversation,
                 add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
+                tokenize=False,
+            )
+            inputs = _llava_processor(
+                text=[formatted],
+                videos=frames,
+                videos_kwargs={"do_sample_frames": False},
                 return_tensors="pt",
-            ).to(_small_video_model.device, dtype=torch.float16)
-            with torch.inference_mode():
-                output = _small_video_model.generate(
-                    **inputs, max_new_tokens=4, do_sample=False
-                )
-            text = _small_video_processor.batch_decode(
-                output, skip_special_tokens=True,
-                clean_up_tokenization_spaces=True,
-            )[0]
-            answer = text.split("assistant")[-1].strip().upper()
-            del inputs, output
-            first_token = re.search(r"\b(YES|NO)\b", answer)
-            # An unexpected response is not evidence that the clip failed;
-            # return None so the caller fails open and lets the authoritative
-            # 7B verifier make the decision.
-            return first_token.group(1) if first_token else None
-        except Exception as e:
-            print(f"    Small video prefilter error ({type(e).__name__}: {str(e)[:80]})")
-            return None
+            )
+            del frames, reader
+            return inputs
+    except Exception as e:
+        if not _llava_direct_video_failed:
+            print(f"    Direct Decord LLaVA preparation unavailable ({type(e).__name__}: {str(e)[:120]}) - using path fallback")
+        _llava_direct_video_failed = True
 
-
-def prefilter_video_candidate(clip_path, query):
-    """Use two separate small-model questions before expensive 7B verification."""
-    if not _load_small_video_model():
-        return True
-    started = time.perf_counter()
-    relevance = _small_video_yes_no(
-        clip_path,
-        f"Does this video visually show or strongly represent the concept: {query}? Reply only YES or NO.",
+    # Fallback remains explicit and warning-free on current Transformers:
+    # format the chat separately, then pass video sampling options to the
+    # processor's video kwargs rather than through apply_chat_template(**kwargs).
+    formatted = _llava_processor.apply_chat_template(
+        conversation,
+        add_generation_prompt=True,
+        tokenize=False,
     )
-    woman = _small_video_yes_no(
-        clip_path,
-        "Does this video show any visible woman or women as a person in the frames? Reply only YES or NO.",
+    return _llava_processor(
+        text=[formatted],
+        videos=[str(clip_path)],
+        videos_kwargs={
+            "num_frames": _LLAVA_NUM_FRAMES,
+            "do_sample_frames": True,
+        },
+        return_tensors="pt",
     )
-    if relevance is None or woman is None:
-        return True
-    passed = relevance == "YES" and woman != "YES"
-    print(f"    Small prefilter {'passed' if passed else 'rejected'} '{query[:40]}' (relevance={relevance}, woman={woman}, {time.perf_counter() - started:.1f}s)")
-    return passed
 
 
 def verify_clip_matches_query(clip_path, query, filter_women=True):
@@ -1143,26 +1123,10 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
 
 1. Does this video clip visually match the concept: "{query}"? Answer YES if it reasonably represents the concept (even loosely/thematically - stock footage rarely is a perfect literal match). Answer NO only if it's clearly unrelated."""
 
-            conversation = [{
-                "role": "user",
-                "content": [
-                    {"type": "video", "path": str(clip_path)},
-                    {"type": "text", "text": prompt},
-                ],
-            }]
             inputs_started = time.perf_counter()
-            inputs = _llava_processor.apply_chat_template(
-                conversation,
-                num_frames=8,  # matches the exact config tested and confirmed
-                               # working against real clips - do not change
-                               # without re-testing, since a different frame
-                               # count could behave differently on the
-                               # counting/detection behavior already validated
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-            ).to(_llava_model.device, _llava_model.dtype)
+            inputs = _prepare_llava_inputs(clip_path, prompt).to(
+                _llava_model.device, _llava_model.dtype
+            )
             inputs_seconds = time.perf_counter() - inputs_started
 
             # Keep generation synchronous, exactly as in the tested notebook.
@@ -1171,15 +1135,19 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
             # shared model and GPU after this call has returned, preventing
             # clip workers from completing.
             generation_started = time.perf_counter()
-            with torch.no_grad():
+            with torch.inference_mode():
                 out = _llava_model.generate(
-                    **inputs, max_new_tokens=20, do_sample=False
+                    **inputs,
+                    max_new_tokens=_LLAVA_MAX_NEW_TOKENS,
+                    do_sample=False,
+                    use_cache=True,
+                    pad_token_id=_llava_processor.tokenizer.eos_token_id,
                 )
             generation_seconds = time.perf_counter() - generation_started
             print(f"    LLaVA timing: prepare={inputs_seconds:.1f}s generate={generation_seconds:.1f}s total={time.perf_counter() - verify_started:.1f}s")
 
             full_text = _llava_processor.batch_decode(
-                out, skip_special_tokens=True, clean_up_tokenization_spaces=True
+                out, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )[0]
             # Response follows "assistant\n" in the decoded text (chat
             # template format) - slice to isolate just the model's answer.
@@ -1209,9 +1177,6 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
         # the next candidate rather than silently accepting an unverified one.
         print(f"    Visual verification error for '{query[:40]}' ({str(e)[:60]}), rejecting clip (fail-closed)")
         return False
-    finally:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 
 def search_and_download(query, idx, duration, verify=True):
@@ -1263,14 +1228,8 @@ def search_and_download(query, idx, duration, verify=True):
             download_seconds = time.perf_counter() - download_started
             if os.path.getsize(raw) < 5000: continue
 
-            # Run the fast video model on the actual downloaded source before
-            # spending CPU time normalizing it. Only candidates that pass this
-            # high-recall prefilter reach the expensive 7B verifier.
-            if not verify and not prefilter_video_candidate(raw, query):
-                try: os.remove(raw)
-                except: pass
-                continue
-            
+            # The 7B LLaVA verifier is the only visual judge. Candidates are
+            # normalized here and verified by the streaming coordinator below.
             # Normalize verification inputs on CPU only. LLaVA owns the GPU during
             # verification, and CUDA/NVENC preprocessing can leave a zero-byte
             # destination when FFmpeg is interrupted or cannot initialize.
@@ -1337,7 +1296,8 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
         query_sets.append([primary, backup, random.choice(FALLBACK)])
 
     # Preparation is asynchronous, but verification remains serialized by the
-    # existing LLaVA/GPU locks and uses the exact tested model invocation.
+    # existing LLaVA/GPU locks and the validated optimized invocation
+    # (direct Decord frames, 4 frames, 8 deterministic output tokens).
     # This prevents workers from sitting idle behind generate(): while one
     # candidate is being verified, the other workers keep downloading and
     # normalizing the next candidates.
