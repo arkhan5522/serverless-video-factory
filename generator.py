@@ -81,6 +81,25 @@ import torch, torchaudio
 import assemblyai as aai
 import google.generativeai as genai
 
+
+def _print_gpu_inventory():
+    """Log every visible CUDA device so remote accelerator selection is verifiable."""
+    if not torch.cuda.is_available():
+        print("  CUDA devices visible: 0")
+        return
+    count = torch.cuda.device_count()
+    print(f"  CUDA devices visible: {count}")
+    for index in range(count):
+        try:
+            props = torch.cuda.get_device_properties(index)
+            memory_gb = props.total_memory / (1024 ** 3)
+            print(f"    GPU {index}: {props.name} ({memory_gb:.1f} GB VRAM)")
+        except Exception as e:
+            print(f"    GPU {index}: unavailable ({type(e).__name__}: {str(e)[:100]})")
+
+
+_print_gpu_inventory()
+
 # Check if NVENC is available
 def _has_nvenc():
     r = subprocess.run("ffmpeg -hide_banner -encoders 2>/dev/null | grep nvenc",
@@ -805,6 +824,7 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
     need bigger branding since screen real estate is smaller/closer-viewed),
     and burn vertical-tuned subtitles.
     """
+    global _nvenc_runtime_failed
     tag = f"sh{short_idx}"
     n = len(sentences_slice)
     print(f"\n  Short {short_idx+1}: fetching {n} vertical clips...")
@@ -870,6 +890,16 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
                     pending[next_future] = (i, sent, next_attempt, next_query)
                 else:
                     print(f"    Short {short_idx+1} clip {i} exhausted verification attempts")
+
+    # Phase 1 is fully drained before normalization, so the verifier can be
+    # unloaded safely.  NVENC previously failed here because LLaVA remained
+    # resident after verification; reset the runtime failure flag because
+    # that earlier failure was caused by verifier VRAM contention, not proof
+    # that the encoder is unusable.
+    _release_llava_for_encoding()
+    if USE_GPU:
+        _nvenc_runtime_failed = False
+        print(f"  Short {short_idx+1}: LLaVA released; retrying NVENC for vertical normalization")
 
     # Phase 2: normalize only raw vertical clips accepted by LLaVA.
     print(f"  Short {short_idx+1}: phase 2/2 normalizing {verified_count} accepted clips...")
@@ -1035,29 +1065,64 @@ def generate_audio(text, ref_audio, out_path):
         sr = model.sr
         sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip()) > 2]
         
-        # Group 2-3 sentences per chunk
+        # Keep chunks sentence-aligned, but reduce the number of expensive
+        # autoregressive model invocations. 240 characters is still short
+        # enough for Chatterbox's text context while avoiding the large
+        # per-call startup cost of the old 160-character setting.
+        try:
+            tts_chunk_chars = max(160, int(os.environ.get("TTS_CHUNK_CHARS", "240")))
+        except (TypeError, ValueError):
+            tts_chunk_chars = 240
         chunks, buf, blen = [], [], 0
         for s in sents:
-            if blen + len(s) > 160 and buf:
+            if blen + len(s) > tts_chunk_chars and buf:
                 chunks.append(' '.join(buf)); buf, blen = [s], len(s)
             else: buf.append(s); blen += len(s)+1
         if buf: chunks.append(' '.join(buf))
-        
-        print(f"  {len(sents)} sentences -> {len(chunks)} chunks")
+        print(f"  {len(sents)} sentences -> {len(chunks)} chunks (target <= {tts_chunk_chars} chars)")
+
+        def _generate_tts_piece(piece):
+            with torch.inference_mode():
+                if IS_SPANISH:
+                    waveform = model.generate(
+                        piece.replace('"',''), audio_prompt_path=str(ref_audio),
+                        language_id="es", exaggeration=0.4, cfg_weight=0.65
+                    )
+                else:
+                    waveform = model.generate(
+                        piece.replace('"',''), audio_prompt_path=str(ref_audio),
+                        exaggeration=0.4, cfg_weight=0.65
+                    )
+            return waveform.cpu()
+
         wavs = []
         for i, c in enumerate(chunks):
-            if i%5==0: update_status(18+int((i/len(chunks))*27), f"TTS {i+1}/{len(chunks)}")
+            if i % 5 == 0:
+                update_status(18 + int((i / max(1, len(chunks))) * 27), f"TTS {i+1}/{len(chunks)}")
             try:
-                with torch.no_grad():
-                    if IS_SPANISH:
-                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio),
-                                            language_id="es", exaggeration=0.4, cfg_weight=0.65)
-                    else:
-                        w = model.generate(c.replace('"',''), audio_prompt_path=str(ref_audio), exaggeration=0.4, cfg_weight=0.65)
-                    wavs.append(w.cpu())
-                if i%8==0: torch.cuda.empty_cache()
-            except: continue
-        
+                wavs.append(_generate_tts_piece(c))
+            except Exception as e:
+                # A longer chunk can fail on an older Chatterbox build or
+                # unusual text. Retry it as smaller sentence/word pieces so
+                # increasing the target never silently loses narration.
+                print(f"  TTS chunk {i+1} retrying smaller pieces ({str(e)[:100]})")
+                fallback_parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', c) if p.strip()]
+                if len(fallback_parts) <= 1:
+                    words = c.split()
+                    midpoint = max(1, len(words) // 2)
+                    fallback_parts = [' '.join(words[:midpoint]), ' '.join(words[midpoint:])]
+                recovered = 0
+                for part in fallback_parts:
+                    if not part:
+                        continue
+                    try:
+                        wavs.append(_generate_tts_piece(part))
+                        recovered += 1
+                    except Exception as sub_error:
+                        print(f"  TTS sub-piece skipped ({str(sub_error)[:80]})")
+                if not recovered:
+                    print(f"  TTS chunk {i+1} could not be recovered")
+
         if not wavs: return False
         full = wavs[0]
         for w in wavs[1:]:
@@ -1091,23 +1156,52 @@ def generate_audio(text, ref_audio, out_path):
         if dwav.shape[0] > 1:
             dwav = dwav.mean(dim=0, keepdim=True)
         
-        chunk_s = 20 * osr; parts = []; esr = 44100
+        try:
+            enhance_chunk_seconds = max(20, int(os.environ.get("ENHANCE_CHUNK_SECONDS", "40")))
+        except (TypeError, ValueError):
+            enhance_chunk_seconds = 40
+        chunk_s = enhance_chunk_seconds * osr
+        parts = []; esr = 44100
         total = dwav.shape[1]
         n_chunks = (total + chunk_s - 1) // chunk_s
-        print(f"  Processing {n_chunks} chunks...")
-        
-        for i in range(0, total, chunk_s):
-            chunk = dwav[:, i:i+chunk_s]
+        print(f"  Processing {n_chunks} enhancement chunks ({enhance_chunk_seconds}s target)...")
+
+        def _enhance_piece(chunk, label):
             try:
-                hw, esr = re_enhance(dwav=chunk.squeeze(0), sr=osr, device=device, lambd=0.6)
-                parts.append(hw.cpu().unsqueeze(0))
-                print(f"    Chunk {i//chunk_s+1}/{n_chunks}: OK ({esr}Hz)")
+                hw, piece_sr = re_enhance(
+                    dwav=chunk.squeeze(0), sr=osr, device=device, lambd=0.6
+                )
+                piece_sr = int(piece_sr)
+                hw = hw.detach().cpu()
+                if piece_sr != 44100:
+                    hw = torchaudio.transforms.Resample(piece_sr, 44100)(hw.unsqueeze(0)).squeeze(0)
+                print(f"    Chunk {label}: OK (44100Hz)")
+                return hw.unsqueeze(0), 44100
             except Exception as e:
-                print(f"    Chunk {i//chunk_s+1}/{n_chunks}: fallback ({str(e)[:40]})")
-                parts.append(torchaudio.transforms.Resample(osr, 44100)(chunk).cpu())
-                esr = 44100
-            torch.cuda.empty_cache()
-        
+                # If a larger chunk exceeds available VRAM, retry it as two
+                # original-size pieces before falling back to resampling.
+                # This preserves enhancement whenever possible and avoids
+                # turning a memory optimization into a silent quality loss.
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                if chunk.shape[1] > 20 * osr + 1:
+                    midpoint = chunk.shape[1] // 2
+                    left, left_sr = _enhance_piece(chunk[:, :midpoint], f"{label}a")
+                    right, right_sr = _enhance_piece(chunk[:, midpoint:], f"{label}b")
+                    if left_sr == right_sr:
+                        return torch.cat([left, right], dim=1), left_sr
+                print(f"    Chunk {label}: fallback ({str(e)[:80]})")
+                fallback = torchaudio.transforms.Resample(osr, 44100)(chunk).cpu()
+                return fallback, 44100
+
+        for chunk_index, i in enumerate(range(0, total, chunk_s), 1):
+            piece, piece_sr = _enhance_piece(dwav[:, i:i+chunk_s], chunk_index)
+            parts.append(piece)
+            esr = piece_sr
+
         final = torch.cat(parts, dim=1)
         torchaudio.save(str(out_path), final, esr)
         print(f"  Enhanced: {esr}Hz, {final.shape[1]/esr:.1f}s")
