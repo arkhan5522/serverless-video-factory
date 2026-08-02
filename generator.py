@@ -187,8 +187,10 @@ def generate_queries_for_sentences(sentences):
     footage like ocean/waterfall clips appearing in e.g. medical topics).
     """
     if not GROQ_KEY or not sentences:
-        qs = [random.choice(FALLBACK) for _ in sentences]
-        return qs, list(qs)
+        raise RuntimeError(
+            "Groq is required for sentence-specific visual queries; "
+            "refusing to use generic footage"
+        )
 
     n = len(sentences)
     print(f"  Groq: matching {n} sentences to visuals...")
@@ -285,11 +287,16 @@ RULES:
             print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
             # leave this batch's entries as None -> filled by fallback below
 
-    # Backups fall back to the primary query itself (still topic-relevant)
-    # rather than the generic FALLBACK list, if Groq didn't provide one -
-    # this ensures retries NEVER silently jump to unrelated filler (ocean/
-    # nature/space) just because a specific query found no stock results.
-    queries = [q if q else random.choice(FALLBACK) for q in all_queries]
+    # A missing primary query is not safe to replace with generic footage:
+    # that would break sentence-to-visual alignment. A missing backup may
+    # repeat the primary because it remains semantically tied to the sentence.
+    missing = [i + 1 for i, query in enumerate(all_queries) if not query]
+    if missing:
+        raise RuntimeError(
+            "Groq did not return sentence-specific queries for positions "
+            f"{missing}; refusing unmatched visual substitutions"
+        )
+    queries = list(all_queries)
     backups = [all_backups[i] if all_backups[i] else queries[i] for i in range(n)]
 
     # Show matching for debug
@@ -315,6 +322,30 @@ def _safe(q):
            'gun','weapon','war','blood','violence','kill','alcohol',
            'drug','gambling','pork','lgbtq','person','people','crowd']
     return not any(t in q.lower() for t in bad)
+
+
+def _query_attempts(index, orig_index=None):
+    """Return only sentence-specific queries; never add generic footage."""
+    query_index = orig_index if orig_index is not None else index
+    if query_index < 0 or query_index >= len(AI_QUERIES):
+        raise RuntimeError(f"No AI visual query exists for sentence {query_index + 1}")
+    primary = str(AI_QUERIES[query_index] or '').strip()
+    if not primary:
+        raise RuntimeError(f"Primary visual query is empty for sentence {query_index + 1}")
+    backup = str(AI_BACKUPS[query_index] or '').strip() if query_index < len(AI_BACKUPS) else ''
+    return [primary] + ([backup] if backup and backup != primary else [])
+
+
+def _sentence_query_variants(attempts):
+    """Generate only semantically tied variants for persistent stock retries."""
+    suffixes = ["", " cinematic", " close up", " wide shot", " aerial view", " 4k"]
+    seen = set()
+    for base in attempts:
+        for suffix in suffixes:
+            variant = f"{base}{suffix}".strip()
+            if variant and variant not in seen:
+                seen.add(variant)
+                yield variant
 
 
 
@@ -740,13 +771,11 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
     Uses a distinct USED_URLS-safe idx namespace via `tag` so long-video and
     shorts clip fetching never collide on temp filenames.
     """
-    urls = _search_stock_urls(query, random.randint(1, 3), "portrait")
+    urls = _search_stock_urls(query, random.randint(1, 20), "portrait")
 
-    # Accuracy-first: try more candidates (was 6, now 10) since some will
-    # be rejected on VISUAL grounds, not just download failure. More
-    # candidates = better odds of finding a genuinely well-matching clip
-    # before falling back to the backup/generic query.
-    for url in urls[:10]:
+    # Each search call is bounded; the sentence worker keeps retrying with
+    # fresh pages and semantically tied variants until LLaVA accepts one.
+    for url in urls[:6]:
         try:
             raw = TEMP_DIR / f"raw_s{tag}_{idx}.mp4"
             out = TEMP_DIR / f"clip_s{tag}_{idx}.mp4"
@@ -793,27 +822,49 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
 
 
 def process_short_clip(args):
+    """Persistently find, verify, and immediately normalize one short clip."""
     i, sent, tag = args
     dur = max(2.5, sent['end'] - sent['start'])
-    orig_idx = sent.get('orig_idx', i)
-    primary = AI_QUERIES[orig_idx] if orig_idx < len(AI_QUERIES) else random.choice(FALLBACK)
-    backup = AI_BACKUPS[orig_idx] if orig_idx < len(AI_BACKUPS) else primary
-
-    attempts = [primary, backup, random.choice(FALLBACK)]
-    for query in attempts:
-        clip = search_and_download_vertical(query, i, dur, tag=tag)
-        if clip: return (i, clip)
-        time.sleep(0.3)
-    return (i, None)
+    attempts = _query_attempts(i, sent.get('orig_idx', i))
+    variants = list(_sentence_query_variants(attempts))
+    retry_count = 0
+    while True:
+        query = variants[retry_count % len(variants)]
+        retry_count += 1
+        try:
+            raw = search_and_download_vertical(
+                query, i, dur, tag=tag, verify=False, normalize=False
+            )
+            if not raw:
+                if retry_count % len(variants) == 0:
+                    print(f"    Short clip {i}: no unused candidates yet; continuing exact-query search")
+                    time.sleep(1.0)
+                continue
+            if not verify_clip_matches_query(raw, query):
+                try: os.remove(raw)
+                except OSError: pass
+                continue
+            output = TEMP_DIR / f"clip_s{tag}_{i}.mp4"
+            normalized = _normalize_vertical_clip(raw, output, dur)
+            try: os.remove(raw)
+            except OSError: pass
+            if normalized and _normalized_duration_is_usable(normalized, dur):
+                print(f"    Short clip {i}: verified and normalized immediately (retry {retry_count})")
+                return i, normalized
+            if normalized:
+                try: os.remove(normalized)
+                except OSError: pass
+            print(f"    Short clip {i}: accepted clip normalization failed; retrying exact-query search")
+        except Exception as e:
+            print(f"    Short clip {i}: retry {retry_count} error ({type(e).__name__}: {str(e)[:100]})")
+            time.sleep(0.5)
 
 
 def _prepare_short_candidate(args):
-    """Download one raw vertical candidate without FFmpeg normalization."""
+    """Compatibility wrapper for callers that only need a raw candidate."""
     i, sent, attempt, query, tag = args
     dur = max(2.5, sent['end'] - sent['start'])
-    raw = search_and_download_vertical(
-        query, i, dur, tag=tag, verify=False, normalize=False
-    )
+    raw = search_and_download_vertical(query, i, dur, tag=tag, verify=False, normalize=False)
     return i, attempt, query, raw
 
 
@@ -829,109 +880,36 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
     n = len(sentences_slice)
     print(f"\n  Short {short_idx+1}: fetching {n} vertical clips...")
 
-    clips = [None]*n
-    query_sets = []
-    for i, sent in enumerate(sentences_slice):
-        orig_idx = sent.get('orig_idx', i)
-        primary = AI_QUERIES[orig_idx] if orig_idx < len(AI_QUERIES) else random.choice(FALLBACK)
-        backup = AI_BACKUPS[orig_idx] if orig_idx < len(AI_BACKUPS) else primary
-        query_sets.append([primary, backup, random.choice(FALLBACK)])
+    clips = [None] * n
+    query_sets = [_query_attempts(i, sent.get('orig_idx', i))
+                  for i, sent in enumerate(sentences_slice)]
 
-    # Phase 1: download and verify all raw vertical candidates before any
-    # Shorts normalization. LLaVA remains serialized through its existing
-    # locks; rejected raw files are deleted and query retries are preserved.
-    print(f"  Short {short_idx+1}: phase 1/2 verifying raw clips...")
-    verified_raw = [None] * n
-    verified_count = 0
+    # Each worker searches, verifies, and immediately normalizes its own
+    # sentence. This prevents raw clips with inconsistent source durations
+    # from accumulating and later producing a long concatenated chunk.
+    print(f"  Short {short_idx+1}: streaming verified clips directly into normalized output...")
+    completed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-        pending = {}
-        for i, sent in enumerate(sentences_slice):
-            future = ex.submit(
-                _prepare_short_candidate,
-                (i, sent, 0, query_sets[i][0], tag),
-            )
-            pending[future] = (i, sent, 0, query_sets[i][0])
+        futures = {
+            ex.submit(process_short_clip, (i, sent, tag)): i
+            for i, sent in enumerate(sentences_slice)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            i, clip = future.result()
+            clips[i] = clip
+            completed += 1
+            print(f"    Short {short_idx+1}: completed {completed}/{n} exact clips")
 
-        while pending:
-            finished, _ = concurrent.futures.wait(
-                tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED
-            )
-            for future in finished:
-                i, sent, attempt, query = pending.pop(future)
-                accepted = False
-                raw = None
-                try:
-                    _, _, _, raw = future.result()
-                    if raw:
-                        accepted = verify_clip_matches_query(raw, query)
-                        if accepted:
-                            verified_raw[i] = raw
-                            verified_count += 1
-                            print(f"    Short {short_idx+1} clip {i} accepted by LLaVA")
-                        else:
-                            print(f"    Rejected short clip for '{query[:40]}' (visual mismatch)")
-                            try: os.remove(raw)
-                            except OSError: pass
-                except Exception as e:
-                    if raw:
-                        try: os.remove(raw)
-                        except OSError: pass
-                    print(f"    Short {short_idx+1} clip {i} verification failed: {type(e).__name__}: {str(e)[:120]}")
-
-                if accepted:
-                    continue
-                next_attempt = attempt + 1
-                if next_attempt < len(query_sets[i]):
-                    next_query = query_sets[i][next_attempt]
-                    next_future = ex.submit(
-                        _prepare_short_candidate,
-                        (i, sent, next_attempt, next_query, tag),
-                    )
-                    pending[next_future] = (i, sent, next_attempt, next_query)
-                else:
-                    print(f"    Short {short_idx+1} clip {i} exhausted verification attempts")
-
-    # Phase 1 is fully drained before normalization, so the verifier can be
-    # unloaded safely.  NVENC previously failed here because LLaVA remained
-    # resident after verification; reset the runtime failure flag because
-    # that earlier failure was caused by verifier VRAM contention, not proof
-    # that the encoder is unusable.
     _release_llava_for_encoding()
     if USE_GPU:
         _nvenc_runtime_failed = False
-        print(f"  Short {short_idx+1}: LLaVA released; retrying NVENC for vertical normalization")
+        print(f"  Short {short_idx+1}: verifier workers released before final encoding")
 
-    # Phase 2: normalize only raw vertical clips accepted by LLaVA.
-    print(f"  Short {short_idx+1}: phase 2/2 normalizing {verified_count} accepted clips...")
-    normalized_count = 0
-    for i, raw in enumerate(verified_raw):
-        if not raw:
-            continue
-        dur = max(2.5, sentences_slice[i]['end'] - sentences_slice[i]['start'])
-        normalized = _normalize_vertical_clip(
-            raw, TEMP_DIR / f"clip_s{tag}_{i}.mp4", dur
-        )
-        try: os.remove(raw)
-        except OSError: pass
-        if normalized:
-            clips[i] = normalized
-            normalized_count += 1
-        else:
-            print(f"    Short {short_idx+1} clip {i} normalization failed after verification")
-
-    valid = [i for i,c in enumerate(clips) if c and os.path.exists(c)]
-    if not valid:
-        print(f"  Short {short_idx+1}: no clips found, skipping")
+    missing = [i for i, clip in enumerate(clips)
+               if not clip or not os.path.exists(clip)]
+    if missing:
+        print(f"  Short {short_idx+1}: missing normalized clips at positions {missing}; refusing substitution")
         return False
-    for i in range(n):
-        if clips[i] and os.path.exists(clips[i]): continue
-        nearest = min(valid, key=lambda x:abs(x-i))
-        dur = max(2.5, sentences_slice[i]['end']-sentences_slice[i]['start'])
-        gap = TEMP_DIR / f"gap_{tag}_{i}.mp4"
-        subprocess.run(["ffmpeg","-y","-stream_loop","-1","-i",clips[nearest],
-            "-t",str(dur)] + _enc_args() + ["-an",str(gap)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        clips[i] = str(gap) if os.path.exists(gap) else clips[nearest]
 
     list_path = f"list_{tag}.txt"
     visual_path = f"visual_{tag}.mp4"
@@ -1223,84 +1201,101 @@ def generate_audio(text, ref_audio, out_path):
 # clips and remains the authoritative query-matching and woman/person check.
 # Query GENERATION still uses Groq (openai/gpt-oss-120b) unchanged, since
 # that part works well and wasn't the problem.
-_llava_model = None
-_llava_processor = None
-_llava_lock = threading.Lock()      # serializes generate() calls (model isn't thread-safe for concurrent generation)
-# Global GPU lock, ALSO acquired around every ffmpeg -hwaccel cuda encode
-# call (see search_and_download / search_and_download_vertical). This is
-# the real fix for verification hanging under load: with 5 parallel
-# worker threads, up to 5 ffmpeg h264_nvenc encode processes could be
-# running on the GPU AT THE SAME TIME as the verification model's
-# generate() call - all fighting for the same limited GPU decode/encode/
-# compute resources. The Colab test that confirmed this model works ran
-# it in complete isolation with zero concurrent GPU load, so that
-# contention was never exercised there. Sharing one lock across both
-# ffmpeg encoding and model verification guarantees they never run at
-# the same time on the GPU, removing the contention at its source rather
-# than trying to tune a timeout around an unpredictable hang.
-_gpu_lock = threading.Lock()
-_llava_load_lock = threading.Lock() # separately serializes the LOAD itself, so concurrent
-                                     # calls to _load_llava() can't race past the
-                                     # "already loaded?" check and each start loading
-                                     # a full 7B model simultaneously (this was the
-                                     # actual bug: 5 worker threads each loaded their
-                                     # own copy, OOMing the GPU even on tiny allocations)
-# LLaVA inference stays synchronous, matching the tested notebook. A watchdog
-# thread cannot safely cancel a CUDA generate() call and can leave a live
-# generation thread using the shared model after the caller has moved on.
+# Each verifier owns one model instance on one explicit CUDA device. Two
+# independent instances are required so both T4s can run verification work.
+_llava_workers = []
+_llava_next_worker = 0
+_llava_worker_select_lock = threading.Lock()
+_llava_load_lock = threading.Lock()
+_gpu_lock = threading.Lock()  # protects short NVENC normalization/final encoding
+# Verifier workers use per-model locks; encoding uses the separate _gpu_lock.
+
+def _load_llava_worker(gpu_index):
+    from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration, BitsAndBytesConfig
+
+    model_path = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+    if gpu_index is None:
+        device = "cpu"
+        load_kwargs = {"device_map": "cpu", "torch_dtype": torch.float32, "low_cpu_mem_usage": True}
+    else:
+        device = f"cuda:{gpu_index}"
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16, bnb_4bit_use_double_quant=True,
+        )
+        load_kwargs = {
+            "quantization_config": quantization_config,
+            "device_map": {"": device},
+            "torch_dtype": torch.float16,
+            "low_cpu_mem_usage": True,
+        }
+
+    print(f"  Loading LLaVA verifier on {device} (independent worker)...")
+    processor = AutoProcessor.from_pretrained(model_path)
+    model = None
+    selected_attention = "default"
+    try:
+        import flash_attn  # noqa: F401
+        model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+            model_path, attn_implementation="flash_attention_2", **load_kwargs
+        )
+        selected_attention = "flash_attention_2"
+    except Exception as flash_error:
+        print(f"    {device}: Flash Attention 2 unavailable ({type(flash_error).__name__}); trying SDPA")
+        try:
+            model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+                model_path, attn_implementation="sdpa", **load_kwargs
+            )
+            selected_attention = "sdpa"
+        except Exception as sdpa_error:
+            print(f"    {device}: SDPA unavailable ({type(sdpa_error).__name__}); using default attention")
+            model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+                model_path, **load_kwargs
+            )
+    model.eval()
+    return {
+        "gpu_index": gpu_index, "device": torch.device(device), "model": model,
+        "processor": processor, "lock": threading.Lock(), "attention": selected_attention,
+    }
+
 
 def _load_llava():
-    global _llava_model, _llava_processor
-    if _llava_model is not None:
+    global _llava_workers
+    if _llava_workers:
         return
     with _llava_load_lock:
-        # Re-check after acquiring the lock - another thread may have
-        # finished loading while this thread was waiting for the lock.
-        if _llava_model is not None:
+        if _llava_workers:
             return
-        from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration, BitsAndBytesConfig
-        model_path = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
-        print("  Loading local video verification model (LLaVA-OneVision-Qwen2-7B, 4-bit)...")
-        _llava_processor = AutoProcessor.from_pretrained(model_path)
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-        )
-        load_kwargs = dict(
-            quantization_config=quantization_config,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-        )
-        selected_attention = "eager"
-        # Prefer the model-card Flash Attention 2 path when the already
-        # installed environment supports it. Never install/build it here:
-        # failed flash-attn builds previously blocked the whole run.
-        try:
-            import flash_attn  # noqa: F401
-            _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-                model_path, attn_implementation="flash_attention_2", **load_kwargs
-            )
-            selected_attention = "flash_attention_2"
-        except Exception as flash_error:
-            print(f"  Flash Attention 2 unavailable ({type(flash_error).__name__}); trying PyTorch SDPA")
+        gpu_indices = list(range(min(2, torch.cuda.device_count()))) if torch.cuda.is_available() else [None]
+        loaded = []
+        for gpu_index in gpu_indices:
             try:
-                _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-                    model_path, attn_implementation="sdpa", **load_kwargs
-                )
-                selected_attention = "sdpa"
-            except Exception as sdpa_error:
-                print(f"  PyTorch SDPA unavailable ({type(sdpa_error).__name__}); using model default attention")
-                _llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-                    model_path, **load_kwargs
-                )
-        _llava_model.eval()
+                loaded.append(_load_llava_worker(gpu_index))
+            except Exception as e:
+                print(f"  WARNING: LLaVA worker on {gpu_index} failed: {type(e).__name__}: {str(e)[:180]}")
+                gc.collect()
+                if torch.cuda.is_available():
+                    try: torch.cuda.empty_cache()
+                    except Exception: pass
+        if not loaded:
+            raise RuntimeError("No LLaVA verifier worker could be loaded")
+        _llava_workers = loaded
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-        print(f"  LLaVA optimized verification: {_LLAVA_NUM_FRAMES} frames, {_LLAVA_MAX_NEW_TOKENS} max output tokens, direct Decord, attention={selected_attention}")
+        devices = ", ".join(str(worker["device"]) for worker in loaded)
+        print(f"  LLaVA verifier workers ready: {len(loaded)} ({devices}); "
+              f"{_LLAVA_NUM_FRAMES} frames, {_LLAVA_MAX_NEW_TOKENS} output tokens")
+
+
+def _next_llava_worker():
+    global _llava_next_worker
+    with _llava_worker_select_lock:
+        if not _llava_workers:
+            raise RuntimeError("LLaVA verifier workers are not loaded")
+        worker = _llava_workers[_llava_next_worker % len(_llava_workers)]
+        _llava_next_worker += 1
+        return worker
 
 
 # LLaVA video settings validated in the optimized Colab benchmark.
@@ -1311,7 +1306,7 @@ _LLAVA_MAX_NEW_TOKENS = 8
 _llava_direct_video_failed = False
 
 
-def _prepare_llava_inputs(clip_path, prompt):
+def _prepare_llava_inputs(clip_path, prompt, processor):
     """Prepare exactly four video frames, with a path-based fallback."""
     global _llava_direct_video_failed
     conversation = [{
@@ -1343,12 +1338,12 @@ def _prepare_llava_inputs(clip_path, prompt):
                     {"type": "text", "text": prompt},
                 ],
             }]
-            formatted = _llava_processor.apply_chat_template(
+            formatted = processor.apply_chat_template(
                 direct_conversation,
                 add_generation_prompt=True,
                 tokenize=False,
             )
-            inputs = _llava_processor(
+            inputs = processor(
                 text=[formatted],
                 videos=frames,
                 videos_kwargs={"do_sample_frames": False},
@@ -1364,12 +1359,12 @@ def _prepare_llava_inputs(clip_path, prompt):
     # Fallback remains explicit and warning-free on current Transformers:
     # format the chat separately, then pass video sampling options to the
     # processor's video kwargs rather than through apply_chat_template(**kwargs).
-    formatted = _llava_processor.apply_chat_template(
+    formatted = processor.apply_chat_template(
         conversation,
         add_generation_prompt=True,
         tokenize=False,
     )
-    return _llava_processor(
+    return processor(
         text=[formatted],
         videos=[str(clip_path)],
         videos_kwargs={
@@ -1398,7 +1393,8 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
     Returns True if the clip should be USED (topic matches AND, if
     filter_women, no woman detected), False if it should be rejected.
 
-    Fail-open vs fail-closed distinction (accuracy-first priority):
+    Verification is fail-closed; any model-load or per-clip inference error
+    rejects the candidate and the sentence worker keeps searching.
     - If the MODEL ITSELF fails to load (happens once, affects every
       clip), fails OPEN (returns True) - otherwise the whole pipeline
       would produce zero usable clips if the model can't load at all,
@@ -1413,17 +1409,16 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
     verify_started = time.perf_counter()
     try:
         _load_llava()
+        worker = _next_llava_worker()
     except Exception as e:
-        print(f"    Video verification model unavailable ({str(e)[:60]}), accepting clip (model-level failure, fail-open)")
-        return True
+        print(f"    Video verification model unavailable ({str(e)[:100]}), rejecting clip (fail-closed)")
+        return False
 
     try:
-        with _llava_lock, _gpu_lock:  # never run concurrently with another
-                                       # generate() call OR with any ffmpeg
-                                       # NVENC encode - this is the actual
-                                       # fix for verification hanging under
-                                       # load (see _gpu_lock definition above
-                                       # for the full explanation)
+        with worker["lock"]:
+            processor = worker["processor"]
+            model = worker["model"]
+            device = worker["device"]
             if filter_women:
                 prompt = f"""Look at this video clip and answer two questions, each on its own line, in this EXACT format:
 1. <YES or NO>
@@ -1439,9 +1434,11 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
 1. Does this video clip visually match the concept: "{query}"? Answer YES if it reasonably represents the concept (even loosely/thematically - stock footage rarely is a perfect literal match). Answer NO only if it's clearly unrelated."""
 
             inputs_started = time.perf_counter()
-            inputs = _prepare_llava_inputs(clip_path, prompt).to(
-                _llava_model.device, _llava_model.dtype
-            )
+            inputs = _prepare_llava_inputs(clip_path, prompt, processor)
+            for key, value in list(inputs.items()):
+                if torch.is_tensor(value):
+                    dtype = model.dtype if value.is_floating_point() else value.dtype
+                    inputs[key] = value.to(device=device, dtype=dtype)
             inputs_seconds = time.perf_counter() - inputs_started
 
             # Keep generation synchronous, exactly as in the tested notebook.
@@ -1451,17 +1448,17 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
             # clip workers from completing.
             generation_started = time.perf_counter()
             with torch.inference_mode():
-                out = _llava_model.generate(
+                out = model.generate(
                     **inputs,
                     max_new_tokens=_LLAVA_MAX_NEW_TOKENS,
                     do_sample=False,
                     use_cache=True,
-                    pad_token_id=_llava_processor.tokenizer.eos_token_id,
+                    pad_token_id=processor.tokenizer.eos_token_id,
                 )
             generation_seconds = time.perf_counter() - generation_started
-            print(f"    LLaVA timing: prepare={inputs_seconds:.1f}s generate={generation_seconds:.1f}s total={time.perf_counter() - verify_started:.1f}s")
+            print(f"    LLaVA {device} timing: prepare={inputs_seconds:.1f}s generate={generation_seconds:.1f}s total={time.perf_counter() - verify_started:.1f}s")
 
-            full_text = _llava_processor.batch_decode(
+            full_text = processor.batch_decode(
                 out, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )[0]
             # Response follows "assistant\n" in the decoded text (chat
@@ -1479,7 +1476,7 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
             # since that would conflate the two answers if the model
             # returns e.g. "1. NO / 2. YES" (topic mismatch AND a woman -
             # searching the whole string for "YES" would wrongly pass it).
-            topic_match = "YES" in line1 or "NO" not in line1
+            topic_match = "YES" in line1 and "NO" not in line1
             has_woman = filter_women and "YES" in line2
 
             if has_woman:
@@ -1577,6 +1574,26 @@ def _normalize_vertical_clip(raw_path, output_path, duration):
     )
 
 
+def _normalized_duration_is_usable(path, target_duration):
+    """Reject clips whose encoded duration could create concat timing drift."""
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        actual = float(probe.stdout.strip())
+        minimum = max(0.1, target_duration - 0.15)
+        maximum = target_duration + 0.15
+        if actual < minimum or actual > maximum:
+            print(f"    Normalized duration {actual:.2f}s is outside target {target_duration:.2f}s; rejecting and retrying")
+            return False
+        return True
+    except Exception as e:
+        print(f"    Could not validate normalized duration ({type(e).__name__}); rejecting and retrying")
+        return False
+
+
 def _nullcontext():
     """Tiny local context manager to avoid importing contextlib in hot code."""
     class _Context:
@@ -1586,15 +1603,17 @@ def _nullcontext():
 
 
 def _release_llava_for_encoding():
-    """Release LLaVA VRAM before long FFmpeg encoding stages."""
-    global _llava_model, _llava_processor
-    model = None
+    """Release every verifier model before final/long encoding stages."""
+    global _llava_workers
     with _llava_load_lock:
-        model = _llava_model
-        _llava_model = None
-        _llava_processor = None
-    if model is not None:
-        del model
+        workers = _llava_workers
+        _llava_workers = []
+    for worker in workers:
+        try:
+            del worker["model"]
+            del worker["processor"]
+        except Exception:
+            pass
     gc.collect()
     if torch.cuda.is_available():
         try:
@@ -1606,7 +1625,7 @@ def _release_llava_for_encoding():
 
 def search_and_download(query, idx, duration, verify=True):
     """Search/download; raw-first for streaming, normalized for verify=True callers."""
-    urls = _search_stock_urls(query, random.randint(1, 3), "landscape")
+    urls = _search_stock_urls(query, random.randint(1, 20), "landscape")
     
     # Accuracy-first: try more candidates (was 6, now 10) since some will
     # be rejected on VISUAL grounds, not just download failure - need more
@@ -1663,15 +1682,51 @@ def search_and_download(query, idx, duration, verify=True):
                     pass
             print(f"    Clip {idx} query '{query[:40]}' failed: {type(e).__name__}: {str(e)[:100]}")
             continue
-    print(f"    Clip {idx} query '{query[:40]}' exhausted all candidates")
+    # The outer sentence worker retries this query on fresh pages/variants.
+    print(f"    Clip {idx} query '{query[:40]}' produced no usable candidate on this page")
     return None
 
+def process_landscape_clip(args):
+    """Persistently find, verify, and immediately normalize one sentence clip."""
+    i, sent, attempts = args
+    duration = max(3.5, sent['end'] - sent['start'])
+    variants = list(_sentence_query_variants(attempts))
+    retry_count = 0
+    while True:
+        query = variants[retry_count % len(variants)]
+        retry_count += 1
+        try:
+            raw = search_and_download(query, i, duration, verify=False)
+            if not raw:
+                if retry_count % len(variants) == 0:
+                    print(f"    Clip {i}: no unused candidates yet; continuing exact-query search")
+                    time.sleep(1.0)
+                continue
+            if not verify_clip_matches_query(raw, query):
+                try: os.remove(raw)
+                except OSError: pass
+                continue
+            normalized = _normalize_landscape_clip(
+                raw, TEMP_DIR / f"clip_{i}.mp4", duration
+            )
+            try: os.remove(raw)
+            except OSError: pass
+            if normalized and _normalized_duration_is_usable(normalized, duration):
+                print(f"    Clip {i}: verified and normalized immediately (retry {retry_count})")
+                return i, normalized
+            if normalized:
+                try: os.remove(normalized)
+                except OSError: pass
+            print(f"    Clip {i}: accepted clip normalization failed; retrying exact-query search")
+        except Exception as e:
+            print(f"    Clip {i}: retry {retry_count} error ({type(e).__name__}: {str(e)[:100]})")
+            time.sleep(0.5)
+
+
 def prepare_clip_candidate(args):
-    """Download one raw candidate without waiting for LLaVA or FFmpeg."""
+    """Compatibility wrapper for callers that only need a raw candidate."""
     i, sent, attempt, query = args
-    attempt_started = time.perf_counter()
     clip = search_and_download(query, i, max(3.5, sent['end'] - sent['start']), verify=False)
-    print(f"    Clip {i} raw candidate preparation finished in {time.perf_counter() - attempt_started:.1f}s: {'ready' if clip else 'unavailable'}")
     return i, attempt, query, clip
 
 
@@ -1681,130 +1736,39 @@ def prepare_clip_candidate(args):
 def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
     global _nvenc_runtime_failed
     n = len(sentences)
-    print(f"\n  Rendering {n} clips (phase 1: 5 raw-download workers + serialized LLaVA; phase 2: accepted-only GPU normalization)...")
+    clips = [None] * n
+    query_sets = [_query_attempts(i) for i in range(n)]
+    print(f"\n  Rendering {n} clips with streaming verify->normalize workers on the available LLaVA GPUs...")
 
-    clips = [None]*n
-    query_sets = []
-    for i in range(n):
-        primary = AI_QUERIES[i] if i < len(AI_QUERIES) else random.choice(FALLBACK)
-        backup = AI_BACKUPS[i] if i < len(AI_BACKUPS) else primary
-        query_sets.append([primary, backup, random.choice(FALLBACK)])
-
-    # Phase 1: download and verify every candidate before doing any
-    # landscape FFmpeg normalization. Five workers only perform network
-    # downloads; the LLaVA verifier remains serialized and rejects/deletes
-    # raw candidates before they can reach FFmpeg.
-    print("  Phase 1/2: verifying all raw clips with LLaVA...")
-    update_status(55, f"Verifying raw clips (0/{n})...")
-    verified_raw = [None] * n
-    verified_count = 0
-
+    completed = 0
+    update_status(55, f"Finding exact verified clips (0/{n})...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-        pending = {}
-        for i, sent in enumerate(sentences):
-            query = query_sets[i][0]
-            future = ex.submit(prepare_clip_candidate, (i, sent, 0, query))
-            pending[future] = (i, sent, 0, query)
-
-        while pending:
-            finished, _ = concurrent.futures.wait(
-                tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED
+        futures = {
+            ex.submit(process_landscape_clip, (i, sent, query_sets[i])): i
+            for i, sent in enumerate(sentences)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            i, clip = future.result()
+            clips[i] = clip
+            completed += 1
+            update_status(
+                55 + int((completed / max(1, n)) * 25),
+                f"Exact clips verified and normalized ({completed}/{n})...",
             )
-            for future in finished:
-                i, sent, attempt, query = pending.pop(future)
-                accepted = False
-                path = None
-                try:
-                    _, _, _, path = future.result()
-                    if path:
-                        # This is the only decision point in phase 1. An
-                        # accepted raw file is held for phase 2; it is not
-                        # normalized here.
-                        accepted = verify_clip_matches_query(path, query)
-                        if accepted:
-                            verified_raw[i] = path
-                            verified_count += 1
-                            update_status(
-                                55 + int((verified_count / max(1, n)) * 15),
-                                f"Verified raw clips ({verified_count}/{n})...",
-                            )
-                            print(f"    Clip {i} accepted by LLaVA; queued for phase-2 GPU normalization")
-                        else:
-                            print(f"    Rejected clip for '{query[:40]}' (visual mismatch)")
-                            try: os.remove(path)
-                            except OSError: pass
-                except Exception as e:
-                    if path:
-                        try: os.remove(path)
-                        except OSError: pass
-                    print(f"    Clip {i} verification pipeline failed: {type(e).__name__}: {str(e)[:120]}")
 
-                if accepted:
-                    continue
-
-                next_attempt = attempt + 1
-                if next_attempt < len(query_sets[i]):
-                    next_query = query_sets[i][next_attempt]
-                    next_future = ex.submit(
-                        prepare_clip_candidate,
-                        (i, sent, next_attempt, next_query),
-                    )
-                    pending[next_future] = (i, sent, next_attempt, next_query)
-                else:
-                    print(f"    Clip {i} exhausted all query attempts during verification")
-
-    # Verification is complete. Release the 4-bit LLaVA model before any
-    # long encode so NVENC can create its CUDA context without competing for
-    # the model's VRAM. Reset only this runtime flag here: the first NVENC
-    # attempt was made while LLaVA was resident, so it is not a reliable
-    # verdict about the encoder after cleanup.
     _release_llava_for_encoding()
     if USE_GPU:
         _nvenc_runtime_failed = False
-        print("  LLaVA released; retrying NVENC with the verifier unloaded")
+        print("  Verifier workers released before final encoding")
 
-    missing_after_verification = n - verified_count
-    print(f"  Phase 1 complete: {verified_count}/{n} raw clips accepted; {missing_after_verification} positions will use accepted-clip fallback")
+    missing = [i for i, clip in enumerate(clips)
+               if not clip or not os.path.exists(clip)]
+    if missing:
+        print(f"  Missing normalized clips at positions {missing}; refusing substitution")
+        return False
 
-    # Phase 2: only after the verification phase has completely drained,
-    # normalize accepted raw files. The helper uses h264_nvenc when available
-    # and publishes only validated MP4 output. No unverified raw path can
-    # enter clips[] or the concat list.
-    print(f"  Phase 2/2: GPU-normalizing {verified_count} accepted clips...")
-    update_status(72, f"GPU-normalizing accepted clips (0/{verified_count})...")
-    clips = [None] * n
-    normalized_count = 0
-    for i, raw_path in enumerate(verified_raw):
-        if not raw_path:
-            continue
-        sent = sentences[i]
-        dur = max(3.5, sent['end'] - sent['start'])
-        normalized = _normalize_landscape_clip(
-            raw_path, TEMP_DIR / f"clip_{i}.mp4", dur
-        )
-        try: os.remove(raw_path)
-        except OSError: pass
-        if normalized:
-            clips[i] = normalized
-            normalized_count += 1
-            update_status(
-                72 + int((normalized_count / max(1, verified_count)) * 10),
-                f"GPU-normalized accepted clips ({normalized_count}/{verified_count})...",
-            )
-        else:
-            print(f"    Clip {i} normalization failed after successful verification")
-
-    valid = [i for i,c in enumerate(clips) if c and os.path.exists(c)]
-    if not valid: return False
-    for i in range(n):
-        if clips[i] and os.path.exists(clips[i]): continue
-        nearest = min(valid, key=lambda x:abs(x-i))
-        dur = max(3.5, sentences[i]['end']-sentences[i]['start'])
-        gap = TEMP_DIR / f"gap_{i}.mp4"
-        subprocess.run(["ffmpeg","-y","-stream_loop","-1","-i",clips[nearest],
-            "-t",str(dur)] + _enc_args() + ["-an",str(gap)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        clips[i] = str(gap) if os.path.exists(gap) else clips[nearest]
+    # Every entry is a verified, duration-trimmed, normalized clip. No nearest
+    # clip, gap clip, or generic footage is allowed into the concat list.
     
     # Concat (stream copy)
     print("  Concatenating...")
@@ -1843,59 +1807,19 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
     vdur = _probe_dur("visual.mp4")
     adur = _probe_dur(audio_path)
     if vdur > 0 and adur > 0 and vdur < adur - 0.5:
-        deficit = (adur - vdur) + 0.5  # small extra buffer
-        print(f"  Visual track {vdur:.2f}s shorter than audio {adur:.2f}s, fetching {deficit:.1f}s of extra footage...")
+        print(f"  Concatenated visual is {adur - vdur:.2f}s short; re-encoding the already-verified trimmed clips")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt",
+             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an", "visual_reencoded.mp4"],
+            capture_output=True, timeout=300,
+        )
+        if os.path.exists("visual_reencoded.mp4"):
+            os.replace("visual_reencoded.mp4", "visual.mp4")
+            vdur = _probe_dur("visual.mp4")
+        if vdur < adur - 0.5:
+            print(f"  Verified clips still produce a {adur - vdur:.2f}s duration deficit; refusing unmatched padding")
+            return False
 
-        extra_clips = []
-        remaining = deficit
-        attempt = 0
-        # Pull from the tail of AI_QUERIES first (thematically closest to
-        # the video's ending), falling back to FALLBACK queries if needed.
-        query_pool = list(reversed(AI_QUERIES)) if AI_QUERIES else []
-        while remaining > 0.5 and attempt < 15:
-            q = query_pool[attempt % len(query_pool)] if query_pool else random.choice(FALLBACK)
-            chunk_dur = min(remaining, 8.0)  # fetch in ~8s chunks
-            clip = search_and_download(q, f"pad{attempt}", chunk_dur)
-            if clip:
-                extra_clips.append(clip)
-                remaining -= chunk_dur
-            attempt += 1
-
-        if extra_clips:
-            with open("list.txt", "a") as f:
-                for c in extra_clips:
-                    f.write(f"file '{c}'\n")
-            subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual_ext.mp4",
-                shell=True, capture_output=True, timeout=60)
-            if os.path.exists("visual_ext.mp4"):
-                os.replace("visual_ext.mp4", "visual.mp4")
-                vdur = _probe_dur("visual.mp4")
-
-        # If real footage still didn't fully close the gap (fetch failures,
-        # rate limits, etc.), loop the last clip rather than freeze on a
-        # single static frame - motion is far less noticeable/jarring than
-        # a dead frame, and this only covers whatever small remainder is left.
-        vdur = _probe_dur("visual.mp4")
-        if vdur > 0 and vdur < adur - 0.5:
-            still_needed = (adur - vdur) + 0.3
-            print(f"  Still {still_needed:.1f}s short after extra fetch, looping last clip (not freezing)")
-            last_source = extra_clips[-1] if extra_clips else clips[-1]
-            loop_fill = "visual_loopfill.mp4"
-            subprocess.run(["ffmpeg","-y","-stream_loop","-1","-i",last_source,
-                "-t",f"{still_needed:.2f}"] + _enc_args() + ["-an","loopfill_clip.mp4"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-            if os.path.exists("loopfill_clip.mp4"):
-                with open("list.txt", "a") as f:
-                    f.write(f"file 'loopfill_clip.mp4'\n")
-                subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual_final.mp4",
-                    shell=True, capture_output=True, timeout=60)
-                if os.path.exists("visual_final.mp4"):
-                    os.replace("visual_final.mp4", "visual.mp4")
-            for tmp in ["loopfill_clip.mp4"]:
-                if os.path.exists(tmp):
-                    try: os.remove(tmp)
-                    except: pass
-    
     # Final render: visual.mp4 is already normalized to 1920x1080, so do not
     # rescale the entire nine-minute stream again. Burn the logo/subtitles and
     # encode with NVENC after LLaVA has been released. If the runtime encoder
@@ -2162,10 +2086,11 @@ update_status(54, "Processing video...")
 # the verification model into that freed VRAM, once, before any threads exist.
 try:
     _load_llava()
-    print("  Video verification model loaded once (main thread, before parallel rendering)")
+    print(f"  LLaVA verifier workers loaded before rendering: {len(_llava_workers)}")
 except Exception as e:
-    print(f"  WARNING: Video verification model failed to load ({str(e)[:100]}) - "
-          f"clips will render unverified this run (fail-open at model level)")
+    print(f"  ERROR: video verification workers failed to load ({str(e)[:120]}); refusing unverified output")
+    update_status(0, "Video verification unavailable; render refused", "failed")
+    raise SystemExit(1)
 
 o2 = OUTPUT_DIR/f"final_{JOB_ID}_WITH_SUBS.mp4"
 
