@@ -20,7 +20,7 @@ jobs:
           python-version: '3.9'
 
       - name: Install Kaggle API
-        run: pip install kaggle
+        run: pip install kaggle==2.2.4
 
       - name: Build & Push to Kaggle
         env:
@@ -135,8 +135,11 @@ jobs:
             "competition_sources": []
           }' > kernel-metadata.json
 
-          # 5. Push to Kaggle
-          kaggle kernels push -p .
+          # Request Kaggle's NvidiaTeslaT4 machine shape (the current T4 x2
+          # accelerator) instead of accepting the default P100. This requires
+          # a recent Kaggle CLI; the workflow pins the first release containing
+          # the accelerator selector above.
+          kaggle kernels push -p . --accelerator NvidiaTeslaT4
 
       - name: Wait for Result (Long Polling)
         run: |
