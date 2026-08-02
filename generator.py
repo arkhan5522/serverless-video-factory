@@ -1348,7 +1348,7 @@ def prepare_clip_candidate(args):
 # ==========================================
 def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
     n = len(sentences)
-    print(f"\n  Rendering {n} clips (5 raw-download workers + 1 LLaVA verifier + accepted-clip GPU normalization)...")
+    print(f"\n  Rendering {n} clips (phase 1: 5 raw-download workers + serialized LLaVA; phase 2: accepted-only GPU normalization)...")
 
     clips = [None]*n
     query_sets = []
@@ -1357,10 +1357,15 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
         backup = AI_BACKUPS[i] if i < len(AI_BACKUPS) else primary
         query_sets.append([primary, backup, random.choice(FALLBACK)])
 
-    # Raw downloads are prepared asynchronously. LLaVA verifies each raw file
-    # first; only an accepted candidate is normalized with GPU FFmpeg and then
-    # placed in clips[]. This avoids spending 20-90s encoding rejected videos.
-    # Verification and NVENC normalization share _gpu_lock and never overlap.
+    # Phase 1: download and verify every candidate before doing any
+    # landscape FFmpeg normalization. Five workers only perform network
+    # downloads; the LLaVA verifier remains serialized and rejects/deletes
+    # raw candidates before they can reach FFmpeg.
+    print("  Phase 1/2: verifying all raw clips with LLaVA...")
+    update_status(55, f"Verifying raw clips (0/{n})...")
+    verified_raw = [None] * n
+    verified_count = 0
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
         pending = {}
         for i, sent in enumerate(sentences):
@@ -1368,7 +1373,6 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
             future = ex.submit(prepare_clip_candidate, (i, sent, 0, query))
             pending[future] = (i, sent, 0, query)
 
-        done = 0
         while pending:
             finished, _ = concurrent.futures.wait(
                 tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED
@@ -1380,33 +1384,29 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                 try:
                     _, _, _, path = future.result()
                     if path:
+                        # This is the only decision point in phase 1. An
+                        # accepted raw file is held for phase 2; it is not
+                        # normalized here.
                         accepted = verify_clip_matches_query(path, query)
                         if accepted:
-                            dur = max(3.5, sent['end'] - sent['start'])
-                            normalized = _normalize_landscape_clip(
-                                path, TEMP_DIR / f"clip_{i}.mp4", dur
+                            verified_raw[i] = path
+                            verified_count += 1
+                            update_status(
+                                55 + int((verified_count / max(1, n)) * 15),
+                                f"Verified raw clips ({verified_count}/{n})...",
                             )
-                            if normalized:
-                                try: os.remove(path)
-                                except OSError: pass
-                                path = normalized
-                            else:
-                                accepted = False
-                        if not accepted:
-                            print(f"    Rejected clip for '{query[:40]}' (visual mismatch or normalization failure)")
+                            print(f"    Clip {i} accepted by LLaVA; queued for phase-2 GPU normalization")
+                        else:
+                            print(f"    Rejected clip for '{query[:40]}' (visual mismatch)")
                             try: os.remove(path)
                             except OSError: pass
                 except Exception as e:
                     if path:
                         try: os.remove(path)
                         except OSError: pass
-                    print(f"    Clip {i} candidate pipeline failed: {type(e).__name__}: {str(e)[:120]}")
+                    print(f"    Clip {i} verification pipeline failed: {type(e).__name__}: {str(e)[:120]}")
 
-                if accepted and path:
-                    clips[i] = path
-                    done += 1
-                    update_status(55+int((done/n)*22), f"Clips {done}/{n}")
-                    print(f"    Clip {i} accepted after query attempt {attempt + 1}")
+                if accepted:
                     continue
 
                 next_attempt = attempt + 1
@@ -1418,7 +1418,35 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                     )
                     pending[next_future] = (i, sent, next_attempt, next_query)
                 else:
-                    print(f"    Clip {i} exhausted all query attempts")
+                    print(f"    Clip {i} exhausted all query attempts during verification")
+
+    # Phase 2: only after the verification phase has completely drained,
+    # normalize accepted raw files. The helper uses h264_nvenc when available
+    # and publishes only validated MP4 output. No unverified raw path can
+    # enter clips[] or the concat list.
+    print(f"  Phase 2/2: GPU-normalizing {verified_count} accepted clips...")
+    update_status(72, f"GPU-normalizing accepted clips (0/{verified_count})...")
+    clips = [None] * n
+    normalized_count = 0
+    for i, raw_path in enumerate(verified_raw):
+        if not raw_path:
+            continue
+        sent = sentences[i]
+        dur = max(3.5, sent['end'] - sent['start'])
+        normalized = _normalize_landscape_clip(
+            raw_path, TEMP_DIR / f"clip_{i}.mp4", dur
+        )
+        try: os.remove(raw_path)
+        except OSError: pass
+        if normalized:
+            clips[i] = normalized
+            normalized_count += 1
+            update_status(
+                72 + int((normalized_count / max(1, verified_count)) * 10),
+                f"GPU-normalized accepted clips ({normalized_count}/{verified_count})...",
+            )
+        else:
+            print(f"    Clip {i} normalization failed after successful verification")
 
     valid = [i for i,c in enumerate(clips) if c and os.path.exists(c)]
     if not valid: return False
@@ -1440,9 +1468,11 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
     subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt -c copy visual.mp4",
         shell=True, capture_output=True, timeout=60)
     if not os.path.exists("visual.mp4"):
-        subprocess.run("ffmpeg -y -f concat -safe 0 -i list.txt" + 
-            " -c:v libx264 -preset ultrafast -crf 18 visual.mp4",
-            shell=True, capture_output=True)
+        # Stream-copy concat normally needs no GPU and is nearly instant. If
+        # source timestamps/codecs prevent it, fall back to GPU encoding when
+        # NVENC is available rather than silently returning to libx264 CPU.
+        fallback_cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt"] + _enc_args() + ["visual.mp4"]
+        subprocess.run(fallback_cmd, capture_output=True)
     if not os.path.exists("visual.mp4"): return False
 
     # Safety: stream-copy concat of many clips can lose fractions of a
