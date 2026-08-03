@@ -1693,6 +1693,36 @@ _MINICPM_MODEL_PATH = "openbmb/MiniCPM-V-4_5-int4"
 _MINICPM_DTYPE = torch.float16
 _MINICPM_TIME_SCALE = 0.1
 _MINICPM_PACKING = 4
+_MINICPM_COMPAT_PATCHED = False
+
+
+def _patch_minicpm_transformers_compat():
+    """Bridge MiniCPM remote code that predates Transformers 5.5 metadata."""
+    global _MINICPM_COMPAT_PATCHED
+    if _MINICPM_COMPAT_PATCHED:
+        return
+
+    from transformers import PreTrainedModel
+
+    # MiniCPMV calls PreTrainedModel.__init__ but omits post_init(), while
+    # Transformers 5.5 accesses all_tied_weights_keys during checkpoint
+    # finalization. Patch the base initializer once so every affected model
+    # instance gets its own empty mapping; modern child models still replace it
+    # with their real mapping from post_init().
+    original_init = PreTrainedModel.__init__
+
+    import functools
+
+    @functools.wraps(original_init)
+    def _compat_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if not hasattr(self, "all_tied_weights_keys"):
+            self.all_tied_weights_keys = {}
+
+    PreTrainedModel.__init__ = _compat_init
+    _MINICPM_COMPAT_PATCHED = True
+    print("  MiniCPM compatibility: initialized missing all_tied_weights_keys metadata")
+
 
 def _load_llava_worker(gpu_index):
     """Load one official MiniCPM-V 4.5 int4 verifier on one CUDA device."""
@@ -1706,12 +1736,13 @@ def _load_llava_worker(gpu_index):
         _MINICPM_MODEL_PATH,
         trust_remote_code=True,
     )
+    _patch_minicpm_transformers_compat()
     # The checkpoint config contains the official bitsandbytes NF4 settings.
     # Passing device_map pins this independent model to exactly one GPU.
     model = AutoModel.from_pretrained(
         _MINICPM_MODEL_PATH,
         trust_remote_code=True,
-        torch_dtype=_MINICPM_DTYPE,
+        dtype=_MINICPM_DTYPE,
         device_map={"": device},
         attn_implementation="sdpa",
     )
