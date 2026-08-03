@@ -149,6 +149,7 @@ for _module, _requirement in [
     ("av", "av"), ("decord", "decord==0.6.0"),
     ("torchvision", "torchvision"), ("sentencepiece", "sentencepiece"),
     ("bitsandbytes", "bitsandbytes>=0.46.1"),
+    ("psutil", "psutil"),
 ]:
     _ensure_package(_module, _requirement)
 
@@ -309,6 +310,89 @@ def _hwaccel_args():
     return ["-hwaccel", "cuda"] if USE_GPU and not _nvenc_runtime_failed else []
 
 
+# ==========================================
+# 1B. RESOURCE MONITOR (periodic CPU/RAM/GPU logging)
+# ==========================================
+# A silent regression (memory leak, VRAM creep, runaway CPU from a stuck
+# retry loop) previously had no visibility until the whole job failed or
+# timed out tens of minutes later. This prints one compact resource line on
+# a fixed interval for the entire run, plus targeted snapshots right at the
+# handful of points most likely to fail (MiniCPM load/OOM, TTS, Enhance,
+# final render) so a future failure's exact resource state is captured in
+# the log next to it, not just its elapsed wall-clock time.
+def _gpu_stats_via_nvidia_smi():
+    """Query per-GPU utilization/memory/temperature; [] if nvidia-smi is unavailable."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        stats = []
+        for line in result.stdout.strip().split("\n"):
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 5:
+                continue
+            stats.append({
+                "index": parts[0], "util_pct": parts[1],
+                "mem_used_mb": parts[2], "mem_total_mb": parts[3],
+                "temp_c": parts[4],
+            })
+        return stats
+    except Exception:
+        return []
+
+
+def _log_resource_snapshot(label=""):
+    """Print one CPU/RAM/GPU usage line. Cheap enough to call often."""
+    try:
+        import psutil
+        cpu_pct = psutil.cpu_percent(interval=None)
+        vm = psutil.virtual_memory()
+        cpu_part = (f"CPU {cpu_pct:.0f}% | RAM {vm.used / (1024**3):.1f}/"
+                    f"{vm.total / (1024**3):.1f}GB ({vm.percent:.0f}%)")
+    except Exception as e:
+        cpu_part = f"CPU/RAM unavailable ({type(e).__name__})"
+
+    gpu_stats = _gpu_stats_via_nvidia_smi()
+    if gpu_stats:
+        gpu_part = " | ".join(
+            f"GPU{g['index']} {g['util_pct']}% util, "
+            f"{g['mem_used_mb']}/{g['mem_total_mb']}MB VRAM, {g['temp_c']}C"
+            for g in gpu_stats
+        )
+    else:
+        gpu_part = "GPU stats unavailable"
+    tag = f"[RESOURCE{' ' + label if label else ''}]"
+    print(f"  {tag} {cpu_part} | {gpu_part}")
+
+
+_resource_monitor_stop = threading.Event()
+
+
+def _resource_monitor_loop(interval_seconds):
+    try:
+        import psutil
+        psutil.cpu_percent(interval=None)  # discard the meaningless first reading
+    except Exception:
+        pass
+    while not _resource_monitor_stop.wait(interval_seconds):
+        _log_resource_snapshot()
+
+
+try:
+    _RESOURCE_LOG_INTERVAL = max(10, int(os.environ.get("RESOURCE_LOG_INTERVAL_SECONDS", "30")))
+except (TypeError, ValueError):
+    _RESOURCE_LOG_INTERVAL = 30
+
+threading.Thread(target=_resource_monitor_loop, args=(_RESOURCE_LOG_INTERVAL,),
+                  daemon=True).start()
+print(f"  Resource monitor: logging CPU/RAM/GPU every {_RESOURCE_LOG_INTERVAL}s")
+
+
 
 # ==========================================
 # 2. CONFIGURATION
@@ -451,7 +535,13 @@ def _local_sentence_query_pair(sentence_text):
 # Requests are additionally paced against the account's tokens-per-minute
 # ceiling, because this org is on the on_demand tier (observed limit 8000 TPM),
 # where an oversized or too-frequent request is rejected with HTTP 413.
-_GROQ_MODEL = "openai/gpt-oss-120b"
+# Model choice: GPT-OSS-20B generates at ~1000 tokens/sec vs 120B's ~500
+# tokens/sec (per Groq's published model specs), roughly halving the wall-clock
+# cost of every batched query-matching and fresh-query-recovery call while
+# staying on the same 250K-token context and TPM-tier rules as 120B. The
+# structured, short-output query-generation task here does not need 120B's
+# extra reasoning depth, so the speed trade is a clear win for this pipeline.
+_GROQ_MODEL = "openai/gpt-oss-20b"
 try:
     _GROQ_TPM_LIMIT = max(2000, int(os.environ.get("GROQ_TPM_LIMIT", "8000")))
 except (TypeError, ValueError):
@@ -873,54 +963,148 @@ _CLIP_QUERY_ROUNDS = 4  # initial queries plus up to three targeted Groq refresh
 _CLIP_CANDIDATES_PER_QUERY = 5
 
 
-def _request_fresh_sentence_queries(sentence, previous_queries, orientation):
-    """Ask Groq for new queries for one unmatched sentence only."""
-    if not GROQ_KEY:
-        return []
-    from groq import Groq
-    previous = "; ".join(previous_queries[-8:]) or "none"
-    orientation_hint = "portrait/vertical" if orientation == "portrait" else "landscape"
+# With many concurrent clip workers (e.g. 20), each calling Groq separately
+# for one unmatched sentence at a time was the dominant runtime cost: every
+# call paid a full ~437-token system prompt plus reserved completion budget,
+# and 8000 TPM only allows ~6-7 such calls per minute. A real run showed 174
+# of these single-sentence calls, which at ~1200 tokens each requires a
+# theoretical minimum of ~26 minutes purely from TPM pacing - almost exactly
+# matching the observed 20.6-minute clip-finding phase. Batching concurrent
+# recovery requests into ONE shared Groq call amortizes the fixed prompt cost
+# across many sentences and cuts total token usage (and therefore pacing
+# waits) by roughly the batch size.
+_fresh_query_batch_lock = threading.Lock()
+_fresh_query_pending = []  # list of dicts, see _request_fresh_sentence_queries
+_FRESH_QUERY_BATCH_WINDOW = 1.5  # seconds to collect concurrent requests
+_FRESH_QUERY_BATCH_MAX = 8
+
+
+def _run_fresh_query_batch(batch):
+    """Send one Groq call covering every entry in `batch`, then unblock callers."""
     try:
+        if not batch:
+            return
+        from groq import Groq
         client = Groq(api_key=GROQ_KEY)
+        numbered_lines = []
+        for i, item in enumerate(batch):
+            hint = "portrait/vertical" if item["orientation"] == "portrait" else "landscape"
+            previous = "; ".join(item["previous"][-6:]) or "none"
+            numbered_lines.append(
+                f"{i + 1}. [{hint}] Sentence: {item['sentence'][:160]}\n"
+                f"{i + 1}. Previously failed: {previous}"
+            )
+        numbered = "\n".join(numbered_lines)
+        budget = min(2200, 420 + 220 * len(batch))
         text = _groq_complete(
             client,
             [
-                {"role": "system", "content": f"""You are recovering stock-footage queries for one unmatched narration sentence.
-Return exactly two new, different, sentence-specific {orientation_hint} stock-footage queries:
-1. primary query
-1b. backup query
+                {"role": "system", "content": """You are recovering stock-footage queries for several unmatched narration sentences at once.
+For EACH numbered sentence below, return exactly two new, different, sentence-specific stock-footage queries using that sentence's own global number:
+N. primary query
+Nb. backup query
 
 Rules:
 - English, 3-6 words, describing something a camera can film.
-- Clearly represent the sentence meaning, not merely a broad topic.
+- Match the orientation noted in brackets (portrait/vertical or landscape) implicitly through composition, not by naming it in the query text.
+- Clearly represent that sentence's meaning, not merely a broad topic.
 - For abstract or medical ideas, choose the closest findable thematic visual.
 - Do not use generic nature, ocean, space, landscape, or unrelated filler.
 - No people, faces, bodies, women, religion, violence, or NSFW.
-- Do not repeat any previous query.
-- Output only the two numbered lines."""},
-                {"role": "user", "content":
-                 f"Sentence:\n{sentence}\n\nPrevious failed queries:\n{previous}"}
+- Do not repeat that sentence's own previously-failed queries.
+- Output ONLY the numbered lines, two per sentence, nothing else."""},
+                {"role": "user", "content": f"Recover queries for these unmatched sentences:\n\n{numbered}"}
             ],
-            label="fresh-query recovery",
-            # A reasoning model needs headroom even for two short lines; the
-            # previous 120-token cap could not produce any visible output.
-            max_completion_tokens=768,
+            label=f"batched fresh-query recovery ({len(batch)} sentences)",
+            max_completion_tokens=budget,
             temperature=0.65,
         )
-        fresh = []
+        parsed_primary = {}
+        parsed_backup = {}
         for line in (text or "").strip().split("\n"):
-            match = re.match(r'^\s*(?:1b|1)[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
-            if not match:
+            line = line.strip()
+            mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
+            if mb:
+                idx = int(mb.group(1)) - 1
+                if 0 <= idx < len(batch):
+                    parsed_backup[idx] = mb.group(2).strip().strip('"\'')
                 continue
-            query = match.group(1).strip().strip('"\'')
-            if 3 < len(query) < 60 and _safe(query) and query not in previous_queries and query not in fresh:
-                fresh.append(query)
-        if fresh:
-            print(f"    Groq supplied {len(fresh)} fresh {orientation_hint} queries for unmatched sentence")
-        return fresh[:2]
+            m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line)
+            if m:
+                idx = int(m.group(1)) - 1
+                if 0 <= idx < len(batch):
+                    parsed_primary[idx] = m.group(2).strip().strip('"\'')
+
+        supplied = 0
+        for i, item in enumerate(batch):
+            fresh = []
+            primary = parsed_primary.get(i, "").strip()
+            if 3 < len(primary) < 60 and _safe(primary) and primary not in item["previous"]:
+                fresh.append(primary)
+            backup = parsed_backup.get(i, "").strip()
+            if (3 < len(backup) < 60 and _safe(backup)
+                    and backup not in item["previous"] and backup not in fresh):
+                fresh.append(backup)
+            item["result"] = fresh[:2]
+            if fresh:
+                supplied += 1
+        if supplied:
+            print(f"    Groq batched recovery: supplied fresh queries for "
+                  f"{supplied}/{len(batch)} unmatched sentences in one call")
     except Exception as e:
-        print(f"    Groq fresh-query recovery failed: {type(e).__name__}: {str(e)[:120]}")
+        print(f"    Groq batched fresh-query recovery failed: {type(e).__name__}: {str(e)[:120]}")
+    finally:
+        for item in batch:
+            item["event"].set()
+
+
+def _request_fresh_sentence_queries(sentence, previous_queries, orientation):
+    """Ask Groq for new queries for one unmatched sentence, coalescing
+    concurrent callers into a single shared Groq request. Return shape and
+    behavior (a list of up to 2 fresh query strings) is unchanged from the
+    single-sentence version; only the underlying request is now batched.
+    """
+    if not GROQ_KEY:
         return []
+
+    entry = {
+        "sentence": sentence,
+        "previous": list(previous_queries),
+        "orientation": orientation,
+        "event": threading.Event(),
+        "result": [],
+    }
+
+    with _fresh_query_batch_lock:
+        _fresh_query_pending.append(entry)
+        is_leader = len(_fresh_query_pending) == 1
+
+    if is_leader:
+        # Give other concurrently-failing clip workers a short window to
+        # join this batch before paying for the Groq call.
+        time.sleep(_FRESH_QUERY_BATCH_WINDOW)
+        # Drain the whole queue in sequential batches rather than processing
+        # only one. "is_leader" is only assigned on a 0 -> 1 transition of
+        # the pending list, which does not happen again while stragglers
+        # beyond one batch's cap remain - without draining here, any
+        # overflow past _FRESH_QUERY_BATCH_MAX would strand callers with no
+        # one left to process them until their 60s wait times out.
+        while True:
+            with _fresh_query_batch_lock:
+                batch = _fresh_query_pending[:_FRESH_QUERY_BATCH_MAX]
+                del _fresh_query_pending[:len(batch)]
+            if not batch:
+                break
+            _run_fresh_query_batch(batch)
+    else:
+        # Not the leader for this batch cycle - wait for it to deliver our
+        # result. The timeout is generous but bounded so a stuck Groq call
+        # can never hang a clip worker forever; entry["result"] defaults to
+        # [] and the caller already treats an empty list as "try again or
+        # fall back", matching prior single-call behavior.
+        entry["event"].wait(timeout=60.0)
+
+    return entry["result"]
 
 
 
@@ -1535,6 +1719,7 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
     tag = f"sh{short_idx}"
     n = len(sentences_slice)
     print(f"\n  Short {short_idx+1}: fetching {n} vertical clips...")
+    _log_resource_snapshot(f"short {short_idx+1} clip search start")
 
     clips = [None] * n
 
@@ -1681,22 +1866,47 @@ def generate_audio(text, ref_audio, out_path):
     raw_path = TEMP_DIR / "raw_tts.wav"
     
     print(f"  TTS: {'Spanish (V3)' if IS_SPANISH else 'English'} on {device}")
+    _log_resource_snapshot("TTS start")
     try:
-        if IS_SPANISH:
-            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-            try:
-                # Newer chatterbox versions support t3_model="v3" (better quality).
-                model = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
-            except TypeError:
-                # Installed pip version (e.g. 0.1.7) doesn't have this kwarg yet
-                # (only on GitHub main / HF docs as of this writing). Fall back.
-                print("  chatterbox-tts: t3_model kwarg unsupported by installed version, using default checkpoint")
-                model = ChatterboxMultilingualTTS.from_pretrained(device=device)
-        else:
+        # Use one Chatterbox model replica per available GPU so long-form
+        # narration chunks generate concurrently instead of only ever using
+        # cuda:0. TTS was previously the single largest single-GPU-only
+        # phase (~600s for a ~10-minute script) while the second T4 sat
+        # completely idle. This mirrors the same per-device-worker pattern
+        # already used for MiniCPM verification elsewhere in this file.
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        candidate_devices = [f"cuda:{i}" for i in range(gpu_count)] if gpu_count else [device]
+
+        def _load_tts_model(dev):
+            if IS_SPANISH:
+                from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+                try:
+                    # Newer chatterbox versions support t3_model="v3" (better quality).
+                    return ChatterboxMultilingualTTS.from_pretrained(device=dev, t3_model="v3")
+                except TypeError:
+                    # Installed pip version (e.g. 0.1.7) doesn't have this kwarg yet
+                    # (only on GitHub main / HF docs as of this writing). Fall back.
+                    print("  chatterbox-tts: t3_model kwarg unsupported by installed version, using default checkpoint")
+                    return ChatterboxMultilingualTTS.from_pretrained(device=dev)
             from chatterbox.tts import ChatterboxTTS
-            model = ChatterboxTTS.from_pretrained(device=device)
-        
-        sr = model.sr
+            return ChatterboxTTS.from_pretrained(device=dev)
+
+        models = []
+        devices_used = []
+        for dev in candidate_devices:
+            try:
+                models.append(_load_tts_model(dev))
+                devices_used.append(dev)
+            except Exception as e:
+                print(f"  TTS: could not load a model replica on {dev} "
+                      f"({str(e)[:100]}); continuing without it")
+        if not models:
+            raise RuntimeError("No Chatterbox TTS model could be loaded on any device")
+        if len(devices_used) > 1:
+            print(f"  TTS: running {len(devices_used)} parallel model replicas on "
+                  f"{', '.join(devices_used)}")
+
+        sr = models[0].sr
         sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip()) > 2]
         
         # Keep chunks sentence-aligned, but reduce the number of expensive
@@ -1715,7 +1925,7 @@ def generate_audio(text, ref_audio, out_path):
         if buf: chunks.append(' '.join(buf))
         print(f"  {len(sents)} sentences -> {len(chunks)} chunks (target <= {tts_chunk_chars} chars)")
 
-        def _generate_tts_piece(piece):
+        def _generate_tts_piece(piece, model):
             with torch.inference_mode():
                 if IS_SPANISH:
                     waveform = model.generate(
@@ -1729,12 +1939,9 @@ def generate_audio(text, ref_audio, out_path):
                     )
             return waveform.cpu()
 
-        wavs = []
-        for i, c in enumerate(chunks):
-            if i % 5 == 0:
-                update_status(18 + int((i / max(1, len(chunks))) * 27), f"TTS {i+1}/{len(chunks)}")
+        def _process_chunk(i, c, model):
             try:
-                wavs.append(_generate_tts_piece(c))
+                return _generate_tts_piece(c, model)
             except Exception as e:
                 # A longer chunk can fail on an older Chatterbox build or
                 # unusual text. Retry it as smaller sentence/word pieces so
@@ -1745,18 +1952,44 @@ def generate_audio(text, ref_audio, out_path):
                     words = c.split()
                     midpoint = max(1, len(words) // 2)
                     fallback_parts = [' '.join(words[:midpoint]), ' '.join(words[midpoint:])]
-                recovered = 0
+                recovered_pieces = []
                 for part in fallback_parts:
                     if not part:
                         continue
                     try:
-                        wavs.append(_generate_tts_piece(part))
-                        recovered += 1
+                        recovered_pieces.append(_generate_tts_piece(part, model))
                     except Exception as sub_error:
                         print(f"  TTS sub-piece skipped ({str(sub_error)[:80]})")
-                if not recovered:
+                if not recovered_pieces:
                     print(f"  TTS chunk {i+1} could not be recovered")
+                    return None
+                merged = recovered_pieces[0]
+                for extra in recovered_pieces[1:]:
+                    merged = torch.cat([merged, extra], dim=1)
+                return merged
 
+        wavs = [None] * len(chunks)
+        progress_lock = threading.Lock()
+        completed = [0]
+
+        def _worker(worker_index, model):
+            for i in range(worker_index, len(chunks), len(models)):
+                wavs[i] = _process_chunk(i, chunks[i], model)
+                with progress_lock:
+                    completed[0] += 1
+                    if completed[0] % 5 == 0 or completed[0] == len(chunks):
+                        update_status(18 + int((completed[0] / max(1, len(chunks))) * 27),
+                                       f"TTS {completed[0]}/{len(chunks)}")
+
+        if len(models) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as ex:
+                futures = [ex.submit(_worker, idx, m) for idx, m in enumerate(models)]
+                for f in futures:
+                    f.result()
+        else:
+            _worker(0, models[0])
+
+        wavs = [w for w in wavs if w is not None]
         if not wavs: return False
         full = wavs[0]
         for w in wavs[1:]:
@@ -1764,12 +1997,23 @@ def generate_audio(text, ref_audio, out_path):
         full = torch.cat([full, torch.zeros((full.shape[0], int(1.5*sr)))], dim=1)
         torchaudio.save(str(raw_path), full, sr)
         print(f"  TTS: {full.shape[1]/sr:.1f}s at {sr}Hz")
-        del model, wavs, full; torch.cuda.empty_cache(); gc.collect()
+        del models, wavs, full
+        for dev in devices_used:
+            try:
+                with torch.cuda.device(dev):
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        gc.collect()
     except Exception as e:
-        print(f"  TTS error: {e}"); return False
-    
+        print(f"  TTS error: {e}")
+        _log_resource_snapshot("TTS error")
+        return False
+    _log_resource_snapshot("TTS end")
+
     # --- RESEMBLE ENHANCE ---
     print("  Enhancing audio...")
+    _log_resource_snapshot("Enhance start")
     try:
         from unittest.mock import MagicMock
         # Mock every deepspeed submodule that resemble_enhance imports
@@ -1795,21 +2039,29 @@ def generate_audio(text, ref_audio, out_path):
         except (TypeError, ValueError):
             enhance_chunk_seconds = 40
         chunk_s = enhance_chunk_seconds * osr
-        parts = []; esr = 44100
+        esr = 44100
         total = dwav.shape[1]
         n_chunks = (total + chunk_s - 1) // chunk_s
-        print(f"  Processing {n_chunks} enhancement chunks ({enhance_chunk_seconds}s target)...")
+        # Enhancement chunks are independent - dispatch across every
+        # available GPU instead of only ever using the first, the same
+        # per-device-worker pattern already used for TTS and MiniCPM
+        # verification above. re_enhance() already accepts an explicit
+        # device argument, so no library changes are needed.
+        enhance_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        enhance_devices = [f"cuda:{i}" for i in range(enhance_gpu_count)] if enhance_gpu_count else [device]
+        print(f"  Processing {n_chunks} enhancement chunks ({enhance_chunk_seconds}s target) "
+              f"across {len(enhance_devices)} device(s)...")
 
-        def _enhance_piece(chunk, label):
+        def _enhance_piece(chunk, label, dev):
             try:
                 hw, piece_sr = re_enhance(
-                    dwav=chunk.squeeze(0), sr=osr, device=device, lambd=0.6
+                    dwav=chunk.squeeze(0), sr=osr, device=dev, lambd=0.6
                 )
                 piece_sr = int(piece_sr)
                 hw = hw.detach().cpu()
                 if piece_sr != 44100:
                     hw = torchaudio.transforms.Resample(piece_sr, 44100)(hw.unsqueeze(0)).squeeze(0)
-                print(f"    Chunk {label}: OK (44100Hz)")
+                print(f"    Chunk {label}: OK (44100Hz, {dev})")
                 return hw.unsqueeze(0), 44100
             except Exception as e:
                 # If a larger chunk exceeds available VRAM, retry it as two
@@ -1817,32 +2069,46 @@ def generate_audio(text, ref_audio, out_path):
                 # This preserves enhancement whenever possible and avoids
                 # turning a memory optimization into a silent quality loss.
                 try:
-                    if torch.cuda.is_available():
+                    with torch.cuda.device(dev):
                         torch.cuda.empty_cache()
                 except Exception:
                     pass
                 if chunk.shape[1] > 20 * osr + 1:
                     midpoint = chunk.shape[1] // 2
-                    left, left_sr = _enhance_piece(chunk[:, :midpoint], f"{label}a")
-                    right, right_sr = _enhance_piece(chunk[:, midpoint:], f"{label}b")
+                    left, left_sr = _enhance_piece(chunk[:, :midpoint], f"{label}a", dev)
+                    right, right_sr = _enhance_piece(chunk[:, midpoint:], f"{label}b", dev)
                     if left_sr == right_sr:
                         return torch.cat([left, right], dim=1), left_sr
                 print(f"    Chunk {label}: fallback ({str(e)[:80]})")
                 fallback = torchaudio.transforms.Resample(osr, 44100)(chunk).cpu()
                 return fallback, 44100
 
-        for chunk_index, i in enumerate(range(0, total, chunk_s), 1):
-            piece, piece_sr = _enhance_piece(dwav[:, i:i+chunk_s], chunk_index)
-            parts.append(piece)
-            esr = piece_sr
+        chunk_starts = list(range(0, total, chunk_s))
+        parts = [None] * len(chunk_starts)
+
+        def _enhance_worker(worker_index, dev):
+            for idx in range(worker_index, len(chunk_starts), len(enhance_devices)):
+                i = chunk_starts[idx]
+                piece, piece_sr = _enhance_piece(dwav[:, i:i+chunk_s], idx + 1, dev)
+                parts[idx] = piece
+
+        if len(enhance_devices) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(enhance_devices)) as ex:
+                futures = [ex.submit(_enhance_worker, w, dev) for w, dev in enumerate(enhance_devices)]
+                for f in futures:
+                    f.result()
+        else:
+            _enhance_worker(0, enhance_devices[0])
 
         final = torch.cat(parts, dim=1)
         torchaudio.save(str(out_path), final, esr)
         print(f"  Enhanced: {esr}Hz, {final.shape[1]/esr:.1f}s")
         del parts, final, dwav; torch.cuda.empty_cache(); gc.collect()
+        _log_resource_snapshot("Enhance end")
         return True
     except Exception as e:
         print(f"  Enhance failed: {e}, using raw audio")
+        _log_resource_snapshot("Enhance error")
         shutil.copy2(str(raw_path), str(out_path))
         return True
 
@@ -2060,14 +2326,54 @@ def _load_llava():
             return
         if not torch.cuda.is_available():
             raise RuntimeError("MiniCPM verifier requires CUDA")
-        # Each MiniCPM int4 replica uses ~5-6 GB. A T4 has 14.6 GB, so 2
-        # replicas per GPU fit comfortably (~11-12 GB total) while leaving
-        # headroom for NVENC and CUDA overhead. This doubles verification
-        # throughput from 2 to 4 parallel inferences.
-        REPLICAS_PER_GPU = 2
+        _log_resource_snapshot("MiniCPM load start")
+        # Doubling verification throughput: attempt 2 MiniCPM int4 replicas
+        # per GPU instead of 1. A prior measured run showed one replica
+        # occupies ~8.8 GB on a 14.6 GB T4, leaving ~5.8 GB free versus the
+        # ~5.9 GB a second replica's own load requested - a gap of only
+        # ~140 MB. Two changes close that gap when possible:
+        #   1. Explicitly empty the CUDA allocator cache and run gc right
+        #      after the first replica finishes loading, reclaiming any
+        #      fragmented/cached blocks PyTorch's allocator is holding but
+        #      not actually using, before the second replica is attempted.
+        #   2. A slightly lower, still-safe free-memory gate (6.0 GB) than
+        #      the previous 7.5 GB, since the real requirement measured was
+        #      ~5.9 GB and the cache-clear above should recover most of the
+        #      earlier shortfall.
+        # This cannot be verified on this development machine (different
+        # GPU architecture); if the second replica still does not fit on the
+        # actual Kaggle T4s, the existing OOM handling below fails safely -
+        # it only skips that one replica and keeps the pipeline running with
+        # whatever replicas did load, exactly as before. Override via
+        # MINICPM_REPLICAS_PER_GPU if a different GPU tier needs tuning.
+        try:
+            REPLICAS_PER_GPU = max(1, int(os.environ.get("MINICPM_REPLICAS_PER_GPU", "2")))
+        except (TypeError, ValueError):
+            REPLICAS_PER_GPU = 2
+        _MINICPM_SECOND_REPLICA_MIN_FREE_GB = 6.0
         loaded = []
         for gpu_index in range(torch.cuda.device_count()):
             for replica in range(REPLICAS_PER_GPU):
+                if replica > 0:
+                    # Reclaim fragmented/cached allocator memory from the
+                    # previous replica's load before checking free VRAM -
+                    # this is the step most likely to close the ~140 MB gap.
+                    gc.collect()
+                    try:
+                        with torch.cuda.device(gpu_index):
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    try:
+                        free_bytes, _total_bytes = torch.cuda.mem_get_info(gpu_index)
+                        free_gb = free_bytes / (1024 ** 3)
+                    except Exception:
+                        free_gb = 0.0
+                    if free_gb < _MINICPM_SECOND_REPLICA_MIN_FREE_GB:
+                        print(f"  MiniCPM: skipping replica {replica+1} on cuda:{gpu_index} "
+                              f"({free_gb:.1f} GB free after cache clear, need >= "
+                              f"{_MINICPM_SECOND_REPLICA_MIN_FREE_GB} GB) - avoiding a doomed load")
+                        break
                 try:
                     worker = _load_llava_worker(gpu_index)
                     loaded.append(worker)
@@ -2083,6 +2389,7 @@ def _load_llava():
                     # If first replica fails, skip second on same GPU
                     break
         if not loaded:
+            _log_resource_snapshot("MiniCPM load failed")
             raise RuntimeError("No MiniCPM verifier worker could be loaded")
         _llava_workers = loaded
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -2092,6 +2399,7 @@ def _load_llava():
               f"{_MINICPM_NUM_FRAMES} Decord frames, "
               f"{_MINICPM_PACKING}-frame temporal packing, "
               f"{_MINICPM_MAX_NEW_TOKENS} output tokens")
+        _log_resource_snapshot("MiniCPM load end")
 
 def _next_llava_worker():
     global _llava_next_worker
@@ -2557,6 +2865,7 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verif
     n = len(sentences)
     clips = [None] * n
     print(f"\n  Rendering {n} clips with bounded Groq re-query rounds and streaming verification/normalization...")
+    _log_resource_snapshot("clip search start")
 
     completed = 0
     update_status(55, f"Finding exact verified clips (0/{n})...")
@@ -2612,6 +2921,7 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verif
     
     # Concat (stream copy)
     print("  Concatenating...")
+    _log_resource_snapshot("clip search end")
     with open("list.txt","w") as f:
         for c in clips:
             if c: f.write(f"file '{c}'\n")
@@ -2670,6 +2980,7 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verif
         print(f"  Final render: verifier workers "
               f"{'retained for Shorts' if keep_verifier else 'released;'} attempting NVENC")
 
+    _log_resource_snapshot("final render start")
     update_status(85, "Rendering final video (1080p + subs)...")
     ass_esc = str(ass_path).replace('\\','/').replace(':','\\\\:')
     if logo_path and os.path.exists(logo_path):
