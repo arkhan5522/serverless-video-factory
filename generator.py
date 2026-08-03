@@ -79,12 +79,39 @@ except PackageNotFoundError:
 # 5.5.0 build already validated with Chatterbox in this pipeline.
 _TRANSFORMERS_REQUIRED = "5.5.0"
 _HUB_REQUIRED = "1.5.0"
+
+
+def _purge_module_tree(*roots):
+    """Remove already-imported package trees after an in-process pip repair."""
+    for module_name in list(sys.modules):
+        if any(module_name == root or module_name.startswith(root + ".") for root in roots):
+            del sys.modules[module_name]
+
+
 print(f"  Ensuring huggingface_hub=={_HUB_REQUIRED}...")
 subprocess.run(
-    [sys.executable, "-m", "pip", "install", "--quiet", "--no-deps",
-     "--force-reinstall", f"huggingface_hub=={_HUB_REQUIRED}"],
+    [sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
+     "--no-deps", "--force-reinstall", f"huggingface_hub=={_HUB_REQUIRED}"],
     check=True,
 )
+# accelerate is checked above and may already have imported an older Hub
+# package. Purge both package trees so Python cannot combine old submodules
+# with the freshly installed files (the source of the alternating missing
+# Hub-symbol failures).
+_purge_module_tree("huggingface_hub", "accelerate", "transformers")
+import importlib
+importlib.invalidate_caches()
+try:
+    import huggingface_hub as _hub_check
+    from huggingface_hub.errors import RemoteEntryNotFoundError as _RemoteEntryNotFoundError
+    importlib.import_module("huggingface_hub.file_download")
+    del _RemoteEntryNotFoundError, _hub_check
+except Exception as _hub_error:
+    raise RuntimeError(
+        f"huggingface_hub=={_HUB_REQUIRED} is still inconsistent after clean reinstall: {_hub_error}"
+    ) from _hub_error
+print(f"  huggingface_hub=={_HUB_REQUIRED} import validated")
+
 try:
     _transformers_version = _package_version("transformers")
 except PackageNotFoundError:
@@ -92,10 +119,12 @@ except PackageNotFoundError:
 if _transformers_version != _TRANSFORMERS_REQUIRED:
     print(f"  Pinning Transformers {_transformers_version or 'missing'} -> {_TRANSFORMERS_REQUIRED}")
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--quiet", "--no-deps",
-         "--force-reinstall", f"transformers=={_TRANSFORMERS_REQUIRED}"],
+        [sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
+         "--no-deps", "--force-reinstall", f"transformers=={_TRANSFORMERS_REQUIRED}"],
         check=True,
     )
+_purge_module_tree("transformers")
+importlib.invalidate_caches()
 from transformers import AutoModel, AutoProcessor, AutoTokenizer  # noqa: F401
 
 _ensure_package("resemble_enhance", "resemble-enhance", ["--no-deps"])
