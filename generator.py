@@ -435,6 +435,189 @@ def _local_sentence_query_pair(sentence_text):
     return "educational concept illustration", "documentary concept visualization"
 
 
+# ==========================================
+# 3A. GROQ REQUEST LAYER (reasoning-safe + TPM-aware)
+# ==========================================
+# openai/gpt-oss-120b is a REASONING model. Its internal reasoning tokens are
+# emitted before the visible answer and are drawn from the SAME completion
+# budget. With a small budget the model spends everything reasoning and returns
+# message.content == "" with finish_reason == "length" - the silent empty-batch
+# failure seen previously ("only parsed 0/8 queries. Raw model output: ''").
+# Three things prevent it:
+#   1. reasoning_effort="low" keeps the reasoning chain short.
+#   2. reasoning_format="hidden" returns only the final answer.
+#   3. max_completion_tokens (max_tokens is deprecated) sized for reasoning
+#      plus the real output.
+# Requests are additionally paced against the account's tokens-per-minute
+# ceiling, because this org is on the on_demand tier (observed limit 8000 TPM),
+# where an oversized or too-frequent request is rejected with HTTP 413.
+_GROQ_MODEL = "openai/gpt-oss-120b"
+try:
+    _GROQ_TPM_LIMIT = max(2000, int(os.environ.get("GROQ_TPM_LIMIT", "8000")))
+except (TypeError, ValueError):
+    _GROQ_TPM_LIMIT = 8000
+# One request must stay clear of the ceiling on its own, not just on average.
+_GROQ_REQUEST_CEILING = int(_GROQ_TPM_LIMIT * 0.85)
+_groq_window_lock = threading.Lock()
+_groq_window = []          # [(charged_at, tokens)] over a trailing 60s window
+_groq_reasoning_supported = True
+
+
+def _groq_estimate_tokens(messages):
+    """Conservative prompt estimate (~3 chars/token plus per-message overhead)."""
+    chars = sum(len(str(message.get("content", ""))) for message in messages)
+    return int(chars / 3) + 32 * len(messages) + 16
+
+
+def _groq_reserve_budget(tokens_needed, label):
+    """Block until tokens_needed fits in the trailing 60-second TPM window."""
+    while True:
+        with _groq_window_lock:
+            now = time.time()
+            _groq_window[:] = [(ts, tk) for ts, tk in _groq_window if now - ts < 60.0]
+            used = sum(tk for _, tk in _groq_window)
+            # `not _groq_window` guarantees forward progress: a single request
+            # larger than the window can still be attempted rather than
+            # deadlocking the pipeline here.
+            if used + tokens_needed <= _GROQ_TPM_LIMIT or not _groq_window:
+                _groq_window.append((now, tokens_needed))
+                return
+            oldest = min(ts for ts, _ in _groq_window)
+            sleep_for = min(30.0, max(0.5, 60.0 - (now - oldest) + 0.25))
+        print(f"  Groq: pacing {label} {sleep_for:.1f}s "
+              f"({used}+{tokens_needed} tokens vs {_GROQ_TPM_LIMIT} TPM)")
+        time.sleep(sleep_for)
+
+
+def _groq_record_actual(reserved, actual):
+    """Charge any usage beyond the reservation so pacing tracks reality."""
+    if actual and actual > reserved:
+        with _groq_window_lock:
+            _groq_window.append((time.time(), actual - reserved))
+
+
+def _groq_complete(client, messages, label, max_completion_tokens,
+                   temperature, attempts=2):
+    """Run one Groq chat completion and always return a string (never None).
+
+    Retries once with a larger completion budget when the model returns empty
+    content, which is the signature of the budget being consumed by reasoning.
+    """
+    global _groq_reasoning_supported
+
+    prompt_estimate = _groq_estimate_tokens(messages)
+    budget = max(256, int(max_completion_tokens))
+    attempt = 0
+    while attempt < attempts:
+        attempt += 1
+        ceiling = max(256, _GROQ_REQUEST_CEILING - prompt_estimate)
+        budget = min(budget, ceiling)
+        reserved = prompt_estimate + budget
+        _groq_reserve_budget(reserved, label)
+
+        kwargs = {
+            "messages": messages,
+            "model": _GROQ_MODEL,
+            "max_completion_tokens": budget,
+            "temperature": temperature,
+        }
+        if _groq_reasoning_supported:
+            kwargs["reasoning_effort"] = "low"
+            kwargs["reasoning_format"] = "hidden"
+
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except TypeError as error:
+            # Older groq SDKs do not accept the reasoning kwargs at all.
+            if _groq_reasoning_supported:
+                print(f"  Groq: SDK rejected reasoning controls "
+                      f"({str(error)[:120]}); retrying without them")
+                _groq_reasoning_supported = False
+                attempt -= 1
+                budget = min(max(budget * 2, budget + 512), ceiling)
+                continue
+            print(f"  Groq {label}: TypeError: {str(error)[:160]}")
+            return ""
+        except Exception as error:
+            message_text = str(error)
+            lowered = message_text.lower()
+            if _groq_reasoning_supported and "reasoning" in lowered:
+                print(f"  Groq: server rejected reasoning controls "
+                      f"({message_text[:120]}); retrying without them")
+                _groq_reasoning_supported = False
+                attempt -= 1
+                continue
+            print(f"  Groq {label} attempt {attempt}/{attempts} failed: "
+                  f"{type(error).__name__}: {message_text[:180]}")
+            if "rate_limit" in lowered or "413" in message_text or "429" in message_text:
+                # Charge the full reservation and let the window drain.
+                time.sleep(min(20.0, 5.0 * attempt))
+            if attempt >= attempts:
+                return ""
+            continue
+
+        choice = response.choices[0] if getattr(response, "choices", None) else None
+        message = getattr(choice, "message", None)
+        text = str(getattr(message, "content", None) or "")
+        finish_reason = getattr(choice, "finish_reason", "?") if choice else "?"
+        usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or
+                           (prompt_tokens + completion_tokens))
+        _groq_record_actual(reserved, total_tokens)
+
+        if text.strip():
+            return text
+
+        # Empty content: report the fields that identify WHY before retrying,
+        # so a future failure is never silent again.
+        reasoning_text = str(getattr(message, "reasoning", None) or "")
+        print(f"  Groq {label}: empty content on attempt {attempt}/{attempts} "
+              f"(finish_reason={finish_reason}, prompt_tokens={prompt_tokens}, "
+              f"completion_tokens={completion_tokens}, budget={budget}, "
+              f"reasoning_chars={len(reasoning_text)})")
+        if attempt >= attempts:
+            break
+        # finish_reason == "length" with no content means reasoning ate the
+        # budget; a near-exhausted budget means the same thing.
+        if finish_reason == "length" or completion_tokens >= budget * 0.8:
+            grown = min(max(budget * 2, budget + 768), ceiling)
+            if grown <= budget:
+                print(f"  Groq {label}: completion budget already at the "
+                      f"per-request ceiling ({budget}); cannot grow further")
+                break
+            print(f"  Groq {label}: raising completion budget {budget} -> {grown}")
+            budget = grown
+        else:
+            time.sleep(1.5)
+    return ""
+
+
+# Compact system prompt. The previous version was ~900 tokens and was resent on
+# EVERY batch, which alone consumed most of an 8000 TPM minute and forced the
+# request pacing/413 failures. The stock-scarcity guidance that drives query
+# quality is retained; only the redundant prose was removed.
+_STOCK_QUERY_SYSTEM_PROMPT = """You write stock-footage search queries (Pexels/Pixabay) for narration sentences.
+
+For each numbered sentence, output exactly two lines:
+N. primary query
+Nb. backup query
+
+Rules:
+- English only, 3-6 words, describing what a camera can actually film.
+- The query must represent that sentence's MEANING, not just its keywords.
+- Many subjects (diseases, internal organs, abstract science, niche tech) have no literal stock footage. Never search the literal term; choose the closest findable visual that still conveys the same idea:
+  "the kidney filters toxins from blood" -> medical illustration human anatomy
+  "minerals crystallize into stones" -> crystal formation macro closeup
+  "the economy is collapsing" -> stock market crash graph red
+  "a rare genetic disorder" -> dna helix research laboratory
+- Never substitute generic unrelated footage (random nature, ocean, space) just because the literal topic is hard; stay thematically connected to the sentence.
+- The backup must be a DIFFERENT angle on the SAME sentence, never generic filler.
+- No people, faces, bodies, women, religion, violence, or NSFW.
+- Output only the numbered lines, nothing else."""
+
+
 def generate_queries_for_sentences(sentences):
     """
     Send sentences to Groq in small, bounded batches, get back a mapping of
@@ -460,13 +643,17 @@ def generate_queries_for_sentences(sentences):
     from groq import Groq
     client = Groq(api_key=GROQ_KEY)
 
-    # Keep every sentence request well below Groq's 8k TPM ceiling. The
-    # recovery size is smaller because recovery includes global numbering.
-    BATCH_SIZE = 8
-    RECOVERY_BATCH_SIZE = 6
+    # Keep every sentence request well below Groq's TPM ceiling. With the
+    # compact system prompt a 12-sentence batch is ~600 prompt tokens, so
+    # fewer, adequately-budgeted requests replace many starved ones.
+    BATCH_SIZE = 12
+    RECOVERY_BATCH_SIZE = 8
 
     def _query_output_budget(sentence_count):
-        return min(640, max(240, sentence_count * 48))
+        # Room for a short hidden reasoning chain PLUS two lines per sentence.
+        # The old 240-640 range was below what gpt-oss-120b needs to emit any
+        # visible content at all once reasoning tokens are counted.
+        return min(2400, 512 + sentence_count * 72)
 
     all_queries = [None] * n
     all_backups = [None] * n
@@ -478,42 +665,17 @@ def generate_queries_for_sentences(sentences):
         numbered = "\n".join([f"{i+1}. {s['text'][:100]}" for i, s in enumerate(batch)])
 
         try:
-            r = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": """You are a professional video editor working with STOCK FOOTAGE ONLY (Pexels/Pixabay libraries) - you cannot commission custom footage, so you must pick queries that actually EXIST in stock libraries.
-
-For each numbered sentence from a script, provide the best STOCK-FINDABLE search query that visually represents what is being said.
-
-RULES:
-- Each query must be in ENGLISH (even if script is in another language)
-- Each query is 3-6 words describing what a CAMERA would film
-- The visual MUST match the sentence's MEANING/TOPIC, not just literal keywords:
-  * "Technology is advancing rapidly" -> "futuristic circuit board closeup"
-  * "The ocean is vast and mysterious" -> "deep ocean underwater darkness"
-  * "Cities are growing faster" -> "aerial cityscape construction cranes"
-  * "Ancient civilizations built pyramids" -> "egyptian pyramids aerial sunset"
-- CRITICAL - STOCK SCARCITY AWARENESS: many topics (medical conditions, internal body processes, abstract science, specific diseases, niche technical concepts) have ZERO or near-zero literal stock footage. For these, do NOT search the literal term (e.g. "kidney stone" returns almost nothing usable and forces a random unrelated fallback). Instead pick the closest AVAILABLE stock category that still evokes the right idea:
-  * "Kidney stones form when minerals crystallize" -> "crystal formation macro closeup" (visually evokes crystallization, actually findable)
-  * "The kidney filters toxins from blood" -> "medical illustration human anatomy" or "doctor reviewing x-ray scan" (findable medical-adjacent stock)
-  * "A rare genetic disorder affects..." -> "dna helix medical research lab" (findable, thematically correct)
-  * "The economy is collapsing" -> "stock market crash graph red" (findable, matches meaning)
-- NEVER pick a generic/unrelated query (like nature, ocean, space) just because the literal topic has no footage - always find the CLOSEST THEMATICALLY RELEVANT stock-findable alternative instead. A query is only acceptable if it is both findable in stock libraries AND still clearly connects to the sentence's subject.
-- NO people/faces/bodies as the main subject, NO religion, NO violence, NO NSFW
-- For EACH sentence, also provide ONE backup query - a different but still thematically-relevant angle on the same sentence, in case the primary query returns no results. The backup must NEVER be a generic unrelated filler (no random nature/space/ocean unless the sentence is actually about that) - it must still connect to the sentence's actual subject.
-- Return in this EXACT format, one sentence per two lines:
-1. primary query here
-1b. backup query here
-2. primary query here
-2b. backup query here
-(continue for all sentences, no other text)"""},
-                    {"role": "user", "content": f"Match each sentence to a video search query:\n\n{numbered}"}
+            result = _groq_complete(
+                client,
+                [
+                    {"role": "system", "content": _STOCK_QUERY_SYSTEM_PROMPT},
+                    {"role": "user",
+                     "content": f"Match each sentence to a video search query:\n\n{numbered}"},
                 ],
-                model="openai/gpt-oss-120b",
-                max_tokens=_query_output_budget(len(batch)),
-                temperature=0.5
+                label=f"batch {batch_start}-{batch_start+len(batch)}",
+                max_completion_tokens=_query_output_budget(len(batch)),
+                temperature=0.5,
             )
-
-            result = r.choices[0].message.content
             # Parse by EXPLICIT leading index (e.g. "1. some query" -> index 0,
             # "1b. backup query" -> backup for index 0), not by line order.
             # This prevents misalignment: if Groq skips a number, returns a
@@ -523,7 +685,7 @@ RULES:
             # long-sentence scripts) queries ending up mismatched with
             # their actual sentence content.
             parsed_count = 0
-            for line in result.strip().split('\n'):
+            for line in (result or "").strip().split('\n'):
                 line = line.strip()
                 mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
                 if mb:
@@ -550,7 +712,7 @@ RULES:
             if parsed_count < len(batch) * 0.5:
                 print(f"  WARNING: batch {batch_start}-{batch_start+len(batch)} only parsed "
                       f"{parsed_count}/{len(batch)} queries. Raw model output (first 300 chars):")
-                print(f"    {result[:300]!r}")
+                print(f"    {(result or '')[:300]!r}")
 
         except Exception as e:
             print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
@@ -573,8 +735,9 @@ RULES:
                 f"{i + 1}. {sentences[i]['text'][:140]}" for i in chunk_indices
             )
             try:
-                recovery = client.chat.completions.create(
-                    messages=[
+                result = _groq_complete(
+                    client,
+                    [
                         {"role": "system", "content": """Return one primary and one backup STOCK FOOTAGE query for every numbered sentence. The numbers are global sentence numbers and must not be changed or skipped.
 
 Rules:
@@ -588,13 +751,12 @@ Rules:
                         {"role": "user", "content":
                          f"Recover queries for these missing global sentence numbers:\n\n{numbered_missing}"}
                     ],
-                    model="openai/gpt-oss-120b",
-                    max_tokens=_query_output_budget(len(chunk_indices)),
+                    label=f"recovery chunk {chunk_start // RECOVERY_BATCH_SIZE + 1}",
+                    max_completion_tokens=_query_output_budget(len(chunk_indices)),
                     temperature=0.2,
                 )
-                result = recovery.choices[0].message.content or ""
                 recovered = 0
-                for line in result.strip().split("\n"):
+                for line in (result or "").strip().split("\n"):
                     line = line.strip()
                     mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
                     if mb:
@@ -720,8 +882,9 @@ def _request_fresh_sentence_queries(sentence, previous_queries, orientation):
     orientation_hint = "portrait/vertical" if orientation == "portrait" else "landscape"
     try:
         client = Groq(api_key=GROQ_KEY)
-        response = client.chat.completions.create(
-            messages=[
+        text = _groq_complete(
+            client,
+            [
                 {"role": "system", "content": f"""You are recovering stock-footage queries for one unmatched narration sentence.
 Return exactly two new, different, sentence-specific {orientation_hint} stock-footage queries:
 1. primary query
@@ -738,13 +901,14 @@ Rules:
                 {"role": "user", "content":
                  f"Sentence:\n{sentence}\n\nPrevious failed queries:\n{previous}"}
             ],
-            model="openai/gpt-oss-120b",
-            max_tokens=120,
+            label="fresh-query recovery",
+            # A reasoning model needs headroom even for two short lines; the
+            # previous 120-token cap could not produce any visible output.
+            max_completion_tokens=768,
             temperature=0.65,
         )
-        text = response.choices[0].message.content or ""
         fresh = []
-        for line in text.strip().split("\n"):
+        for line in (text or "").strip().split("\n"):
             match = re.match(r'^\s*(?:1b|1)[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
             if not match:
                 continue
@@ -776,7 +940,9 @@ def generate_short_scripts(sentences, topic, n_shorts, target_seconds=60):
     Returns a list of dicts: {"script": str, "theme": str}
     """
     words_target = int(target_seconds / 60 * 150)  # ~150 wpm normal pace
-    full_text = " ".join(s['text'] for s in sentences)[:12000]
+    # Capped so prompt + completion stay inside one request's TPM ceiling; the
+    # model only needs enough source material to pick hooks from.
+    full_text = " ".join(s['text'] for s in sentences)[:8000]
 
     def _fallback_scripts():
         # If Groq is unavailable, fall back to lightly-summarized chunks of
@@ -801,8 +967,9 @@ def generate_short_scripts(sentences, topic, n_shorts, target_seconds=60):
         client = Groq(api_key=GROQ_KEY)
         lang_instruction = "Write in Spanish." if IS_SPANISH else "Write in English."
 
-        r = client.chat.completions.create(
-            messages=[
+        r = _groq_complete(
+            client,
+            [
                 {"role": "system", "content": f"""You are an expert short-form (TikTok/Reels/Shorts) scriptwriter.
 
 You will be given the full text of a long-form documentary/narration script. Your job: write {n_shorts} COMPLETELY STANDALONE short-form scripts inspired by the best hooks, surprising facts, emotional peaks, or claims in the source material.
@@ -820,12 +987,17 @@ Format exactly like this:
 [{{"script": "full standalone narration text here...", "theme": "short label like 'the vanishing lake'"}}]"""},
                 {"role": "user", "content": f"Source script:\n\n{full_text}\n\nWrite {n_shorts} standalone short scripts as JSON."}
             ],
-            model="openai/gpt-oss-120b",
-            max_tokens=1200,
-            temperature=0.75
+            label="short-script writer",
+            # Each script is ~200 output tokens; leave room for all of them
+            # plus a short hidden reasoning chain.
+            max_completion_tokens=min(4096, 900 + n_shorts * 320),
+            temperature=0.75,
         )
 
-        raw = r.choices[0].message.content.strip()
+        raw = (r or "").strip()
+        if not raw:
+            print("  Groq short-script: model returned no content, using fallback")
+            return _fallback_scripts()
         raw = re.sub(r'^```json\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE).strip()
         match = re.search(r'\[.*\]', raw, re.DOTALL)
         if not match:
@@ -1702,24 +1874,47 @@ def _patch_minicpm_tokenizer_compat(tokenizer):
         "im_id_end": "</image_id>",
     }
 
-    def _token_id(token):
-        value = tokenizer.convert_tokens_to_ids(token)
+    def _coerce_id(value):
         if isinstance(value, (list, tuple)):
             value = value[0] if value else None
         if value is None:
-            raise RuntimeError(f"MiniCPM tokenizer cannot resolve special token {token!r}")
+            return None
         try:
-            value = int(value)
-        except (TypeError, ValueError) as error:
-            raise RuntimeError(
-                f"MiniCPM tokenizer returned an invalid ID for {token!r}: {value!r}"
-            ) from error
-        unk_id = getattr(tokenizer, "unk_token_id", None)
-        if unk_id is not None and value == int(unk_id) and token != "<unk>":
-            raise RuntimeError(f"MiniCPM tokenizer mapped special token {token!r} to <unk>")
-        return value
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _token_id(token):
+        """Resolve one special token to an ID, or None when unrepresentable.
+
+        Returning None instead of raising is deliberate. Added-vocabulary
+        markers like <image> resolve through convert_tokens_to_ids, but plain
+        text such as "\\n" does NOT: MiniCPM's tokenizer is Qwen2 byte-level
+        BPE, where a newline is stored as the byte-mapped token "Ctilde", so
+        convert_tokens_to_ids("\\n") legitimately returns the unk ID. The
+        official MiniCPMVTokenizerFast.newline_id has exactly this behavior and
+        the processor never reads it, so treating that as fatal (as an earlier
+        revision did) blocked every verifier worker from loading.
+        """
+        unk_id = _coerce_id(getattr(tokenizer, "unk_token_id", None))
+        value = _coerce_id(tokenizer.convert_tokens_to_ids(token))
+        if value is not None and (unk_id is None or value != unk_id or token == "<unk>"):
+            return value
+        # Byte-level fallback: encode the literal text and accept it only when
+        # it maps to exactly one token, so an alias can never be a partial id.
+        try:
+            encoded = tokenizer.encode(token, add_special_tokens=False)
+        except Exception:
+            encoded = None
+        if encoded is not None and len(encoded) == 1:
+            single = _coerce_id(encoded[0])
+            if single is not None and (unk_id is None or single != unk_id):
+                return single
+        return None
 
     def _set_missing(name, value):
+        if value is None:
+            return
         try:
             current = getattr(tokenizer, name)
         except AttributeError:
@@ -1752,24 +1947,34 @@ def _patch_minicpm_tokenizer_compat(tokenizer):
     }.items():
         _set_missing(name, _token_id(string_tokens[token_name]))
 
-    # The processor's batch_decode() uses these legacy aliases too. Keep them
-    # aligned with the tokenizer config's standard Transformers IDs.
-    for name, token in {
-        "bos_id": "<|im_start|>",
-        "eos_id": "<|im_end|>",
-        "unk_id": "<unk>",
-        "newline_id": "\n",
-    }.items():
-        _set_missing(name, _token_id(token))
+    # processing_minicpmv.batch_decode()/decode() read bos_id and eos_id to trim
+    # boundary tokens. Prefer the tokenizer's own configured IDs and only fall
+    # back to the chat markers this checkpoint actually emits.
+    _set_missing("bos_id", _coerce_id(getattr(tokenizer, "bos_token_id", None))
+                 or _token_id("<|im_start|>"))
+    _set_missing("eos_id", _coerce_id(getattr(tokenizer, "eos_token_id", None))
+                 or _token_id("<|im_end|>"))
+    # unk_id and newline_id are defined by the official tokenizer but are never
+    # read by the processor, so install them best-effort and never fail on them.
+    _set_missing("unk_id", _coerce_id(getattr(tokenizer, "unk_token_id", None))
+                 or _token_id("<unk>"))
+    _set_missing("newline_id", _token_id("\n"))
 
+    # Only these six are actually dereferenced by the official processor:
+    # _convert() uses the image/slice bounds, decode() uses bos/eos.
     required = ("im_start_id", "im_end_id", "slice_start_id", "slice_end_id",
                 "bos_id", "eos_id")
-    missing = [name for name in required if not hasattr(tokenizer, name)]
+    missing = [name for name in required
+               if _coerce_id(getattr(tokenizer, name, None)) is None]
     if missing:
         raise RuntimeError(
             f"MiniCPM tokenizer compatibility aliases still missing: {missing}"
         )
-    print("  MiniCPM compatibility: restored tokenizer special-token aliases")
+    optional_missing = [name for name in ("im_id_start_id", "im_id_end_id",
+                                          "unk_id", "newline_id")
+                        if _coerce_id(getattr(tokenizer, name, None)) is None]
+    detail = f" (optional unresolved: {optional_missing})" if optional_missing else ""
+    print(f"  MiniCPM compatibility: restored tokenizer special-token aliases{detail}")
     return tokenizer
 
 
