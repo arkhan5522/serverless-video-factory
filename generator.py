@@ -44,6 +44,102 @@ def _ensure_package(module_name, requirement, extra_args=None):
             return False
         return True
 
+# A Chatterbox install must not replace Kaggle's preinstalled GPU stack.
+# Its official metadata pins torch/torchaudio 2.6.0, and a normal dependency
+# install can leave cuDNN component libraries from different releases in the
+# same process. That is the cause of the native cudnnGetLibConfig abort.
+_CUDNN_FORCE_DISABLED = False
+_CUDNN_HANDLES = []
+
+
+def _prepare_cuda_runtime():
+    """Prefer one coherent pip NVIDIA runtime before any torch-bearing import."""
+    global _CUDNN_FORCE_DISABLED, _CUDNN_HANDLES
+    if not sys.platform.startswith("linux"):
+        return
+
+    import ctypes
+    import site
+
+    site_roots = []
+    try:
+        site_roots.extend(site.getsitepackages())
+    except (AttributeError, TypeError):
+        pass
+    try:
+        site_roots.append(site.getusersitepackages())
+    except (AttributeError, TypeError):
+        pass
+
+    nvidia_lib_dirs = []
+    cudnn_lib_dirs = []
+    for root in site_roots:
+        nvidia_root = Path(root) / "nvidia"
+        if not nvidia_root.is_dir():
+            continue
+        cudnn_dir = nvidia_root / "cudnn" / "lib"
+        if cudnn_dir.is_dir():
+            cudnn_lib_dirs.append(str(cudnn_dir))
+        try:
+            components = sorted(nvidia_root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            components = []
+        for component in components:
+            lib_dir = component / "lib"
+            if lib_dir.is_dir():
+                nvidia_lib_dirs.append(str(lib_dir))
+
+    # Put the cuDNN wheel directory first, then the rest of the matching pip
+    # NVIDIA runtime, before any system /usr/local/cuda entry can win.
+    priority_dirs = cudnn_lib_dirs + nvidia_lib_dirs
+    old_path = os.environ.get("LD_LIBRARY_PATH", "")
+    ordered_dirs = []
+    for directory in priority_dirs + old_path.split(os.pathsep):
+        if directory and directory not in ordered_dirs:
+            ordered_dirs.append(directory)
+    if ordered_dirs:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(ordered_dirs)
+
+    if not cudnn_lib_dirs:
+        print("  CUDA runtime: packaged cuDNN directory not found; keeping Kaggle loader path")
+        return
+
+    def _find_library(directory, stem):
+        exact = Path(directory) / f"{stem}.so.9"
+        if exact.exists():
+            return exact
+        matches = sorted(Path(directory).glob(f"{stem}.so.9.*"))
+        return matches[0] if matches else None
+
+    cudnn_dir = cudnn_lib_dirs[0]
+    core_path = _find_library(cudnn_dir, "libcudnn")
+    graph_path = _find_library(cudnn_dir, "libcudnn_graph")
+    if not core_path or not graph_path:
+        print(f"  CUDA runtime: incomplete cuDNN bundle in {cudnn_dir}; using normal torch startup")
+        return
+
+    try:
+        global_mode = getattr(ctypes, "RTLD_GLOBAL", 0)
+        core_handle = ctypes.CDLL(str(core_path), mode=global_mode)
+        if getattr(core_handle, "cudnnGetLibConfig", None) is None:
+            raise OSError(f"{core_path} does not export cudnnGetLibConfig")
+        graph_handle = ctypes.CDLL(str(graph_path), mode=global_mode)
+        _CUDNN_HANDLES = [core_handle, graph_handle]
+        print(f"  CUDA runtime: coherent cuDNN core/graph loaded from {cudnn_dir}")
+    except (OSError, AttributeError) as cudnn_error:
+        _CUDNN_FORCE_DISABLED = True
+        print(f"  WARNING: cuDNN component mismatch detected ({str(cudnn_error)[:180]})")
+        print("  WARNING: cuDNN will be disabled for neural inference to prevent a native abort")
+
+
+_prepare_cuda_runtime()
+# Import torch before accelerate/torchvision/bitsandbytes. This makes every
+# later torch-bearing import reuse the runtime selected above.
+import torch
+if _CUDNN_FORCE_DISABLED:
+    torch.backends.cudnn.enabled = False
+    print("  CUDA runtime: torch.backends.cudnn.enabled=False")
+
 for _module, _requirement in [
     ("groq", "groq"), ("assemblyai", "assemblyai"),
     ("google.generativeai", "google-generativeai"), ("requests", "requests"),
@@ -56,19 +152,35 @@ for _module, _requirement in [
 ]:
     _ensure_package(_module, _requirement)
 
+# Install Chatterbox's Python-only support packages without dependency
+# resolution. These imports are all safe after torch has been initialized and
+# none is allowed to pull a replacement CUDA/PyTorch wheel.
+for _module, _requirement in [
+    ("s3tokenizer", "s3tokenizer"),
+    ("diffusers", "diffusers==0.29.0"),
+    ("conformer", "conformer==0.3.2"),
+    ("safetensors", "safetensors==0.5.3"),
+    ("perth", "resemble-perth==1.0.1"),
+    ("spacy_pkuseg", "spacy-pkuseg"),
+    ("pykakasi", "pykakasi==2.3.0"),
+    ("pyloudnorm", "pyloudnorm"),
+    ("omegaconf", "omegaconf"),
+]:
+    _ensure_package(_module, _requirement, ["--no-deps"])
+
 try:
     _package_version("chatterbox-tts")
     print("  chatterbox-tts already available")
 except PackageNotFoundError:
     print("  Installing chatterbox-tts from GitHub (master) for V3 support...")
     _cb_installed = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--quiet",
+        [sys.executable, "-m", "pip", "install", "--quiet", "--no-deps",
          "git+https://github.com/resemble-ai/chatterbox.git"],
         capture_output=True, text=True
     )
     if _cb_installed.returncode != 0:
         print("  git install failed, falling back to PyPI chatterbox-tts")
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "chatterbox-tts"],
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-deps", "chatterbox-tts"],
                        check=False)
 
 # Chatterbox's current source can leave a newer Transformers build installed.
@@ -132,7 +244,7 @@ if shutil.which("ffmpeg") is None:
     subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg",
                    shell=True, capture_output=True)
 
-import torch, torchaudio
+import torchaudio
 import assemblyai as aai
 import google.generativeai as genai
 
