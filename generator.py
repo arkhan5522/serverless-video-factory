@@ -76,7 +76,31 @@ except PackageNotFoundError:
 # Do not allow a newer preinstalled Transformers build (for example 5.14.1)
 # to remain active: that is the build which produced the
 # `mistral-common` BACKENDS_MAPPING error during TTS loading.
+#
+# Transformers 5.5.0 requires huggingface_hub>=1.5.0 (for the Xet storage
+# layer). Kaggle's preinstalled hub version is older and lacks
+# `is_valid_xet_hash`, causing an ImportError at module init. Upgrade the
+# hub BEFORE force-reinstalling Transformers so the import succeeds.
 _TRANSFORMERS_REQUIRED = "5.5.0"
+_HUB_MINIMUM = "1.5.0"
+try:
+    _hub_version = _package_version("huggingface-hub")
+except PackageNotFoundError:
+    _hub_version = "0.0.0"
+# Compare major.minor.patch tuples to decide whether an upgrade is needed.
+def _version_tuple(v):
+    try:
+        return tuple(int(x) for x in v.split(".")[:3])
+    except (ValueError, AttributeError):
+        return (0, 0, 0)
+if _version_tuple(_hub_version) < _version_tuple(_HUB_MINIMUM):
+    print(f"  Upgrading huggingface_hub {_hub_version} -> >={_HUB_MINIMUM}")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--quiet",
+         f"huggingface_hub>={_HUB_MINIMUM}"],
+        check=True,
+    )
+
 try:
     _transformers_version = _package_version("transformers")
 except PackageNotFoundError:
