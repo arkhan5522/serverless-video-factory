@@ -437,12 +437,10 @@ def _local_sentence_query_pair(sentence_text):
 
 def generate_queries_for_sentences(sentences):
     """
-    Send ALL sentences to Groq, get back a mapping of each sentence to its
-    ideal visual search query PLUS a topic-relevant backup query. Batches
-    into chunks of ~40 sentences per call so long scripts (especially
-    Spanish, which tends to run more characters per sentence than English)
-    never get silently truncated and dropped - that was previously causing
-    queries to desync from sentences.
+    Send sentences to Groq in small, bounded batches, get back a mapping of
+    each sentence to its ideal visual search query PLUS a topic-relevant backup
+    query. Small requests avoid GPT-OSS TPM rejection and make truncation local
+    to at most one short batch instead of losing most of a long script.
 
     Returns (queries, backups) - two parallel lists. `backups` gives a
     still-on-topic alternate search term to try if the primary query
@@ -462,7 +460,14 @@ def generate_queries_for_sentences(sentences):
     from groq import Groq
     client = Groq(api_key=GROQ_KEY)
 
-    BATCH_SIZE = 50
+    # Keep every sentence request well below Groq's 8k TPM ceiling. The
+    # recovery size is smaller because recovery includes global numbering.
+    BATCH_SIZE = 8
+    RECOVERY_BATCH_SIZE = 6
+
+    def _query_output_budget(sentence_count):
+        return min(640, max(240, sentence_count * 48))
+
     all_queries = [None] * n
     all_backups = [None] * n
 
@@ -504,7 +509,7 @@ RULES:
                     {"role": "user", "content": f"Match each sentence to a video search query:\n\n{numbered}"}
                 ],
                 model="openai/gpt-oss-120b",
-                max_tokens=4000,
+                max_tokens=_query_output_budget(len(batch)),
                 temperature=0.5
             )
 
@@ -551,24 +556,26 @@ RULES:
             print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
             # leave this batch's entries as None -> filled by fallback below
 
-    # Recover incomplete batches without changing index alignment. The first
-    # request can occasionally omit a few numbered lines even when Groq is
-    # otherwise healthy; re-request only those exact global sentence numbers
-    # instead of aborting immediately or inserting generic footage.
+    # Recover incomplete batches without changing index alignment. Keep every
+    # recovery request bounded too; never send the full missing-index list to
+    # Groq, and do not fall back to one request per sentence.
     missing_indices = [i for i, query in enumerate(all_queries) if not query]
     for recovery_round in range(1, 3):
         if not missing_indices:
             break
-        print(f"  Groq: recovering {len(missing_indices)} missing sentence queries "
-              f"(attempt {recovery_round}/2)...")
-        requested = set(missing_indices)
-        numbered_missing = "\n".join(
-            f"{i + 1}. {sentences[i]['text'][:140]}" for i in missing_indices
-        )
-        try:
-            recovery = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": """Return one primary and one backup STOCK FOOTAGE query for every numbered sentence. The numbers are global sentence numbers and must not be changed or skipped.
+        recovery_missing = list(missing_indices)
+        print(f"  Groq: recovering {len(recovery_missing)} missing sentence queries "
+              f"in chunks of <= {RECOVERY_BATCH_SIZE} (attempt {recovery_round}/2)...")
+        for chunk_start in range(0, len(recovery_missing), RECOVERY_BATCH_SIZE):
+            chunk_indices = recovery_missing[chunk_start:chunk_start + RECOVERY_BATCH_SIZE]
+            requested = set(chunk_indices)
+            numbered_missing = "\n".join(
+                f"{i + 1}. {sentences[i]['text'][:140]}" for i in chunk_indices
+            )
+            try:
+                recovery = client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": """Return one primary and one backup STOCK FOOTAGE query for every numbered sentence. The numbers are global sentence numbers and must not be changed or skipped.
 
 Rules:
 - Queries must be in English, 3-6 words, and describe something a camera can film.
@@ -578,90 +585,47 @@ Rules:
 - Output ONLY these two lines per sentence:
 14. primary query
 14b. backup query"""},
-                    {"role": "user", "content":
-                     f"Recover queries for these missing global sentence numbers:\n\n{numbered_missing}"}
-                ],
-                model="openai/gpt-oss-120b",
-                max_tokens=max(600, len(missing_indices) * 120),
-                temperature=0.2,
-            )
-            result = recovery.choices[0].message.content
-            recovered = 0
-            for line in result.strip().split("\n"):
-                line = line.strip()
-                mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
-                if mb:
-                    global_idx = int(mb.group(1)) - 1
-                    cleaned = mb.group(2).strip().strip('"\'')
-                    if (global_idx in requested and 3 < len(cleaned) < 60
-                            and _safe(cleaned)):
-                        all_backups[global_idx] = cleaned
-                    continue
-                m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line)
-                if not m:
-                    continue
-                global_idx = int(m.group(1)) - 1
-                cleaned = m.group(2).strip().strip('"\'')
-                if (global_idx in requested and 3 < len(cleaned) < 60
-                        and _safe(cleaned)):
-                    if not all_queries[global_idx]:
-                        recovered += 1
-                    all_queries[global_idx] = cleaned
-            print(f"  Groq: recovered {recovered}/{len(missing_indices)} primary queries")
-        except Exception as e:
-            print(f"  Groq recovery attempt {recovery_round} failed: {e}")
-        missing_indices = [i for i, query in enumerate(all_queries) if not query]
-
-    # Final precision recovery: batch recovery can still omit one stubborn
-    # sentence. Ask for each remaining sentence individually, which removes
-    # numbering ambiguity without ever inserting a generic substitute.
-    missing_indices = [i for i, query in enumerate(all_queries) if not query]
-    for precision_round in range(1, 3):
-        if not missing_indices:
-            break
-        print(f"  Groq: precision recovery for {len(missing_indices)} sentence(s) "
-              f"(attempt {precision_round}/2)...")
-        for global_idx in list(missing_indices):
-            try:
-                precision = client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": """You are selecting one exact stock-footage query for one narration sentence.
-Return exactly two lines and nothing else:
-1. primary query
-1b. backup query
-
-Both must be English, 3-6 words, camera-filmable, thematically tied to the exact sentence, and safe for stock footage. Do not use generic or unrelated nature, ocean, space, landscape, people, women, religion, violence, or NSFW filler."""},
                         {"role": "user", "content":
-                         f"Sentence {global_idx + 1}: {sentences[global_idx]['text'][:220]}"},
+                         f"Recover queries for these missing global sentence numbers:\n\n{numbered_missing}"}
                     ],
                     model="openai/gpt-oss-120b",
-                    max_tokens=120,
-                    temperature=0.1,
+                    max_tokens=_query_output_budget(len(chunk_indices)),
+                    temperature=0.2,
                 )
-                text = precision.choices[0].message.content or ""
-                primary = None
-                backup = None
-                for line in text.strip().split("\n"):
+                result = recovery.choices[0].message.content or ""
+                recovered = 0
+                for line in result.strip().split("\n"):
                     line = line.strip()
-                    mb = re.match(r'^\s*1b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
+                    mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
                     if mb:
-                        candidate = mb.group(1).strip().strip('"\'')
-                        if 3 < len(candidate) < 60 and _safe(candidate):
-                            backup = candidate
+                        global_idx = int(mb.group(1)) - 1
+                        cleaned = mb.group(2).strip().strip('"\'')
+                        if (global_idx in requested and 3 < len(cleaned) < 60
+                                and _safe(cleaned)):
+                            all_backups[global_idx] = cleaned
                         continue
-                    m = re.match(r'^\s*1[\.\)\-]\s*(.+)$', line)
-                    if m:
-                        candidate = m.group(1).strip().strip('"\'')
-                        if 3 < len(candidate) < 60 and _safe(candidate):
-                            primary = candidate
-                if primary:
-                    all_queries[global_idx] = primary
-                    all_backups[global_idx] = backup or primary
-                    print(f"  Groq: precision recovered sentence {global_idx + 1}")
+                    m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line)
+                    if not m:
+                        continue
+                    global_idx = int(m.group(1)) - 1
+                    cleaned = m.group(2).strip().strip('"\'')
+                    if (global_idx in requested and 3 < len(cleaned) < 60
+                            and _safe(cleaned)):
+                        if not all_queries[global_idx]:
+                            recovered += 1
+                        all_queries[global_idx] = cleaned
+                print(f"  Groq: recovered {recovered}/{len(chunk_indices)} primary queries "
+                      f"in recovery chunk {chunk_start // RECOVERY_BATCH_SIZE + 1}")
             except Exception as e:
-                print(f"  Groq: precision recovery failed for sentence {global_idx + 1}: "
-                      f"{type(e).__name__}: {str(e)[:100]}")
+                print(f"  Groq recovery chunk {chunk_start // RECOVERY_BATCH_SIZE + 1} "
+                      f"failed: {type(e).__name__}: {str(e)[:140]}")
         missing_indices = [i for i, query in enumerate(all_queries) if not query]
+
+    # Do not issue an unbounded one-request-per-sentence precision tail. Any
+    # entries still missing after two bounded recovery passes receive the
+    # existing same-sentence local fallback below, preserving alignment without
+    # putting another burst of pressure on Groq.
+    missing_indices = [i for i, query in enumerate(all_queries) if not query]
 
     if missing_indices:
         print(
@@ -775,7 +739,7 @@ Rules:
                  f"Sentence:\n{sentence}\n\nPrevious failed queries:\n{previous}"}
             ],
             model="openai/gpt-oss-120b",
-            max_tokens=180,
+            max_tokens=120,
             temperature=0.65,
         )
         text = response.choices[0].message.content or ""
@@ -812,7 +776,7 @@ def generate_short_scripts(sentences, topic, n_shorts, target_seconds=60):
     Returns a list of dicts: {"script": str, "theme": str}
     """
     words_target = int(target_seconds / 60 * 150)  # ~150 wpm normal pace
-    full_text = " ".join(s['text'] for s in sentences)[:15000]
+    full_text = " ".join(s['text'] for s in sentences)[:12000]
 
     def _fallback_scripts():
         # If Groq is unavailable, fall back to lightly-summarized chunks of
@@ -857,7 +821,7 @@ Format exactly like this:
                 {"role": "user", "content": f"Source script:\n\n{full_text}\n\nWrite {n_shorts} standalone short scripts as JSON."}
             ],
             model="openai/gpt-oss-120b",
-            max_tokens=4000,
+            max_tokens=1200,
             temperature=0.75
         )
 
@@ -1724,6 +1688,91 @@ def _patch_minicpm_transformers_compat():
     print("  MiniCPM compatibility: initialized missing all_tied_weights_keys metadata")
 
 
+def _patch_minicpm_tokenizer_compat(tokenizer):
+    """Restore MiniCPM-V legacy tokenizer aliases removed by Transformers 5.5."""
+    # The official MiniCPMV processor calls these names directly. Transformers
+    # 5.5 can return a generic TokenizersBackend instead of the model's older
+    # MiniCPMVTokenizerFast wrapper, so provide the same aliases explicitly.
+    string_tokens = {
+        "im_start": "<image>",
+        "im_end": "</image>",
+        "slice_start": "<slice>",
+        "slice_end": "</slice>",
+        "im_id_start": "<image_id>",
+        "im_id_end": "</image_id>",
+    }
+
+    def _token_id(token):
+        value = tokenizer.convert_tokens_to_ids(token)
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        if value is None:
+            raise RuntimeError(f"MiniCPM tokenizer cannot resolve special token {token!r}")
+        try:
+            value = int(value)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"MiniCPM tokenizer returned an invalid ID for {token!r}: {value!r}"
+            ) from error
+        unk_id = getattr(tokenizer, "unk_token_id", None)
+        if unk_id is not None and value == int(unk_id) and token != "<unk>":
+            raise RuntimeError(f"MiniCPM tokenizer mapped special token {token!r} to <unk>")
+        return value
+
+    def _set_missing(name, value):
+        try:
+            current = getattr(tokenizer, name)
+        except AttributeError:
+            current = None
+        if current is not None:
+            return
+        try:
+            setattr(tokenizer, name, value)
+        except (AttributeError, TypeError):
+            # Some backend wrappers disallow instance attributes. A property
+            # on their concrete class keeps the value local to this tokenizer
+            # implementation without changing tokenization behavior.
+            try:
+                setattr(type(tokenizer), name,
+                        property(lambda _self, value=value: value))
+            except (AttributeError, TypeError) as error:
+                raise RuntimeError(
+                    f"MiniCPM tokenizer cannot install compatibility alias {name}"
+                ) from error
+
+    for name, token in string_tokens.items():
+        _set_missing(name, token)
+    for name, token_name in {
+        "im_start_id": "im_start",
+        "im_end_id": "im_end",
+        "slice_start_id": "slice_start",
+        "slice_end_id": "slice_end",
+        "im_id_start_id": "im_id_start",
+        "im_id_end_id": "im_id_end",
+    }.items():
+        _set_missing(name, _token_id(string_tokens[token_name]))
+
+    # The processor's batch_decode() uses these legacy aliases too. Keep them
+    # aligned with the tokenizer config's standard Transformers IDs.
+    for name, token in {
+        "bos_id": "<|im_start|>",
+        "eos_id": "<|im_end|>",
+        "unk_id": "<unk>",
+        "newline_id": "\n",
+    }.items():
+        _set_missing(name, _token_id(token))
+
+    required = ("im_start_id", "im_end_id", "slice_start_id", "slice_end_id",
+                "bos_id", "eos_id")
+    missing = [name for name in required if not hasattr(tokenizer, name)]
+    if missing:
+        raise RuntimeError(
+            f"MiniCPM tokenizer compatibility aliases still missing: {missing}"
+        )
+    print("  MiniCPM compatibility: restored tokenizer special-token aliases")
+    return tokenizer
+
+
 def _load_llava_worker(gpu_index):
     """Load one official MiniCPM-V 4.5 int4 verifier on one CUDA device."""
     from transformers import AutoModel, AutoProcessor
@@ -1736,6 +1785,7 @@ def _load_llava_worker(gpu_index):
         _MINICPM_MODEL_PATH,
         trust_remote_code=True,
     )
+    tokenizer = _patch_minicpm_tokenizer_compat(processor.tokenizer)
     _patch_minicpm_transformers_compat()
     # The checkpoint config contains the official bitsandbytes NF4 settings.
     # Passing device_map pins this independent model to exactly one GPU.
@@ -1752,7 +1802,7 @@ def _load_llava_worker(gpu_index):
         "device": torch.device(device),
         "model": model,
         "processor": processor,
-        "tokenizer": processor.tokenizer,
+        "tokenizer": tokenizer,
         "lock": threading.Lock(),
         "prepare_lock": threading.Lock(),
     }
