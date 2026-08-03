@@ -190,6 +190,11 @@ except PackageNotFoundError:
 # authored against 4.51.0, but its custom AutoModel code is compatible with the
 # 5.5.0 build already validated with Chatterbox in this pipeline.
 _TRANSFORMERS_REQUIRED = "5.5.0"
+# Transformers 5.5.0 performs this check during its top-level import. Kaggle's
+# image currently carries tokenizers 0.21.x, which makes the import fail after
+# the expensive dependency/bootstrap phase. Keep this exact and independent of
+# pip's resolver so no CUDA package can be changed as a side effect.
+_TOKENIZERS_REQUIRED = "0.22.1"
 _HUB_REQUIRED = "1.5.0"
 
 
@@ -235,7 +240,23 @@ if _transformers_version != _TRANSFORMERS_REQUIRED:
          "--no-deps", "--force-reinstall", f"transformers=={_TRANSFORMERS_REQUIRED}"],
         check=True,
     )
-_purge_module_tree("transformers")
+
+try:
+    _tokenizers_version = _package_version("tokenizers")
+except PackageNotFoundError:
+    _tokenizers_version = None
+if _tokenizers_version != _TOKENIZERS_REQUIRED:
+    print(f"  Pinning tokenizers {_tokenizers_version or 'missing'} -> {_TOKENIZERS_REQUIRED}")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
+         "--no-deps", "--force-reinstall", f"tokenizers=={_TOKENIZERS_REQUIRED}"],
+        check=True,
+    )
+
+# Both packages may have been imported by an earlier warm-kernel probe. Purge
+# their module trees so the import below cannot combine old Python modules with
+# freshly installed package files.
+_purge_module_tree("transformers", "tokenizers")
 importlib.invalidate_caches()
 from transformers import AutoModel, AutoProcessor, AutoTokenizer  # noqa: F401
 
