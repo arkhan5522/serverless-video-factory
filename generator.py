@@ -408,6 +408,61 @@ def _sentence_query_variants(attempts):
                 yield variant
 
 
+# A bounded search is essential: stock providers expose finite pages, and
+# cycling already-used URLs forever can otherwise keep a Kaggle job alive for
+# hours. After each failed round, Groq supplies fresh sentence-specific terms.
+_CLIP_QUERY_ROUNDS = 4  # initial queries plus up to three targeted Groq refreshes
+_CLIP_CANDIDATES_PER_QUERY = 5
+
+
+def _request_fresh_sentence_queries(sentence, previous_queries, orientation):
+    """Ask Groq for new queries for one unmatched sentence only."""
+    if not GROQ_KEY:
+        return []
+    from groq import Groq
+    previous = "; ".join(previous_queries[-8:]) or "none"
+    orientation_hint = "portrait/vertical" if orientation == "portrait" else "landscape"
+    try:
+        client = Groq(api_key=GROQ_KEY)
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": f"""You are recovering stock-footage queries for one unmatched narration sentence.
+Return exactly two new, different, sentence-specific {orientation_hint} stock-footage queries:
+1. primary query
+1b. backup query
+
+Rules:
+- English, 3-6 words, describing something a camera can film.
+- Clearly represent the sentence meaning, not merely a broad topic.
+- For abstract or medical ideas, choose the closest findable thematic visual.
+- Do not use generic nature, ocean, space, landscape, or unrelated filler.
+- No people, faces, bodies, women, religion, violence, or NSFW.
+- Do not repeat any previous query.
+- Output only the two numbered lines."""},
+                {"role": "user", "content":
+                 f"Sentence:\n{sentence}\n\nPrevious failed queries:\n{previous}"}
+            ],
+            model="openai/gpt-oss-120b",
+            max_tokens=180,
+            temperature=0.65,
+        )
+        text = response.choices[0].message.content or ""
+        fresh = []
+        for line in text.strip().split("\n"):
+            match = re.match(r'^\s*(?:1b|1)[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
+            if not match:
+                continue
+            query = match.group(1).strip().strip('"\'')
+            if 3 < len(query) < 60 and _safe(query) and query not in previous_queries and query not in fresh:
+                fresh.append(query)
+        if fresh:
+            print(f"    Groq supplied {len(fresh)} fresh {orientation_hint} queries for unmatched sentence")
+        return fresh[:2]
+    except Exception as e:
+        print(f"    Groq fresh-query recovery failed: {type(e).__name__}: {str(e)[:120]}")
+        return []
+
+
 
 # ==========================================
 # 3B. AI SHORT SCRIPT WRITER (Groq oss-120b writes standalone short scripts)
@@ -706,6 +761,15 @@ def _mark_url_used(url):
         USED_URLS.add(url)
 
 
+def _claim_url(url):
+    """Atomically reserve a URL so parallel workers cannot download it twice."""
+    with _USED_URLS_LOCK:
+        if url in USED_URLS:
+            return False
+        USED_URLS.add(url)
+        return True
+
+
 def _search_stock_provider(provider, query, page, orientation):
     """Search one stock provider and return candidate video URLs."""
     try:
@@ -791,8 +855,8 @@ def _search_stock_provider(provider, query, page, orientation):
     return []
 
 
-def _search_stock_urls(query, page, orientation):
-    """Search Pexels and Pixabay concurrently, preserving provider order."""
+def _search_stock_urls(query, page, orientation, limit=None):
+    """Search providers concurrently and atomically claim only needed URLs."""
     providers = []
     if any(PEXELS_KEYS):
         providers.append("pexels")
@@ -815,27 +879,27 @@ def _search_stock_urls(query, page, orientation):
                 results[provider] = []
 
     urls = []
-    with _USED_URLS_LOCK:
-        used = set(USED_URLS)
     for provider in providers:
         for url in results[provider]:
-            if url and url not in used and url not in urls:
+            if limit is not None and len(urls) >= limit:
+                return urls
+            if url and url not in urls and _claim_url(url):
                 urls.append(url)
     return urls
 
 
-def search_and_download_vertical(query, idx, duration, tag="", verify=True, normalize=True):
+def search_and_download_vertical(query, idx, duration, tag="", verify=True, normalize=True, page=1):
     """
     Same as search_and_download but requests portrait/vertical source video
     where possible and always crops/scales to 1080x1920 (9:16) for Shorts.
     Uses a distinct USED_URLS-safe idx namespace via `tag` so long-video and
     shorts clip fetching never collide on temp filenames.
     """
-    urls = _search_stock_urls(query, random.randint(1, 20), "portrait")
+    urls = _search_stock_urls(query, page, "portrait", _CLIP_CANDIDATES_PER_QUERY)
 
     # Each search call is bounded; the sentence worker keeps retrying with
     # fresh pages and semantically tied variants until LLaVA accepts one.
-    for url in urls[:6]:
+    for url in urls[:_CLIP_CANDIDATES_PER_QUERY]:
         try:
             raw = TEMP_DIR / f"raw_s{tag}_{idx}.mp4"
             out = TEMP_DIR / f"clip_s{tag}_{idx}.mp4"
@@ -881,54 +945,79 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
     return None
 
 
-def process_short_clip(args):
-    """Persistently find, verify, and immediately normalize one short clip."""
-    i, sent, tag = args
-    dur = max(2.5, sent['end'] - sent['start'])
-    attempts = _query_attempts(i, sent.get('orig_idx', i))
-    variants = list(_sentence_query_variants(attempts))
-    retry_count = 0
-    while True:
-        query = variants[retry_count % len(variants)]
-        retry_count += 1
-        try:
-            raw = search_and_download_vertical(
-                query, i, dur, tag=tag, verify=False, normalize=False
-            )
-            if not raw:
-                if retry_count % len(variants) == 0:
-                    print(f"    Short clip {i}: no unused candidates yet; continuing exact-query search")
-                    time.sleep(1.0)
-                continue
-            if not verify_clip_matches_query(raw, query):
+def _find_verified_normalized_clip(sent, index, orientation, tag=""):
+    """Find an exact sentence match using bounded stock/Groq retry rounds."""
+    duration = max(2.5 if orientation == "portrait" else 3.5,
+                   sent['end'] - sent['start'])
+    query_index = sent.get('orig_idx', index) if orientation == "portrait" else index
+    queries = _query_attempts(index, query_index)
+    previous_queries = list(queries)
+
+    for round_no in range(_CLIP_QUERY_ROUNDS):
+        page = round_no + 1
+        print(f"    {orientation.title()} clip {index}: query round {round_no + 1}/{_CLIP_QUERY_ROUNDS}")
+        for query in queries[:2]:
+            try:
+                if orientation == "portrait":
+                    raw = search_and_download_vertical(
+                        query, index, duration, tag=tag, verify=False,
+                        normalize=False, page=page,
+                    )
+                else:
+                    raw = search_and_download(
+                        query, index, duration, verify=False, page=page,
+                    )
+                if not raw:
+                    continue
+
+                if not verify_clip_matches_query(raw, query):
+                    try: os.remove(raw)
+                    except OSError: pass
+                    continue
+
+                output_name = (f"clip_s{tag}_{index}.mp4" if orientation == "portrait"
+                               else f"clip_{index}.mp4")
+                normalized = (_normalize_vertical_clip if orientation == "portrait"
+                              else _normalize_landscape_clip)(
+                    raw, TEMP_DIR / output_name, duration
+                )
                 try: os.remove(raw)
                 except OSError: pass
-                continue
-            output = TEMP_DIR / f"clip_s{tag}_{i}.mp4"
-            normalized = _normalize_vertical_clip(raw, output, dur)
-            try: os.remove(raw)
-            except OSError: pass
-            if normalized and _normalized_duration_is_usable(normalized, dur):
-                print(f"    Short clip {i}: verified and normalized immediately (retry {retry_count})")
-                return i, normalized
-            if normalized:
-                try: os.remove(normalized)
-                except OSError: pass
-            print(f"    Short clip {i}: accepted clip normalization failed; retrying exact-query search")
-        except Exception as e:
-            print(f"    Short clip {i}: retry {retry_count} error ({type(e).__name__}: {str(e)[:100]})")
-            time.sleep(0.5)
+                if normalized and _normalized_duration_is_usable(normalized, duration):
+                    print(f"    {orientation.title()} clip {index}: verified and normalized "
+                          f"in round {round_no + 1}")
+                    return index, normalized
+                if normalized:
+                    try: os.remove(normalized)
+                    except OSError: pass
+            except Exception as e:
+                print(f"    {orientation.title()} clip {index}: candidate error "
+                      f"({type(e).__name__}: {str(e)[:100]})")
+
+        if round_no + 1 >= _CLIP_QUERY_ROUNDS:
+            break
+        fresh = _request_fresh_sentence_queries(
+            sent['text'], previous_queries, orientation
+        )
+        if not fresh:
+            print(f"    {orientation.title()} clip {index}: Groq returned no new queries; stopping bounded search")
+            break
+        previous_queries.extend(fresh)
+        queries = fresh
+
+    raise RuntimeError(
+        f"No verified {orientation} clip found for sentence position {index + 1} "
+        f"after {_CLIP_QUERY_ROUNDS} query rounds; no substitute permitted"
+    )
 
 
-def _prepare_short_candidate(args):
-    """Compatibility wrapper for callers that only need a raw candidate."""
-    i, sent, attempt, query, tag = args
-    dur = max(2.5, sent['end'] - sent['start'])
-    raw = search_and_download_vertical(query, i, dur, tag=tag, verify=False, normalize=False)
-    return i, attempt, query, raw
+def process_short_clip(args):
+    i, sent, tag = args
+    return _find_verified_normalized_clip(sent, i, "portrait", tag)
 
 
-def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, out_path):
+def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, out_path,
+                 release_verifier=True):
     """
     Render a single 1080x1920 short: fetch fresh vertical stock clips for
     this segment's sentences, concat, overlay a LARGE left-side logo (shorts
@@ -941,8 +1030,6 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
     print(f"\n  Short {short_idx+1}: fetching {n} vertical clips...")
 
     clips = [None] * n
-    query_sets = [_query_attempts(i, sent.get('orig_idx', i))
-                  for i, sent in enumerate(sentences_slice)]
 
     # Each worker searches, verifies, and immediately normalizes its own
     # sentence. This prevents raw clips with inconsistent source durations
@@ -960,10 +1047,12 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
             completed += 1
             print(f"    Short {short_idx+1}: completed {completed}/{n} exact clips")
 
-    _release_llava_for_encoding()
+    if release_verifier:
+        _release_llava_for_encoding()
     if USE_GPU:
         _nvenc_runtime_failed = False
-        print(f"  Short {short_idx+1}: verifier workers released before final encoding")
+        print(f"  Short {short_idx+1}: verifier workers "
+              f"{'released before final encoding' if release_verifier else 'retained for the next short'}")
 
     missing = [i for i, clip in enumerate(clips)
                if not clip or not os.path.exists(clip)]
@@ -1683,14 +1772,13 @@ def _release_llava_for_encoding():
             pass
 
 
-def search_and_download(query, idx, duration, verify=True):
-    """Search/download; raw-first for streaming, normalized for verify=True callers."""
-    urls = _search_stock_urls(query, random.randint(1, 20), "landscape")
+def search_and_download(query, idx, duration, verify=True, page=1):
+    """Download one bounded page of candidates; caller controls retry rounds."""
+    urls = _search_stock_urls(query, page, "landscape", _CLIP_CANDIDATES_PER_QUERY)
     
-    # Accuracy-first: try more candidates (was 6, now 10) since some will
-    # be rejected on VISUAL grounds, not just download failure - need more
-    # attempts to still find a genuinely matching clip.
-    for candidate_no, url in enumerate(urls[:10], 1):
+    # Only a small bounded candidate set is downloaded in this round; the
+    # outer finder requests fresh Groq terms if these candidates fail.
+    for candidate_no, url in enumerate(urls[:_CLIP_CANDIDATES_PER_QUERY], 1):
         try:
             candidate_started = time.perf_counter()
             raw = TEMP_DIR / f"raw_{idx}.mp4"
@@ -1747,44 +1835,12 @@ def search_and_download(query, idx, duration, verify=True):
     return None
 
 def process_landscape_clip(args):
-    """Persistently find, verify, and immediately normalize one sentence clip."""
-    i, sent, attempts = args
-    duration = max(3.5, sent['end'] - sent['start'])
-    variants = list(_sentence_query_variants(attempts))
-    retry_count = 0
-    while True:
-        query = variants[retry_count % len(variants)]
-        retry_count += 1
-        try:
-            raw = search_and_download(query, i, duration, verify=False)
-            if not raw:
-                if retry_count % len(variants) == 0:
-                    print(f"    Clip {i}: no unused candidates yet; continuing exact-query search")
-                    time.sleep(1.0)
-                continue
-            if not verify_clip_matches_query(raw, query):
-                try: os.remove(raw)
-                except OSError: pass
-                continue
-            normalized = _normalize_landscape_clip(
-                raw, TEMP_DIR / f"clip_{i}.mp4", duration
-            )
-            try: os.remove(raw)
-            except OSError: pass
-            if normalized and _normalized_duration_is_usable(normalized, duration):
-                print(f"    Clip {i}: verified and normalized immediately (retry {retry_count})")
-                return i, normalized
-            if normalized:
-                try: os.remove(normalized)
-                except OSError: pass
-            print(f"    Clip {i}: accepted clip normalization failed; retrying exact-query search")
-        except Exception as e:
-            print(f"    Clip {i}: retry {retry_count} error ({type(e).__name__}: {str(e)[:100]})")
-            time.sleep(0.5)
+    i, sent, _attempts = args
+    return _find_verified_normalized_clip(sent, i, "landscape")
 
 
 def prepare_clip_candidate(args):
-    """Compatibility wrapper for callers that only need a raw candidate."""
+    """Compatibility wrapper retained for external callers."""
     i, sent, attempt, query = args
     clip = search_and_download(query, i, max(3.5, sent['end'] - sent['start']), verify=False)
     return i, attempt, query, clip
@@ -1797,14 +1853,13 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
     global _nvenc_runtime_failed
     n = len(sentences)
     clips = [None] * n
-    query_sets = [_query_attempts(i) for i in range(n)]
-    print(f"\n  Rendering {n} clips with streaming verify->normalize workers on the available LLaVA GPUs...")
+    print(f"\n  Rendering {n} clips with bounded Groq re-query rounds and streaming verification/normalization...")
 
     completed = 0
     update_status(55, f"Finding exact verified clips (0/{n})...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
         futures = {
-            ex.submit(process_landscape_clip, (i, sent, query_sets[i])): i
+            ex.submit(process_landscape_clip, (i, sent, None)): i
             for i, sent in enumerate(sentences)
         }
         for future in concurrent.futures.as_completed(futures):
@@ -2034,6 +2089,76 @@ def generate_script(topic, mins):
     return ""
 
 
+def _prepare_short_assets(short_index, script_text, short_audio):
+    """Transcribe and prepare one short without mutating global query state."""
+    short_sentences, short_word_data = [], []
+    if ASSEMBLY_KEY:
+        try:
+            tx_config = aai.TranscriptionConfig(
+                language_code="es" if IS_SPANISH else "en",
+                punctuate=True,
+                format_text=True,
+            )
+            tx = aai.Transcriber(config=tx_config).transcribe(str(short_audio))
+            if tx.status != aai.TranscriptStatus.error:
+                for sentence in tx.get_sentences():
+                    short_sentences.append({
+                        "text": sentence.text,
+                        "start": sentence.start / 1000,
+                        "end": sentence.end / 1000,
+                    })
+                if short_sentences:
+                    short_sentences[-1]["end"] += 0.3
+                for word in tx.words:
+                    short_word_data.append({
+                        "text": word.text,
+                        "start": word.start / 1000,
+                        "end": word.end / 1000,
+                    })
+        except Exception as e:
+            print(f"  Short {short_index+1}: transcription error ({e}), using estimated timing")
+
+    if not short_sentences:
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(short_audio)],
+                capture_output=True, text=True, timeout=15,
+            )
+            total_duration = float(probe.stdout.strip())
+        except Exception:
+            total_duration = SHORT_DUR_TARGET
+        parts = [
+            part.strip() for part in re.split(r"(?<=[.!?])\s+", script_text)
+            if len(part.strip()) > 2
+        ] or [script_text]
+        per_sentence = total_duration / len(parts)
+        short_sentences = [
+            {"text": part, "start": i * per_sentence, "end": (i + 1) * per_sentence}
+            for i, part in enumerate(parts)
+        ]
+
+    for sentence_index, sentence in enumerate(short_sentences):
+        sentence["orig_idx"] = sentence_index
+
+    short_ass = TEMP_DIR / f"short_{short_index}_subs.ass"
+    create_subtitles(
+        short_sentences,
+        short_ass,
+        word_data=short_word_data if short_word_data else None,
+        style_set=SHORT_SUBTITLE_STYLES,
+        play_res=(1080, 1920),
+        max_chars=20,
+    )
+    short_queries, short_backups = generate_queries_for_sentences(short_sentences)
+    return {
+        "sentences": short_sentences,
+        "word_data": short_word_data,
+        "ass": short_ass,
+        "queries": short_queries,
+        "backups": short_backups,
+    }
+
 
 # ==========================================
 # 9. MAIN EXECUTION
@@ -2121,14 +2246,39 @@ if not sentences:
         chunk=text.split()[i:i+8]; d=len(chunk)/wps
         sentences.append({"text":' '.join(chunk),"start":t,"end":t+d}); t+=d
 
-# Queries (sentence-matched via Groq JSON approach)
+# Start the independent Shorts script request while the main video pipeline
+# prepares its own queries and subtitles. This is network/Groq work and does
+# not touch the GPU or shared audio files.
+shorts_eligible = bool(
+    sentences and sentences[-1]["end"] >= SHORT_DUR_TARGET * 0.6
+)
+short_script_executor = None
+short_script_future = None
+if shorts_eligible:
+    short_script_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    short_script_future = short_script_executor.submit(
+        generate_short_scripts,
+        sentences,
+        TOPIC if MODE == "topic" else text[:100],
+        SHORTS_COUNT,
+        SHORT_DUR_TARGET,
+    )
+
+# Queries and subtitle generation are independent after transcription.
 update_status(50, "Matching visuals to sentences...")
-AI_QUERIES, AI_BACKUPS = generate_queries_for_sentences(sentences)
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as prep_executor:
+    query_future = prep_executor.submit(generate_queries_for_sentences, sentences)
+    subtitle_future = prep_executor.submit(
+        create_subtitles,
+        sentences,
+        TEMP_DIR / "subs.ass",
+        word_data=word_data if word_data else None,
+    )
+    AI_QUERIES, AI_BACKUPS = query_future.result()
+    subtitle_future.result()
 
 # Subtitles (word-level highlighting if available)
-update_status(52, "Subtitles...")
-ass = TEMP_DIR/"subs.ass"
-create_subtitles(sentences, ass, word_data=word_data if word_data else None)
+ass = TEMP_DIR / "subs.ass"
 
 # Render
 update_status(54, "Processing video...")
@@ -2155,10 +2305,10 @@ except Exception as e:
 o2 = OUTPUT_DIR/f"final_{JOB_ID}_WITH_SUBS.mp4"
 
 if render_video(sentences, audio, ass, logo, o2):
-    update_status(93, "Uploading...")
-    l2 = upload_drive(o2)
+    update_status(93, "Uploading main video while preparing Shorts...")
+    main_upload_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    main_upload_future = main_upload_executor.submit(upload_drive, o2)
     msg = "Done!\n"
-    if l2: msg += f"Video: {l2}\n"
 
     # ==========================================
     # SHORTS PIPELINE
@@ -2169,106 +2319,107 @@ if render_video(sentences, audio, ass, logo, o2):
     if sentences and sentences[-1]['end'] >= SHORT_DUR_TARGET * 0.6:
         update_status(95, f"Generating {SHORTS_COUNT} shorts...")
         try:
-            short_scripts = generate_short_scripts(sentences, TOPIC if MODE=="topic" else text[:100], SHORTS_COUNT, SHORT_DUR_TARGET)
+            if short_script_future is not None:
+                short_scripts = short_script_future.result()
+                short_script_executor.shutdown(wait=True)
+                short_script_executor = None
+            else:
+                short_scripts = generate_short_scripts(
+                    sentences,
+                    TOPIC if MODE == "topic" else text[:100],
+                    SHORTS_COUNT,
+                    SHORT_DUR_TARGET,
+                )
             print(f"  Shorts: {len(short_scripts)} scripts generated (requested {SHORTS_COUNT})")
             short_links = []
             short_failures = []  # (short_num, reason) for end-of-run summary
 
+            # Generate short audio serially because generate_audio loads and
+            # uses shared CUDA/TTS state. While the GPU generates the next
+            # short, the previous short's transcription, subtitles, and Groq
+            # visual queries run concurrently in the background.
+            short_asset_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(1, min(3, len(short_scripts)))
+            )
+            prepared_shorts = []
             for si, sc in enumerate(short_scripts):
-                update_status(95, f"Short {si+1}/{len(short_scripts)}...")
-                script_text = sc['script'].strip()
+                script_text = sc["script"].strip()
+                update_status(95, f"Preparing short audio {si+1}/{len(short_scripts)}...")
                 if len(script_text) < 20:
-                    short_failures.append((si+1, "empty/too-short script"))
+                    short_failures.append((si + 1, "empty/too-short script"))
                     continue
 
-                # --- Independent TTS for this short (same voice, own audio file) ---
                 short_audio = TEMP_DIR / f"short_{si}_audio.wav"
                 if not generate_audio(script_text, voice, short_audio):
                     print(f"  Short {si+1}: TTS failed, skipping")
-                    short_failures.append((si+1, "TTS failed"))
+                    short_failures.append((si + 1, "TTS failed"))
                     continue
 
-                # --- Independent transcription for accurate word-level timing ---
-                # Re-transcribing THIS short's own audio (instead of reusing/cutting
-                # from the main video's word_data) guarantees the subtitle timing is
-                # always perfectly matched to what's actually in this short's audio -
-                # no cross-file drift, no boundary mismatches.
-                short_sentences, short_word_data = [], []
-                if ASSEMBLY_KEY:
-                    try:
-                        tx_config = aai.TranscriptionConfig(
-                            language_code="es" if IS_SPANISH else "en",
-                            punctuate=True, format_text=True,
-                        )
-                        tx = aai.Transcriber(config=tx_config).transcribe(str(short_audio))
-                        if tx.status != aai.TranscriptStatus.error:
-                            for s in tx.get_sentences():
-                                short_sentences.append({"text": s.text, "start": s.start/1000, "end": s.end/1000})
-                            if short_sentences: short_sentences[-1]['end'] += 0.3
-                            for w in tx.words:
-                                short_word_data.append({"text": w.text, "start": w.start/1000, "end": w.end/1000})
-                    except Exception as e:
-                        print(f"  Short {si+1}: transcription error ({e}), using estimated timing")
-
-                # Fallback: if transcription failed/unavailable, estimate timing
-                # by splitting the script into sentences and spacing them evenly
-                # across the actual audio duration (probed via ffprobe).
-                if not short_sentences:
-                    try:
-                        rp = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
-                            "-of","default=noprint_wrappers=1:nokey=1", str(short_audio)],
-                            capture_output=True, text=True, timeout=15)
-                        total_dur = float(rp.stdout.strip())
-                    except: total_dur = SHORT_DUR_TARGET
-                    parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', script_text) if len(p.strip()) > 2]
-                    if not parts: parts = [script_text]
-                    per = total_dur / len(parts)
-                    for i, p in enumerate(parts):
-                        short_sentences.append({"text": p, "start": i*per, "end": (i+1)*per})
-
-                # --- Vertical-tuned subtitles for this short ---
-                for i, s in enumerate(short_sentences):
-                    s['orig_idx'] = i
-                short_ass = TEMP_DIR / f"short_{si}_subs.ass"
-                create_subtitles(
-                    short_sentences, short_ass,
-                    word_data=short_word_data if short_word_data else None,
-                    style_set=SHORT_SUBTITLE_STYLES,
-                    play_res=(1080, 1920),
-                    max_chars=20,   # narrower canvas + bigger font (86-96px) -> tighter budget
+                asset_future = short_asset_executor.submit(
+                    _prepare_short_assets, si, script_text, short_audio
                 )
+                prepared_shorts.append((si, short_audio, asset_future))
+            short_asset_executor.shutdown(wait=False)
 
-                # --- AI visual-matching queries for THIS short's own sentences ---
-                # (independent from the main video's AI_QUERIES, since this is
-                # different, freshly-written content)
-                short_queries, short_backups = generate_queries_for_sentences(short_sentences)
-                # Temporarily point AI_QUERIES/AI_BACKUPS at this short's
-                # queries so process_short_clip (which reads the globals)
-                # picks the right query/backup per sentence via orig_idx.
+            # Rendering remains sequential: each short uses the shared LLaVA
+            # workers and NVENC lock. The verifier models stay loaded between
+            # Shorts so the next short does not pay the model-load cost again.
+            short_upload_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            short_uploads = []
+            for si, short_audio, asset_future in prepared_shorts:
+                try:
+                    assets = asset_future.result()
+                    short_sentences = assets["sentences"]
+                    short_ass = assets["ass"]
+                    short_queries = assets["queries"]
+                    short_backups = assets["backups"]
+                except Exception as e:
+                    print(f"  Short {si+1}: preparation failed ({type(e).__name__}: {str(e)[:160]})")
+                    short_failures.append((si + 1, "transcription/query preparation failed"))
+                    continue
+
                 saved_queries = AI_QUERIES
                 saved_backups = AI_BACKUPS
                 AI_QUERIES = short_queries
                 AI_BACKUPS = short_backups
-
-                short_out = OUTPUT_DIR / f"short_{JOB_ID}_{si+1}.mp4"
-                ok = render_short(si, short_sentences, short_audio, short_ass, logo, short_out)
-                if not ok:
-                    print(f"  Short {si+1}: retrying once...")
-                    ok = render_short(si, short_sentences, short_audio, short_ass, logo, short_out)
-
-                AI_QUERIES = saved_queries  # restore main video's queries
-                AI_BACKUPS = saved_backups  # restore main video's backups
+                try:
+                    short_out = OUTPUT_DIR / f"short_{JOB_ID}_{si+1}.mp4"
+                    ok = render_short(
+                        si, short_sentences, short_audio, short_ass, logo, short_out,
+                        release_verifier=False,
+                    )
+                    if not ok:
+                        print(f"  Short {si+1}: retrying once...")
+                        ok = render_short(
+                            si, short_sentences, short_audio, short_ass, logo, short_out,
+                            release_verifier=False,
+                        )
+                finally:
+                    AI_QUERIES = saved_queries
+                    AI_BACKUPS = saved_backups
 
                 if ok:
-                    link = upload_drive(short_out)
-                    if link:
-                        short_links.append(link)
-                        msg += f"Short {si+1}: {link}\n"
-                    else:
-                        short_failures.append((si+1, "upload failed (render succeeded)"))
+                    short_uploads.append((
+                        si,
+                        short_upload_executor.submit(upload_drive, short_out),
+                    ))
                 else:
                     print(f"  Short {si+1}: failed after retry, skipping")
-                    short_failures.append((si+1, "render failed after retry"))
+                    short_failures.append((si + 1, "render failed after retry"))
+
+            # Release verifier memory only after all Shorts have been rendered.
+            _release_llava_for_encoding()
+            for si, upload_future in short_uploads:
+                try:
+                    link = upload_future.result()
+                except Exception:
+                    link = None
+                if link:
+                    short_links.append(link)
+                    msg += f"Short {si+1}: {link}\n"
+                else:
+                    short_failures.append((si + 1, "upload failed (render succeeded)"))
+            short_upload_executor.shutdown(wait=True)
 
             print(f"  Shorts summary: {len(short_links)}/{len(short_scripts)} succeeded")
             if short_failures:
@@ -2277,6 +2428,10 @@ if render_video(sentences, audio, ass, logo, o2):
         except Exception as e:
             print(f"  Shorts pipeline error: {e}")
 
+    l2 = main_upload_future.result()
+    main_upload_executor.shutdown(wait=True)
+    if l2:
+        msg += f"Video: {l2}\n"
     update_status(100, msg, "completed", l2)
     print(f"\n  {msg}")
 else:
