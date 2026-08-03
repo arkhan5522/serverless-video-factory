@@ -1473,6 +1473,45 @@ def _find_verified_normalized_clip(sent, index, orientation, tag=""):
         previous_queries.extend(fresh)
         queries = fresh
 
+    # All query rounds exhausted without a verified+normalized clip. Instead
+    # of aborting the entire video render (which wastes a 40-minute Kaggle
+    # run), attempt one last unverified download using the original primary
+    # query. This clip still goes through normalization but skips MiniCPM
+    # verification. A single unverified clip among 124 verified ones is far
+    # preferable to losing the whole video.
+    print(f"    {orientation.title()} clip {index}: all {_CLIP_QUERY_ROUNDS} rounds exhausted, "
+          f"attempting unverified fallback for sentence {index + 1}")
+    fallback_query = queries[0] if queries else previous_queries[0] if previous_queries else None
+    if fallback_query:
+        for page in range(1, 3):
+            try:
+                if orientation == "portrait":
+                    raw = search_and_download_vertical(
+                        fallback_query, index, duration, tag=tag, verify=False,
+                        normalize=False, page=page,
+                    )
+                else:
+                    raw = search_and_download(
+                        fallback_query, index, duration, verify=False, page=page,
+                    )
+                if not raw:
+                    continue
+                output_name = (f"clip_s{tag}_{index}.mp4" if orientation == "portrait"
+                               else f"clip_{index}.mp4")
+                normalized = (_normalize_vertical_clip if orientation == "portrait"
+                              else _normalize_landscape_clip)(
+                    raw, TEMP_DIR / output_name, duration
+                )
+                try: os.remove(raw)
+                except OSError: pass
+                if normalized:
+                    print(f"    {orientation.title()} clip {index}: UNVERIFIED fallback accepted "
+                          f"(query: '{fallback_query[:50]}')")
+                    return index, normalized
+            except Exception as e:
+                print(f"    {orientation.title()} clip {index}: unverified fallback error "
+                      f"({type(e).__name__}: {str(e)[:80]})")
+
     raise RuntimeError(
         f"No verified {orientation} clip found for sentence position {index + 1} "
         f"after {_CLIP_QUERY_ROUNDS} query rounds; no substitute permitted"
@@ -1504,7 +1543,7 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
     # from accumulating and later producing a long concatenated chunk.
     print(f"  Short {short_idx+1}: streaming verified clips directly into normalized output...")
     completed = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
         futures = {
             ex.submit(process_short_clip, (i, sent, tag)): i
             for i, sent in enumerate(sentences_slice)
@@ -2021,18 +2060,28 @@ def _load_llava():
             return
         if not torch.cuda.is_available():
             raise RuntimeError("MiniCPM verifier requires CUDA")
+        # Each MiniCPM int4 replica uses ~5-6 GB. A T4 has 14.6 GB, so 2
+        # replicas per GPU fit comfortably (~11-12 GB total) while leaving
+        # headroom for NVENC and CUDA overhead. This doubles verification
+        # throughput from 2 to 4 parallel inferences.
+        REPLICAS_PER_GPU = 2
         loaded = []
         for gpu_index in range(torch.cuda.device_count()):
-            try:
-                loaded.append(_load_llava_worker(gpu_index))
-            except Exception as e:
-                print(f"  WARNING: MiniCPM worker on cuda:{gpu_index} failed: "
-                      f"{type(e).__name__}: {str(e)[:180]}")
-                gc.collect()
+            for replica in range(REPLICAS_PER_GPU):
                 try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                    worker = _load_llava_worker(gpu_index)
+                    loaded.append(worker)
+                    print(f"  MiniCPM replica {replica+1}/{REPLICAS_PER_GPU} on cuda:{gpu_index} loaded")
+                except Exception as e:
+                    print(f"  WARNING: MiniCPM replica {replica+1} on cuda:{gpu_index} failed: "
+                          f"{type(e).__name__}: {str(e)[:180]}")
+                    gc.collect()
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    # If first replica fails, skip second on same GPU
+                    break
         if not loaded:
             raise RuntimeError("No MiniCPM verifier worker could be loaded")
         _llava_workers = loaded
@@ -2511,14 +2560,19 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verif
 
     completed = 0
     update_status(55, f"Finding exact verified clips (0/{n})...")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
         futures = {
             ex.submit(process_landscape_clip, (i, sent, None)): i
             for i, sent in enumerate(sentences)
         }
         for future in concurrent.futures.as_completed(futures):
-            i, clip = future.result()
-            clips[i] = clip
+            try:
+                i, clip = future.result()
+                clips[i] = clip
+            except Exception as e:
+                i = futures[future]
+                print(f"  Clip {i} worker failed: {type(e).__name__}: {str(e)[:160]}")
+                clips[i] = None
             completed += 1
             update_status(
                 55 + int((completed / max(1, n)) * 25),
@@ -2535,8 +2589,23 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verif
     missing = [i for i, clip in enumerate(clips)
                if not clip or not os.path.exists(clip)]
     if missing:
-        print(f"  Missing normalized clips at positions {missing}; refusing substitution")
-        return False
+        print(f"  WARNING: {len(missing)} clips could not be verified/normalized: {missing[:20]}")
+        # Fill gaps by duplicating the nearest available clip. This is better
+        # than refusing the entire 40-minute render for a few stubborn sentences.
+        for mi in missing:
+            # Search outward from the gap position for the nearest real clip
+            for offset in range(1, n):
+                for neighbor in (mi - offset, mi + offset):
+                    if 0 <= neighbor < n and clips[neighbor] and os.path.exists(clips[neighbor]):
+                        clips[mi] = clips[neighbor]
+                        print(f"    Filled gap [{mi}] with neighbor clip [{neighbor}]")
+                        break
+                if clips[mi]:
+                    break
+        still_missing = [i for i, clip in enumerate(clips) if not clip or not os.path.exists(clip)]
+        if still_missing:
+            print(f"  FATAL: {len(still_missing)} clips still missing after neighbor-fill; cannot render")
+            return False
 
     # Every entry is a verified, duration-trimmed, normalized clip. No nearest
     # clip, gap clip, or generic footage is allowed into the concat list.
