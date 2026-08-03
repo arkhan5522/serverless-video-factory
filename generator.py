@@ -359,6 +359,82 @@ SHORT_DUR_TARGET = 60  # seconds, target length per short
 # ==========================================
 # 3. GROQ QUERY ENGINE (Sentence-Matched JSON)
 # ==========================================
+_LOCAL_QUERY_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+    "in", "into", "is", "it", "its", "of", "on", "or", "that", "the",
+    "their", "this", "to", "was", "were", "with", "about", "after",
+    "also", "como", "con", "del", "desde", "el", "ella", "ellos", "en",
+    "es", "esta", "este", "la", "las", "los", "para", "por", "que", "se",
+    "su", "sus", "una", "uno", "y", "al", "más", "más", "son", "un",
+}
+
+# These are deliberately broad, stock-findable visual categories. They are
+# only used for a sentence whose Groq response was missing or rejected after
+# all targeted retries; they never replace a valid Groq query.
+_LOCAL_QUERY_RULES = [
+    (("kidney", "renal", "blood", "toxin", "disease", "medical", "hospital",
+      "doctor", "anatomy", "health", "organ", "stone", "riñón", "sangre",
+      "enfermedad", "medicina", "salud"),
+     ("medical research laboratory", "medical anatomy illustration")),
+    (("technology", "software", "computer", "digital", "data", "internet",
+      "algorithm", "artificial", "intelligence", "device", "technology",
+      "tecnología", "computadora", "datos", "algoritmo", "inteligencia"),
+     ("technology server room", "digital computer screens")),
+    (("science", "scientific", "research", "laboratory", "molecule", "atom",
+      "experiment", "microscope", "ciencia", "investigación", "laboratorio"),
+     ("scientific laboratory research", "microscope laboratory closeup")),
+    (("economy", "economic", "market", "money", "finance", "financial", "bank",
+      "stock", "inflation", "economía", "mercado", "dinero", "finanzas"),
+     ("stock market trading screens", "financial data charts")),
+    (("climate", "carbon", "pollution", "environment", "warming", "emissions",
+      "clima", "contaminación", "ambiente"),
+     ("climate change satellite earth", "environmental research laboratory")),
+    (("city", "cities", "urban", "building", "construction", "architecture",
+      "ciudad", "ciudades", "urbano", "construcción", "arquitectura"),
+     ("aerial city construction", "urban buildings skyline")),
+    (("school", "education", "university", "study", "learning", "classroom",
+      "escuela", "educación", "universidad", "estudio"),
+     ("education books classroom", "school science laboratory")),
+    (("music", "song", "sound", "audio", "instrument", "música", "sonido"),
+     ("music studio instruments", "audio recording equipment")),
+    (("food", "cooking", "kitchen", "recipe", "agriculture", "farm", "comida",
+      "cocina", "agricultura", "granja"),
+     ("food preparation closeup", "agriculture farm footage")),
+    (("ocean", "sea", "water", "marine", "beach", "ocean", "océano", "mar",
+      "agua", "playa"),
+     ("ocean waves aerial", "underwater marine life")),
+    (("forest", "tree", "植物", "nature", "forest", "bosque", "naturaleza"),
+     ("forest aerial landscape", "nature closeup foliage")),
+    (("travel", "tourism", "journey", "airport", "hotel", "viaje", "turismo"),
+     ("travel destination landscape", "airport travel terminal")),
+    (("history", "ancient", "civilization", "museum", "historical", "historia",
+      "antigua", "civilización"),
+     ("historical architecture museum", "ancient ruins landscape")),
+]
+
+
+def _local_sentence_query_pair(sentence_text):
+    """Return aligned stock queries when Groq omits one sentence."""
+    text = str(sentence_text or "")
+    lowered = text.lower()
+    for triggers, pair in _LOCAL_QUERY_RULES:
+        if any(trigger in lowered for trigger in triggers):
+            return pair
+
+    # Last-resort queries still contain words from this exact sentence, rather
+    # than using a neighboring sentence or the old unrelated FALLBACK list.
+    words = re.findall(r"[A-Za-zÀ-ÿ0-9]+", lowered)
+    content = []
+    for word in words:
+        if (len(word) > 2 and word not in _LOCAL_QUERY_STOPWORDS
+                and word not in content and _safe(word)):
+            content.append(word)
+    if len(content) >= 2:
+        core = " ".join(content[:4])
+        return f"{core} documentary", f"{core} educational illustration"
+    return "educational concept illustration", "documentary concept visualization"
+
+
 def generate_queries_for_sentences(sentences):
     """
     Send ALL sentences to Groq, get back a mapping of each sentence to its
@@ -588,9 +664,29 @@ Both must be English, 3-6 words, camera-filmable, thematically tied to the exact
         missing_indices = [i for i, query in enumerate(all_queries) if not query]
 
     if missing_indices:
+        print(
+            "  WARNING: Groq still omitted sentence queries for positions "
+            f"{[i + 1 for i in missing_indices]}; using aligned local stock-query fallbacks"
+        )
+        for missing_idx in missing_indices:
+            primary, backup = _local_sentence_query_pair(
+                sentences[missing_idx]["text"]
+            )
+            all_queries[missing_idx] = primary
+            all_backups[missing_idx] = backup
+            print(
+                f"    Local fallback [{missing_idx + 1}]: "
+                f"'{primary}' / '{backup}'"
+            )
+
+    # This should be unreachable because the local fallback always returns two
+    # non-empty strings, but keep the invariant explicit if that helper is
+    # changed later.
+    still_missing = [i for i, query in enumerate(all_queries) if not query]
+    if still_missing:
         raise RuntimeError(
-            "Groq did not return sentence-specific queries for positions "
-            f"{[i + 1 for i in missing_indices]}; refusing unmatched visual substitutions"
+            "Unable to create aligned visual queries for sentence positions "
+            f"{[i + 1 for i in still_missing]}"
         )
     queries = list(all_queries)
     backups = [all_backups[i] if all_backups[i] else queries[i] for i in range(n)]
