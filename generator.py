@@ -51,6 +51,7 @@ for _module, _requirement in [
     ("librosa", "librosa"), ("scipy", "scipy"), ("soundfile", "soundfile"),
     ("accelerate", "accelerate"),
     ("av", "av"), ("decord", "decord==0.6.0"),
+    ("torchvision", "torchvision"), ("sentencepiece", "sentencepiece"),
     ("bitsandbytes", "bitsandbytes>=0.46.1"),
 ]:
     _ensure_package(_module, _requirement)
@@ -70,37 +71,20 @@ except PackageNotFoundError:
         subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "chatterbox-tts"],
                        check=False)
 
-# Chatterbox's current source pins Transformers 5.2.0, while Gemma 4
-# support was added in Transformers 5.5.0.  Keep one exact version that
-# provides both the Chatterbox backend APIs and Gemma4ForConditionalGeneration.
-# Do not allow a newer preinstalled Transformers build (for example 5.14.1)
-# to remain active: that is the build which produced the
-# `mistral-common` BACKENDS_MAPPING error during TTS loading.
-#
-# Transformers 5.5.0 requires huggingface_hub>=1.5.0 (for the Xet storage
-# layer). Kaggle's preinstalled hub version is older and lacks
-# `is_valid_xet_hash`, causing an ImportError at module init. Upgrade the
-# hub BEFORE force-reinstalling Transformers so the import succeeds.
+# Chatterbox's current source can leave a newer Transformers build installed.
+# Keep one exact version that avoids the `mistral-common`
+# BACKENDS_MAPPING regression reported with 5.14.x and remains compatible with
+# MiniCPM-V 4.5's custom Qwen3-based model code. MiniCPM's published config was
+# authored against 4.51.0, but its custom AutoModel code is compatible with the
+# 5.5.0 build already validated with Chatterbox in this pipeline.
 _TRANSFORMERS_REQUIRED = "5.5.0"
-_HUB_MINIMUM = "1.5.0"
-try:
-    _hub_version = _package_version("huggingface-hub")
-except PackageNotFoundError:
-    _hub_version = "0.0.0"
-# Compare major.minor.patch tuples to decide whether an upgrade is needed.
-def _version_tuple(v):
-    try:
-        return tuple(int(x) for x in v.split(".")[:3])
-    except (ValueError, AttributeError):
-        return (0, 0, 0)
-if _version_tuple(_hub_version) < _version_tuple(_HUB_MINIMUM):
-    print(f"  Upgrading huggingface_hub {_hub_version} -> >={_HUB_MINIMUM}")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--quiet",
-         f"huggingface_hub>={_HUB_MINIMUM}"],
-        check=True,
-    )
-
+_HUB_REQUIRED = "1.5.0"
+print(f"  Ensuring huggingface_hub=={_HUB_REQUIRED}...")
+subprocess.run(
+    [sys.executable, "-m", "pip", "install", "--quiet", "--no-deps",
+     "--force-reinstall", f"huggingface_hub=={_HUB_REQUIRED}"],
+    check=True,
+)
 try:
     _transformers_version = _package_version("transformers")
 except PackageNotFoundError:
@@ -112,7 +96,7 @@ if _transformers_version != _TRANSFORMERS_REQUIRED:
          "--force-reinstall", f"transformers=={_TRANSFORMERS_REQUIRED}"],
         check=True,
     )
-from transformers import Gemma4ForConditionalGeneration  # noqa: F401
+from transformers import AutoModel, AutoProcessor, AutoTokenizer  # noqa: F401
 
 _ensure_package("resemble_enhance", "resemble-enhance", ["--no-deps"])
 if shutil.which("ffmpeg") is None:
@@ -988,7 +972,7 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
     urls = _search_stock_urls(query, page, "portrait", _CLIP_CANDIDATES_PER_QUERY)
 
     # Each search call is bounded; the sentence worker keeps retrying with
-    # fresh pages and semantically tied variants until LLaVA accepts one.
+    # fresh pages and semantically tied variants until MiniCPM accepts one.
     for url in urls[:_CLIP_CANDIDATES_PER_QUERY]:
         try:
             raw = TEMP_DIR / f"raw_s{tag}_{idx}.mp4"
@@ -1003,7 +987,7 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
                 continue
 
             # Verify the raw vertical video before paying the normalization
-            # cost. Shorts use the same authoritative LLaVA checks as the
+            # cost. Shorts use the same authoritative MiniCPM checks as the
             # landscape pipeline.
             if verify:
                 matches = verify_clip_matches_query(raw, query)
@@ -1434,38 +1418,42 @@ def generate_audio(text, ref_audio, out_path):
 # ==========================================
 # 6. VIDEO ENGINE (GPU-Accelerated)
 # ==========================================
-# Gemma 4 E4B is the production local video verifier. One independent,
-# quantized model is loaded per visible GPU so two Kaggle T4s can verify clips
-# concurrently. Direct Decord frames avoid the slow path-based processor
-# decode used by the benchmark's original implementation.
-_llava_workers = []  # compatibility name; entries now contain Gemma workers
+# MiniCPM-V 4.5 is the production local video verifier. Use the official
+# pre-quantized NF4 checkpoint so one independent worker fits on each Kaggle
+# T4. The compatibility names are retained because the rest of the pipeline
+# already uses _llava_* worker/release functions.
+_llava_workers = []
 _llava_next_worker = 0
 _llava_worker_select_lock = threading.Lock()
 _llava_load_lock = threading.Lock()
 _gpu_lock = threading.Lock()
-_GEMMA_NUM_FRAMES = 4
-_GEMMA_MAX_NEW_TOKENS = 20
-_GEMMA_MODEL_PATH = "google/gemma-4-E4B-it"
-_GEMMA_DTYPE = torch.bfloat16
+_MINICPM_NUM_FRAMES = 4
+_MINICPM_MAX_NEW_TOKENS = 24
+_MINICPM_MODEL_PATH = "openbmb/MiniCPM-V-4_5-int4"
+# T4 uses float16 reliably; the checkpoint's embedded BNB config also uses
+# float16 compute. Do not request bfloat16 on this hardware.
+_MINICPM_DTYPE = torch.float16
+_MINICPM_TIME_SCALE = 0.1
+_MINICPM_PACKING = 4
 
 def _load_llava_worker(gpu_index):
-    """Load one Gemma E4B verifier pinned to a single CUDA device."""
-    from transformers import AutoProcessor, Gemma4ForConditionalGeneration, BitsAndBytesConfig
+    """Load one official MiniCPM-V 4.5 int4 verifier on one CUDA device."""
+    from transformers import AutoModel, AutoProcessor
 
     if gpu_index is None:
-        raise RuntimeError("Gemma verification requires a CUDA GPU")
+        raise RuntimeError("MiniCPM verification requires a CUDA GPU")
     device = f"cuda:{gpu_index}"
-    print(f"  Loading Gemma verifier on {device}...")
-    processor = AutoProcessor.from_pretrained(_GEMMA_MODEL_PATH, padding_side="left")
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=_GEMMA_DTYPE,
-        bnb_4bit_use_double_quant=True,
+    print(f"  Loading MiniCPM-V 4.5 int4 verifier on {device}...")
+    processor = AutoProcessor.from_pretrained(
+        _MINICPM_MODEL_PATH,
+        trust_remote_code=True,
     )
-    model = Gemma4ForConditionalGeneration.from_pretrained(
-        _GEMMA_MODEL_PATH,
-        quantization_config=quantization_config,
+    # The checkpoint config contains the official bitsandbytes NF4 settings.
+    # Passing device_map pins this independent model to exactly one GPU.
+    model = AutoModel.from_pretrained(
+        _MINICPM_MODEL_PATH,
+        trust_remote_code=True,
+        torch_dtype=_MINICPM_DTYPE,
         device_map={"": device},
         attn_implementation="sdpa",
     )
@@ -1475,10 +1463,10 @@ def _load_llava_worker(gpu_index):
         "device": torch.device(device),
         "model": model,
         "processor": processor,
+        "tokenizer": processor.tokenizer,
         "lock": threading.Lock(),
         "prepare_lock": threading.Lock(),
     }
-
 
 def _load_llava():
     global _llava_workers
@@ -1488,14 +1476,13 @@ def _load_llava():
         if _llava_workers:
             return
         if not torch.cuda.is_available():
-            raise RuntimeError("Gemma verifier requires CUDA")
-        gpu_indices = list(range(torch.cuda.device_count()))
+            raise RuntimeError("MiniCPM verifier requires CUDA")
         loaded = []
-        for gpu_index in gpu_indices:
+        for gpu_index in range(torch.cuda.device_count()):
             try:
                 loaded.append(_load_llava_worker(gpu_index))
             except Exception as e:
-                print(f"  WARNING: Gemma worker on cuda:{gpu_index} failed: "
+                print(f"  WARNING: MiniCPM worker on cuda:{gpu_index} failed: "
                       f"{type(e).__name__}: {str(e)[:180]}")
                 gc.collect()
                 try:
@@ -1503,74 +1490,64 @@ def _load_llava():
                 except Exception:
                     pass
         if not loaded:
-            raise RuntimeError("No Gemma verifier worker could be loaded")
+            raise RuntimeError("No MiniCPM verifier worker could be loaded")
         _llava_workers = loaded
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         devices = ", ".join(str(worker["device"]) for worker in loaded)
-        print(f"  Gemma verifier workers ready: {len(loaded)} ({devices}); "
-              f"{_GEMMA_NUM_FRAMES} direct Decord frames, {_GEMMA_MAX_NEW_TOKENS} output tokens")
-
+        print(f"  MiniCPM verifier workers ready: {len(loaded)} ({devices}); "
+              f"{_MINICPM_NUM_FRAMES} Decord frames, "
+              f"{_MINICPM_PACKING}-frame temporal packing, "
+              f"{_MINICPM_MAX_NEW_TOKENS} output tokens")
 
 def _next_llava_worker():
     global _llava_next_worker
     with _llava_worker_select_lock:
         if not _llava_workers:
-            raise RuntimeError("Gemma verifier workers are not loaded")
+            raise RuntimeError("MiniCPM verifier workers are not loaded")
         worker = _llava_workers[_llava_next_worker % len(_llava_workers)]
         _llava_next_worker += 1
         return worker
 
-
 def _prepare_llava_inputs(clip_path, prompt, processor):
-    """Decode exactly four frames with Decord and feed them directly to Gemma."""
+    """Sample four Decord frames and build MiniCPM temporal metadata."""
     import numpy as np
+    from PIL import Image
     from decord import VideoReader, cpu
 
     reader = VideoReader(str(clip_path), ctx=cpu(0), num_threads=1)
-    if len(reader) == 0:
+    frame_count = len(reader)
+    if frame_count == 0:
         raise RuntimeError("Decord returned an empty video")
-    indices = np.linspace(0, len(reader) - 1, _GEMMA_NUM_FRAMES, dtype=np.int64)
-    frames = reader.get_batch(indices).asnumpy()
-    del reader
-
-    conversation = [{
-        "role": "user",
-        "content": [
-            {"type": "video", "path": str(clip_path)},
-            {"type": "text", "text": prompt},
-        ],
-    }]
-    formatted = processor.apply_chat_template(
-        conversation,
-        add_generation_prompt=True,
-        tokenize=False,
+    indices = np.linspace(
+        0, frame_count - 1, _MINICPM_NUM_FRAMES, dtype=np.int64
     )
-    # Gemma's processor accepts a batch of videos; the outer list identifies
-    # this one clip, while frames is the sampled frame sequence.
-    try:
-        inputs = processor(
-            text=[formatted],
-            videos=[frames],
-            videos_kwargs={"do_sample_frames": False},
-            return_tensors="pt",
-        )
-    except Exception:
-        # Some Transformers revisions accept the direct frame array without
-        # the batch wrapper. Keep this fallback local and deterministic.
-        inputs = processor(
-            text=[formatted],
-            videos=frames,
-            videos_kwargs={"do_sample_frames": False},
-            return_tensors="pt",
-        )
+    frames = reader.get_batch(indices).asnumpy()
+    fps = float(reader.get_avg_fps() or 0.0)
+    del reader
+    if fps <= 0:
+        fps = 1.0
+    frame_images = [Image.fromarray(frame).convert("RGB") for frame in frames]
     del frames
-    return inputs
+
+    # MiniCPM-V 4.5 requires temporal_ids grouped in the same packing layout
+    # as the frame list. Four frames in one group lets its 3D resampler jointly
+    # reason over the whole candidate clip instead of treating frames as four
+    # unrelated still images.
+    timestamps = indices.astype(np.float32) / fps
+    temporal_ids = np.rint(timestamps / _MINICPM_TIME_SCALE).astype(np.int32)
+    temporal_ids = [[int(value) for value in temporal_ids.tolist()]]
+    return {"frames": frame_images, "temporal_ids": temporal_ids}
+
 
 
 def _verify_clip_matches_query_legacy(clip_path, query, filter_women=True):
+    """Compatibility alias for callers that used the previous verifier name."""
+    return verify_clip_matches_query(clip_path, query, filter_women=filter_women)
+
+    # Historical implementation retained below only as unreachable reference.
     """
-    Legacy LLaVA verifier retained only as historical code; production uses Gemma below.
+    Legacy MiniCPM verifier retained only as historical code; production uses MiniCPM below.
     just a single frame) actually matches the intended search query, AND
     whether it shows a woman (if filter_women is True) - combined into ONE
     model call for efficiency rather than two separate passes.
@@ -1643,13 +1620,13 @@ def _verify_clip_matches_query_legacy(clip_path, query, filter_women=True):
             with torch.inference_mode():
                 out = model.generate(
                     **inputs,
-                    max_new_tokens=_GEMMA_MAX_NEW_TOKENS,
+                    max_new_tokens=_MINICPM_MAX_NEW_TOKENS,
                     do_sample=False,
                     use_cache=True,
                     pad_token_id=processor.tokenizer.eos_token_id,
                 )
             generation_seconds = time.perf_counter() - generation_started
-            print(f"    LLaVA {device} timing: prepare={inputs_seconds:.1f}s generate={generation_seconds:.1f}s total={time.perf_counter() - verify_started:.1f}s")
+            print(f"    MiniCPM {device} timing: prepare={inputs_seconds:.1f}s generate={generation_seconds:.1f}s total={time.perf_counter() - verify_started:.1f}s")
 
             full_text = processor.batch_decode(
                 out, skip_special_tokens=True, clean_up_tokenization_spaces=False
@@ -1685,13 +1662,14 @@ def _verify_clip_matches_query_legacy(clip_path, query, filter_women=True):
 
 
 def verify_clip_matches_query(clip_path, query, filter_women=True):
-    """Verify one clip with Gemma E4B; return False on any uncertain answer."""
+    """Verify one clip with MiniCPM-V 4.5; reject every uncertain result."""
     verify_started = time.perf_counter()
     try:
         _load_llava()
         worker = _next_llava_worker()
     except Exception as e:
-        print(f"    Gemma verification unavailable ({str(e)[:100]}), rejecting clip (fail-closed)")
+        print(f"    MiniCPM verification unavailable ({str(e)[:100]}), "
+              "rejecting clip (fail-closed)")
         return False
 
     if filter_women:
@@ -1700,7 +1678,7 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
             '{"match":"YES" or "NO","woman":"YES" or "NO"}. '
             f'Does this video visually match the concept "{query}"? '
             'Set match to YES for a reasonable thematic match and NO only when clearly unrelated. '
-            'Set woman to YES only when a visible woman or women appear in the frames.'
+            'Set woman to YES only when a visible woman or women appear in any frame.'
         )
     else:
         prompt = (
@@ -1711,43 +1689,44 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
         )
 
     try:
+        # The processor is shared by no other task, but its preprocessing state
+        # is still protected because a worker may be selected by multiple clip
+        # threads over the lifetime of the run.
         with worker["prepare_lock"]:
             inputs_started = time.perf_counter()
-            inputs = _prepare_llava_inputs(clip_path, prompt, worker["processor"])
+            prepared = _prepare_llava_inputs(clip_path, prompt, worker["processor"])
             inputs_seconds = time.perf_counter() - inputs_started
 
+        frames = prepared["frames"]
+        temporal_ids = prepared["temporal_ids"]
+        msgs = [{"role": "user", "content": frames + [prompt]}]
+
+        # MiniCPM-V's custom chat API performs the processor conversion and
+        # generation together. Serialize that call per model replica, while
+        # allowing different GPU workers to run concurrently.
         with worker["lock"]:
-            model = worker["model"]
-            processor = worker["processor"]
-            device = worker["device"]
-            for key, value in list(inputs.items()):
-                if torch.is_tensor(value):
-                    dtype = _GEMMA_DTYPE if value.is_floating_point() else value.dtype
-                    inputs[key] = value.to(device=device, dtype=dtype, non_blocking=True)
-            input_len = inputs["input_ids"].shape[-1]
             generation_started = time.perf_counter()
             with torch.inference_mode():
-                output = model.generate(
-                    **inputs,
-                    max_new_tokens=_GEMMA_MAX_NEW_TOKENS,
-                    do_sample=False,
-                    use_cache=True,
-                    pad_token_id=processor.tokenizer.eos_token_id,
+                answer = worker["model"].chat(
+                    msgs=msgs,
+                    tokenizer=worker["tokenizer"],
+                    processor=worker["processor"],
+                    max_new_tokens=_MINICPM_MAX_NEW_TOKENS,
+                    sampling=False,
+                    max_slice_nums=1,
+                    use_image_id=False,
+                    temporal_ids=temporal_ids,
+                    enable_thinking=False,
                 )
             generation_seconds = time.perf_counter() - generation_started
-            generated = output[:, input_len:]
-            answer = processor.batch_decode(
-                generated,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )[0].strip()
 
         total_seconds = time.perf_counter() - verify_started
-        print(f"    Gemma {device} timing: prepare={inputs_seconds:.2f}s "
+        print(f"    MiniCPM {worker['device']} timing: prepare={inputs_seconds:.2f}s "
               f"generate={generation_seconds:.2f}s total={total_seconds:.2f}s")
 
+        answer = answer if isinstance(answer, str) else str(answer or "")
+        candidate = re.search(r"\{.*\}", answer, re.DOTALL)
         try:
-            candidate = re.search(r"\{.*\}", answer, re.DOTALL)
             data = json.loads(candidate.group(0)) if candidate else None
             match_value = str(data.get("match", "")).upper() if data else ""
             woman_value = str(data.get("woman", "")).upper() if data else ""
@@ -1755,17 +1734,17 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
             data = None
             match_value = ""
             woman_value = ""
+
         if match_value not in {"YES", "NO"} or woman_value not in {"YES", "NO"}:
-            print(f"    Gemma returned malformed verification JSON for '{query[:40]}'; rejecting")
+            print(f"    MiniCPM returned malformed verification JSON for "
+                  f"'{query[:40]}'; rejecting")
             return False
-        topic_match = match_value == "YES"
-        has_woman = filter_women and woman_value == "YES"
-        if has_woman:
+        if filter_women and woman_value == "YES":
             print(f"    Rejected clip for '{query[:40]}' (woman detected in frame)")
             return False
-        return topic_match
+        return match_value == "YES"
     except Exception as e:
-        print(f"    Gemma verification error for '{query[:40]}' "
+        print(f"    MiniCPM verification error for '{query[:40]}' "
               f"({type(e).__name__}: {str(e)[:100]}), rejecting clip (fail-closed)")
         return False
 
@@ -1792,7 +1771,7 @@ def _normalize_clip_with_recovery(raw_path, output_path, duration, vf, label):
         encoders.append(("NVENC", _enc_args()))
     # This is an automatic recovery path, not the normal path. It prevents a
     # transient/unsupported NVENC initialization from discarding every clip
-    # that LLaVA already accepted.
+    # that MiniCPM already accepted.
     encoders.append(("CPU fallback", ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]))
 
     for encoder_name, encoder in encoders:
@@ -1891,6 +1870,7 @@ def _release_llava_for_encoding():
         try:
             del worker["model"]
             del worker["processor"]
+            del worker["tokenizer"]
         except Exception:
             pass
     gc.collect()
@@ -1926,7 +1906,7 @@ def search_and_download(query, idx, duration, verify=True, page=1):
 
             if not verify:
                 # Main streaming path: return the raw download immediately.
-                # LLaVA will inspect it first; rejected candidates never pay
+                # MiniCPM will inspect it first; rejected candidates never pay
                 # the expensive normalization cost.
                 print(f"    Clip {idx} candidate {candidate_no}: download={download_seconds:.1f}s raw-ready={time.perf_counter() - candidate_started:.1f}s")
                 _mark_url_used(url)
@@ -2069,7 +2049,7 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verif
 
     # Final render: visual.mp4 is already normalized to 1920x1080, so do not
     # rescale the entire nine-minute stream again. Burn the logo/subtitles and
-    # encode with NVENC; Gemma remains resident when Shorts will reuse it.
+    # encode with NVENC; Qwen remains resident when Shorts will reuse it.
     if not keep_verifier:
         _release_llava_for_encoding()
     if USE_GPU:
@@ -2429,7 +2409,7 @@ update_status(54, "Processing video...")
 # the verification model into that freed VRAM, once, before any threads exist.
 try:
     _load_llava()
-    print(f"  Gemma verifier workers loaded before rendering: {len(_llava_workers)}")
+    print(f"  Qwen verifier workers loaded before rendering: {len(_llava_workers)}")
 except Exception as e:
     print(f"  ERROR: video verification workers failed to load ({str(e)[:120]}); refusing unverified output")
     update_status(0, "Video verification unavailable; render refused", "failed")
@@ -2494,7 +2474,7 @@ if render_video(sentences, audio, ass, logo, o2, keep_verifier=True):
                 prepared_shorts.append((si, short_audio, asset_future))
             short_asset_executor.shutdown(wait=False)
 
-            # Rendering remains sequential: each short uses the shared LLaVA
+            # Rendering remains sequential: each short uses the shared Qwen
             # workers and NVENC lock. The verifier models stay loaded between
             # Shorts so the next short does not pay the model-load cost again.
             short_upload_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
