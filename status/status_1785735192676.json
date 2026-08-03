@@ -1,1 +1,1 @@
-{"progress": 5, "message": "Script...", "status": "processing", "logs": "[05:37:36] Starting...\n[05:37:37] Script...", "timestamp": 1785735457.888336}
+{"progress": 0, "message": "Audio failed", "status": "failed", "logs": "[05:37:36] Starting...\n[05:37:37] Script...\n[05:37:38] Audio...\n[05:37:46] Audio failed", "timestamp": 1785735466.4857328}
