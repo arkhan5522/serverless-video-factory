@@ -10,6 +10,7 @@ VIDEO FACTORY V4 - PRODUCTION ENGINE
 """
 
 import os, subprocess, sys, re, time, random, shutil, json
+from importlib.metadata import version as _package_version, PackageNotFoundError
 # Force explicit reseed with high-entropy source. Kaggle kernels can
 # sometimes start with a low-entropy or reused random state between runs,
 # which was causing subtitle style selection to always pick the same
@@ -48,26 +49,16 @@ for _module, _requirement in [
     ("google.generativeai", "google-generativeai"), ("requests", "requests"),
     ("pydub", "pydub"), ("numpy", "numpy"), ("PIL", "pillow"),
     ("librosa", "librosa"), ("scipy", "scipy"), ("soundfile", "soundfile"),
-    ("transformers", "transformers>=4.57.0"), ("accelerate", "accelerate"),
+    ("accelerate", "accelerate"),
     ("av", "av"), ("decord", "decord==0.6.0"),
     ("bitsandbytes", "bitsandbytes>=0.46.1"),
 ]:
     _ensure_package(_module, _requirement)
-try:
-    from transformers import Gemma4ForConditionalGeneration  # noqa: F401
-except Exception:
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
-         "transformers>=4.57.0"],
-        check=True,
-    )
 
-# Chatterbox V3 is installed only when absent; a warm Kaggle image no longer
-# clones the GitHub repository on every run.
 try:
-    import chatterbox  # noqa: F401
+    _package_version("chatterbox-tts")
     print("  chatterbox-tts already available")
-except Exception:
+except PackageNotFoundError:
     print("  Installing chatterbox-tts from GitHub (master) for V3 support...")
     _cb_installed = subprocess.run(
         [sys.executable, "-m", "pip", "install", "--quiet",
@@ -78,6 +69,26 @@ except Exception:
         print("  git install failed, falling back to PyPI chatterbox-tts")
         subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "chatterbox-tts"],
                        check=False)
+
+# Chatterbox's current source pins Transformers 5.2.0, while Gemma 4
+# support was added in Transformers 5.5.0.  Keep one exact version that
+# provides both the Chatterbox backend APIs and Gemma4ForConditionalGeneration.
+# Do not allow a newer preinstalled Transformers build (for example 5.14.1)
+# to remain active: that is the build which produced the
+# `mistral-common` BACKENDS_MAPPING error during TTS loading.
+_TRANSFORMERS_REQUIRED = "5.5.0"
+try:
+    _transformers_version = _package_version("transformers")
+except PackageNotFoundError:
+    _transformers_version = None
+if _transformers_version != _TRANSFORMERS_REQUIRED:
+    print(f"  Pinning Transformers {_transformers_version or 'missing'} -> {_TRANSFORMERS_REQUIRED}")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--quiet", "--no-deps",
+         "--force-reinstall", f"transformers=={_TRANSFORMERS_REQUIRED}"],
+        check=True,
+    )
+from transformers import Gemma4ForConditionalGeneration  # noqa: F401
 
 _ensure_package("resemble_enhance", "resemble-enhance", ["--no-deps"])
 if shutil.which("ffmpeg") is None:
