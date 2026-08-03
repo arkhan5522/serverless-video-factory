@@ -24,58 +24,65 @@ from pathlib import Path
 # ==========================================
 print("--- Installing Dependencies ---")
 
-# Core deps (fast, safe)
-subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
-    "groq", "assemblyai", "google-generativeai", "requests",
-    "pydub", "numpy", "pillow", "librosa", "scipy"
-])
-
-# TTS engine (needs torch>=2.6 which is already on Kaggle GPU image)
-# NOTE: PyPI's chatterbox-tts (0.1.7 as of this writing) does NOT have the
-# t3_model= kwarg needed for the V3 multilingual checkpoint - that only
-# exists on the GitHub master branch (confirmed by inspecting the actual
-# wheel contents). Install from source to get real V3 support.
-# LLaVA-OneVision-Qwen2-7B is the only local video verifier. The optimized
-# production path uses direct Decord frame sampling and keeps all visual
-# decisions in this authoritative 7B model; no secondary video model is run.
-_vision_deps = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-    "transformers>=4.49.0", "accelerate", "av", "decord==0.6.0",
-    "bitsandbytes"],
-    capture_output=True, text=True)
-if _vision_deps.returncode != 0:
-    print(f"  WARNING: vision verification dependencies failed to install - "
-          f"clip verification will not work this run: {_vision_deps.stderr[-300:]}")
-else:
+# Kaggle images often already contain most of these packages. Reinstalling
+# them unconditionally cost roughly five minutes on every job, so only invoke
+# pip when the import is genuinely missing. This keeps fresh kernels correct
+# without paying the install cost on warm/prebuilt images.
+def _ensure_package(module_name, requirement, extra_args=None):
     try:
-        import av as _av_check
-        print(f"  Vision verification deps OK (PyAV {_av_check.__version__})")
-    except ImportError as e:
-        print(f"  WARNING: PyAV still not importable after install ({e}) - "
-              f"verification will silently fail open for every clip this run")
+        __import__(module_name)
+        return True
+    except Exception:
+        args = [sys.executable, "-m", "pip", "install", "--quiet"]
+        if extra_args:
+            args.extend(extra_args)
+        args.append(requirement)
+        result = subprocess.run(args, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  WARNING: could not install {requirement}: {(result.stderr or '')[-300:]}")
+            return False
+        return True
 
+for _module, _requirement in [
+    ("groq", "groq"), ("assemblyai", "assemblyai"),
+    ("google.generativeai", "google-generativeai"), ("requests", "requests"),
+    ("pydub", "pydub"), ("numpy", "numpy"), ("PIL", "pillow"),
+    ("librosa", "librosa"), ("scipy", "scipy"), ("soundfile", "soundfile"),
+    ("transformers", "transformers>=4.57.0"), ("accelerate", "accelerate"),
+    ("av", "av"), ("decord", "decord==0.6.0"),
+    ("bitsandbytes", "bitsandbytes>=0.46.1"),
+]:
+    _ensure_package(_module, _requirement)
+try:
+    from transformers import Gemma4ForConditionalGeneration  # noqa: F401
+except Exception:
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
+         "transformers>=4.57.0"],
+        check=True,
+    )
 
-print("  Installing chatterbox-tts from GitHub (master) for V3 support...")
-_cb_installed = subprocess.run(
-    [sys.executable, "-m", "pip", "install", "--quiet",
-     "git+https://github.com/resemble-ai/chatterbox.git"],
-    capture_output=True, text=True
-)
-if _cb_installed.returncode != 0:
-    print("  git install failed, falling back to PyPI chatterbox-tts (no V3 t3_model support)")
-    print(f"  (reason: {_cb_installed.stderr.strip()[-300:]})")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
-        "chatterbox-tts"
-    ])
-else:
-    print("  chatterbox-tts installed from source (V3-capable)")
+# Chatterbox V3 is installed only when absent; a warm Kaggle image no longer
+# clones the GitHub repository on every run.
+try:
+    import chatterbox  # noqa: F401
+    print("  chatterbox-tts already available")
+except Exception:
+    print("  Installing chatterbox-tts from GitHub (master) for V3 support...")
+    _cb_installed = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--quiet",
+         "git+https://github.com/resemble-ai/chatterbox.git"],
+        capture_output=True, text=True
+    )
+    if _cb_installed.returncode != 0:
+        print("  git install failed, falling back to PyPI chatterbox-tts")
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "chatterbox-tts"],
+                       check=False)
 
-# Resemble Enhance - install WITHOUT deps to avoid torch version conflicts
-subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-    "--no-deps", "resemble-enhance"], capture_output=True)
-subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-    "librosa", "scipy", "soundfile"], capture_output=True)
-
-subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg", shell=True, capture_output=True)
+_ensure_package("resemble_enhance", "resemble-enhance", ["--no-deps"])
+if shutil.which("ffmpeg") is None:
+    subprocess.run("apt-get update -qq && apt-get install -qq -y ffmpeg",
+                   shell=True, capture_output=True)
 
 import torch, torchaudio
 import assemblyai as aai
@@ -198,7 +205,7 @@ def generate_queries_for_sentences(sentences):
     from groq import Groq
     client = Groq(api_key=GROQ_KEY)
 
-    BATCH_SIZE = 40
+    BATCH_SIZE = 50
     all_queries = [None] * n
     all_backups = [None] * n
 
@@ -292,11 +299,11 @@ RULES:
     # otherwise healthy; re-request only those exact global sentence numbers
     # instead of aborting immediately or inserting generic footage.
     missing_indices = [i for i, query in enumerate(all_queries) if not query]
-    for recovery_round in range(1, 4):
+    for recovery_round in range(1, 3):
         if not missing_indices:
             break
         print(f"  Groq: recovering {len(missing_indices)} missing sentence queries "
-              f"(attempt {recovery_round}/3)...")
+              f"(attempt {recovery_round}/2)...")
         requested = set(missing_indices)
         numbered_missing = "\n".join(
             f"{i + 1}. {sentences[i]['text'][:140]}" for i in missing_indices
@@ -348,9 +355,57 @@ Rules:
             print(f"  Groq recovery attempt {recovery_round} failed: {e}")
         missing_indices = [i for i, query in enumerate(all_queries) if not query]
 
-    # A missing primary query is not safe to replace with generic footage:
-    # that would break sentence-to-visual alignment. A missing backup may
-    # repeat the primary because it remains semantically tied to the sentence.
+    # Final precision recovery: batch recovery can still omit one stubborn
+    # sentence. Ask for each remaining sentence individually, which removes
+    # numbering ambiguity without ever inserting a generic substitute.
+    missing_indices = [i for i, query in enumerate(all_queries) if not query]
+    for precision_round in range(1, 3):
+        if not missing_indices:
+            break
+        print(f"  Groq: precision recovery for {len(missing_indices)} sentence(s) "
+              f"(attempt {precision_round}/2)...")
+        for global_idx in list(missing_indices):
+            try:
+                precision = client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": """You are selecting one exact stock-footage query for one narration sentence.
+Return exactly two lines and nothing else:
+1. primary query
+1b. backup query
+
+Both must be English, 3-6 words, camera-filmable, thematically tied to the exact sentence, and safe for stock footage. Do not use generic or unrelated nature, ocean, space, landscape, people, women, religion, violence, or NSFW filler."""},
+                        {"role": "user", "content":
+                         f"Sentence {global_idx + 1}: {sentences[global_idx]['text'][:220]}"},
+                    ],
+                    model="openai/gpt-oss-120b",
+                    max_tokens=120,
+                    temperature=0.1,
+                )
+                text = precision.choices[0].message.content or ""
+                primary = None
+                backup = None
+                for line in text.strip().split("\n"):
+                    line = line.strip()
+                    mb = re.match(r'^\s*1b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
+                    if mb:
+                        candidate = mb.group(1).strip().strip('"\'')
+                        if 3 < len(candidate) < 60 and _safe(candidate):
+                            backup = candidate
+                        continue
+                    m = re.match(r'^\s*1[\.\)\-]\s*(.+)$', line)
+                    if m:
+                        candidate = m.group(1).strip().strip('"\'')
+                        if 3 < len(candidate) < 60 and _safe(candidate):
+                            primary = candidate
+                if primary:
+                    all_queries[global_idx] = primary
+                    all_backups[global_idx] = backup or primary
+                    print(f"  Groq: precision recovered sentence {global_idx + 1}")
+            except Exception as e:
+                print(f"  Groq: precision recovery failed for sentence {global_idx + 1}: "
+                      f"{type(e).__name__}: {str(e)[:100]}")
+        missing_indices = [i for i, query in enumerate(all_queries) if not query]
+
     if missing_indices:
         raise RuntimeError(
             "Groq did not return sentence-specific queries for positions "
@@ -1344,67 +1399,49 @@ def generate_audio(text, ref_audio, out_path):
 # ==========================================
 # 6. VIDEO ENGINE (GPU-Accelerated)
 # ==========================================
-# Local video verification model (LLaVA-OneVision-Qwen2-7B, 4-bit).
-# Replaces the earlier Groq vision-based single-frame check and the unused
-# SmolVLM2 experiment. This model was directly tested in Colab against real
-# clips and remains the authoritative query-matching and woman/person check.
-# Query GENERATION still uses Groq (openai/gpt-oss-120b) unchanged, since
-# that part works well and wasn't the problem.
-# Each verifier owns one model instance on one explicit CUDA device. Two
-# independent instances are required so both T4s can run verification work.
-_llava_workers = []
+# Gemma 4 E4B is the production local video verifier. One independent,
+# quantized model is loaded per visible GPU so two Kaggle T4s can verify clips
+# concurrently. Direct Decord frames avoid the slow path-based processor
+# decode used by the benchmark's original implementation.
+_llava_workers = []  # compatibility name; entries now contain Gemma workers
 _llava_next_worker = 0
 _llava_worker_select_lock = threading.Lock()
 _llava_load_lock = threading.Lock()
-_gpu_lock = threading.Lock()  # protects short NVENC normalization/final encoding
-# Verifier workers use per-model locks; encoding uses the separate _gpu_lock.
+_gpu_lock = threading.Lock()
+_GEMMA_NUM_FRAMES = 4
+_GEMMA_MAX_NEW_TOKENS = 20
+_GEMMA_MODEL_PATH = "google/gemma-4-E4B-it"
+_GEMMA_DTYPE = torch.bfloat16
 
 def _load_llava_worker(gpu_index):
-    from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration, BitsAndBytesConfig
+    """Load one Gemma E4B verifier pinned to a single CUDA device."""
+    from transformers import AutoProcessor, Gemma4ForConditionalGeneration, BitsAndBytesConfig
 
-    model_path = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
     if gpu_index is None:
-        device = "cpu"
-        load_kwargs = {"device_map": "cpu", "torch_dtype": torch.float32, "low_cpu_mem_usage": True}
-    else:
-        device = f"cuda:{gpu_index}"
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16, bnb_4bit_use_double_quant=True,
-        )
-        load_kwargs = {
-            "quantization_config": quantization_config,
-            "device_map": {"": device},
-            "torch_dtype": torch.float16,
-            "low_cpu_mem_usage": True,
-        }
-
-    print(f"  Loading LLaVA verifier on {device} (independent worker)...")
-    processor = AutoProcessor.from_pretrained(model_path)
-    model = None
-    selected_attention = "default"
-    try:
-        import flash_attn  # noqa: F401
-        model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-            model_path, attn_implementation="flash_attention_2", **load_kwargs
-        )
-        selected_attention = "flash_attention_2"
-    except Exception as flash_error:
-        print(f"    {device}: Flash Attention 2 unavailable ({type(flash_error).__name__}); trying SDPA")
-        try:
-            model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-                model_path, attn_implementation="sdpa", **load_kwargs
-            )
-            selected_attention = "sdpa"
-        except Exception as sdpa_error:
-            print(f"    {device}: SDPA unavailable ({type(sdpa_error).__name__}); using default attention")
-            model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-                model_path, **load_kwargs
-            )
+        raise RuntimeError("Gemma verification requires a CUDA GPU")
+    device = f"cuda:{gpu_index}"
+    print(f"  Loading Gemma verifier on {device}...")
+    processor = AutoProcessor.from_pretrained(_GEMMA_MODEL_PATH, padding_side="left")
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=_GEMMA_DTYPE,
+        bnb_4bit_use_double_quant=True,
+    )
+    model = Gemma4ForConditionalGeneration.from_pretrained(
+        _GEMMA_MODEL_PATH,
+        quantization_config=quantization_config,
+        device_map={"": device},
+        attn_implementation="sdpa",
+    )
     model.eval()
     return {
-        "gpu_index": gpu_index, "device": torch.device(device), "model": model,
-        "processor": processor, "lock": threading.Lock(), "attention": selected_attention,
+        "gpu_index": gpu_index,
+        "device": torch.device(device),
+        "model": model,
+        "processor": processor,
+        "lock": threading.Lock(),
+        "prepare_lock": threading.Lock(),
     }
 
 
@@ -1415,49 +1452,53 @@ def _load_llava():
     with _llava_load_lock:
         if _llava_workers:
             return
-        gpu_indices = list(range(min(2, torch.cuda.device_count()))) if torch.cuda.is_available() else [None]
+        if not torch.cuda.is_available():
+            raise RuntimeError("Gemma verifier requires CUDA")
+        gpu_indices = list(range(torch.cuda.device_count()))
         loaded = []
         for gpu_index in gpu_indices:
             try:
                 loaded.append(_load_llava_worker(gpu_index))
             except Exception as e:
-                print(f"  WARNING: LLaVA worker on {gpu_index} failed: {type(e).__name__}: {str(e)[:180]}")
+                print(f"  WARNING: Gemma worker on cuda:{gpu_index} failed: "
+                      f"{type(e).__name__}: {str(e)[:180]}")
                 gc.collect()
-                if torch.cuda.is_available():
-                    try: torch.cuda.empty_cache()
-                    except Exception: pass
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
         if not loaded:
-            raise RuntimeError("No LLaVA verifier worker could be loaded")
+            raise RuntimeError("No Gemma verifier worker could be loaded")
         _llava_workers = loaded
-        if torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
         devices = ", ".join(str(worker["device"]) for worker in loaded)
-        print(f"  LLaVA verifier workers ready: {len(loaded)} ({devices}); "
-              f"{_LLAVA_NUM_FRAMES} frames, {_LLAVA_MAX_NEW_TOKENS} output tokens")
+        print(f"  Gemma verifier workers ready: {len(loaded)} ({devices}); "
+              f"{_GEMMA_NUM_FRAMES} direct Decord frames, {_GEMMA_MAX_NEW_TOKENS} output tokens")
 
 
 def _next_llava_worker():
     global _llava_next_worker
     with _llava_worker_select_lock:
         if not _llava_workers:
-            raise RuntimeError("LLaVA verifier workers are not loaded")
+            raise RuntimeError("Gemma verifier workers are not loaded")
         worker = _llava_workers[_llava_next_worker % len(_llava_workers)]
         _llava_next_worker += 1
         return worker
 
 
-# LLaVA video settings validated in the optimized Colab benchmark.
-# Four frames and a short deterministic answer reached approximately 1.0-1.3s
-# steady-state generation on a T4 while preserving the tested clip verdicts.
-_LLAVA_NUM_FRAMES = 4
-_LLAVA_MAX_NEW_TOKENS = 8
-_llava_direct_video_failed = False
-
-
 def _prepare_llava_inputs(clip_path, prompt, processor):
-    """Prepare exactly four video frames, with a path-based fallback."""
-    global _llava_direct_video_failed
+    """Decode exactly four frames with Decord and feed them directly to Gemma."""
+    import numpy as np
+    from decord import VideoReader, cpu
+
+    reader = VideoReader(str(clip_path), ctx=cpu(0), num_threads=1)
+    if len(reader) == 0:
+        raise RuntimeError("Decord returned an empty video")
+    indices = np.linspace(0, len(reader) - 1, _GEMMA_NUM_FRAMES, dtype=np.int64)
+    frames = reader.get_batch(indices).asnumpy()
+    del reader
+
     conversation = [{
         "role": "user",
         "content": [
@@ -1465,68 +1506,36 @@ def _prepare_llava_inputs(clip_path, prompt, processor):
             {"type": "text", "text": prompt},
         ],
     }]
-
-    try:
-        # Match the validated Colab path: decode only the selected frames with
-        # Decord, then pass those frames to the processor so the video is not
-        # decoded and sampled a second time by Transformers.
-        if not _llava_direct_video_failed:
-            import numpy as np
-            from decord import VideoReader, cpu
-            reader = VideoReader(str(clip_path), ctx=cpu(0), num_threads=1)
-            if len(reader) == 0:
-                raise RuntimeError("Decord returned an empty video")
-            indices = np.linspace(
-                0, len(reader) - 1, _LLAVA_NUM_FRAMES, dtype=np.int64
-            )
-            frames = reader.get_batch(indices).asnumpy()
-            direct_conversation = [{
-                "role": "user",
-                "content": [
-                    {"type": "video", "video": frames},
-                    {"type": "text", "text": prompt},
-                ],
-            }]
-            formatted = processor.apply_chat_template(
-                direct_conversation,
-                add_generation_prompt=True,
-                tokenize=False,
-            )
-            inputs = processor(
-                text=[formatted],
-                videos=frames,
-                videos_kwargs={"do_sample_frames": False},
-                return_tensors="pt",
-            )
-            del frames, reader
-            return inputs
-    except Exception as e:
-        if not _llava_direct_video_failed:
-            print(f"    Direct Decord LLaVA preparation unavailable ({type(e).__name__}: {str(e)[:120]}) - using path fallback")
-        _llava_direct_video_failed = True
-
-    # Fallback remains explicit and warning-free on current Transformers:
-    # format the chat separately, then pass video sampling options to the
-    # processor's video kwargs rather than through apply_chat_template(**kwargs).
     formatted = processor.apply_chat_template(
         conversation,
         add_generation_prompt=True,
         tokenize=False,
     )
-    return processor(
-        text=[formatted],
-        videos=[str(clip_path)],
-        videos_kwargs={
-            "num_frames": _LLAVA_NUM_FRAMES,
-            "do_sample_frames": True,
-        },
-        return_tensors="pt",
-    )
+    # Gemma's processor accepts a batch of videos; the outer list identifies
+    # this one clip, while frames is the sampled frame sequence.
+    try:
+        inputs = processor(
+            text=[formatted],
+            videos=[frames],
+            videos_kwargs={"do_sample_frames": False},
+            return_tensors="pt",
+        )
+    except Exception:
+        # Some Transformers revisions accept the direct frame array without
+        # the batch wrapper. Keep this fallback local and deterministic.
+        inputs = processor(
+            text=[formatted],
+            videos=frames,
+            videos_kwargs={"do_sample_frames": False},
+            return_tensors="pt",
+        )
+    del frames
+    return inputs
 
 
-def verify_clip_matches_query(clip_path, query, filter_women=True):
+def _verify_clip_matches_query_legacy(clip_path, query, filter_women=True):
     """
-    Ask the local LLaVA-OneVision model whether the given video CLIP (not
+    Legacy LLaVA verifier retained only as historical code; production uses Gemma below.
     just a single frame) actually matches the intended search query, AND
     whether it shows a woman (if filter_women is True) - combined into ONE
     model call for efficiency rather than two separate passes.
@@ -1599,7 +1608,7 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
             with torch.inference_mode():
                 out = model.generate(
                     **inputs,
-                    max_new_tokens=_LLAVA_MAX_NEW_TOKENS,
+                    max_new_tokens=_GEMMA_MAX_NEW_TOKENS,
                     do_sample=False,
                     use_cache=True,
                     pad_token_id=processor.tokenizer.eos_token_id,
@@ -1637,6 +1646,92 @@ def verify_clip_matches_query(clip_path, query, filter_women=True):
         # accuracy-first decision: reject this clip so the caller tries
         # the next candidate rather than silently accepting an unverified one.
         print(f"    Visual verification error for '{query[:40]}' ({str(e)[:60]}), rejecting clip (fail-closed)")
+        return False
+
+
+def verify_clip_matches_query(clip_path, query, filter_women=True):
+    """Verify one clip with Gemma E4B; return False on any uncertain answer."""
+    verify_started = time.perf_counter()
+    try:
+        _load_llava()
+        worker = _next_llava_worker()
+    except Exception as e:
+        print(f"    Gemma verification unavailable ({str(e)[:100]}), rejecting clip (fail-closed)")
+        return False
+
+    if filter_women:
+        prompt = (
+            'Return exactly one JSON object and no other text: '
+            '{"match":"YES" or "NO","woman":"YES" or "NO"}. '
+            f'Does this video visually match the concept "{query}"? '
+            'Set match to YES for a reasonable thematic match and NO only when clearly unrelated. '
+            'Set woman to YES only when a visible woman or women appear in the frames.'
+        )
+    else:
+        prompt = (
+            'Return exactly one JSON object and no other text: '
+            '{"match":"YES" or "NO","woman":"NO"}. '
+            f'Does this video visually match the concept "{query}"? '
+            'Set match to YES for a reasonable thematic match and NO only when clearly unrelated.'
+        )
+
+    try:
+        with worker["prepare_lock"]:
+            inputs_started = time.perf_counter()
+            inputs = _prepare_llava_inputs(clip_path, prompt, worker["processor"])
+            inputs_seconds = time.perf_counter() - inputs_started
+
+        with worker["lock"]:
+            model = worker["model"]
+            processor = worker["processor"]
+            device = worker["device"]
+            for key, value in list(inputs.items()):
+                if torch.is_tensor(value):
+                    dtype = _GEMMA_DTYPE if value.is_floating_point() else value.dtype
+                    inputs[key] = value.to(device=device, dtype=dtype, non_blocking=True)
+            input_len = inputs["input_ids"].shape[-1]
+            generation_started = time.perf_counter()
+            with torch.inference_mode():
+                output = model.generate(
+                    **inputs,
+                    max_new_tokens=_GEMMA_MAX_NEW_TOKENS,
+                    do_sample=False,
+                    use_cache=True,
+                    pad_token_id=processor.tokenizer.eos_token_id,
+                )
+            generation_seconds = time.perf_counter() - generation_started
+            generated = output[:, input_len:]
+            answer = processor.batch_decode(
+                generated,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+
+        total_seconds = time.perf_counter() - verify_started
+        print(f"    Gemma {device} timing: prepare={inputs_seconds:.2f}s "
+              f"generate={generation_seconds:.2f}s total={total_seconds:.2f}s")
+
+        try:
+            candidate = re.search(r"\{.*\}", answer, re.DOTALL)
+            data = json.loads(candidate.group(0)) if candidate else None
+            match_value = str(data.get("match", "")).upper() if data else ""
+            woman_value = str(data.get("woman", "")).upper() if data else ""
+        except (ValueError, TypeError, AttributeError):
+            data = None
+            match_value = ""
+            woman_value = ""
+        if match_value not in {"YES", "NO"} or woman_value not in {"YES", "NO"}:
+            print(f"    Gemma returned malformed verification JSON for '{query[:40]}'; rejecting")
+            return False
+        topic_match = match_value == "YES"
+        has_woman = filter_women and woman_value == "YES"
+        if has_woman:
+            print(f"    Rejected clip for '{query[:40]}' (woman detected in frame)")
+            return False
+        return topic_match
+    except Exception as e:
+        print(f"    Gemma verification error for '{query[:40]}' "
+              f"({type(e).__name__}: {str(e)[:100]}), rejecting clip (fail-closed)")
         return False
 
 
@@ -1849,7 +1944,7 @@ def prepare_clip_candidate(args):
 # ==========================================
 # 7. RENDER ENGINE (GPU-Accelerated)
 # ==========================================
-def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
+def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verifier=False):
     global _nvenc_runtime_failed
     n = len(sentences)
     clips = [None] * n
@@ -1871,10 +1966,12 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
                 f"Exact clips verified and normalized ({completed}/{n})...",
             )
 
-    _release_llava_for_encoding()
+    if not keep_verifier:
+        _release_llava_for_encoding()
     if USE_GPU:
         _nvenc_runtime_failed = False
-        print("  Verifier workers released before final encoding")
+        print(f"  Verifier workers "
+              f"{'retained through final encoding' if keep_verifier else 'released before final encoding'}")
 
     missing = [i for i, clip in enumerate(clips)
                if not clip or not os.path.exists(clip)]
@@ -1937,12 +2034,13 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub):
 
     # Final render: visual.mp4 is already normalized to 1920x1080, so do not
     # rescale the entire nine-minute stream again. Burn the logo/subtitles and
-    # encode with NVENC after LLaVA has been released. If the runtime encoder
-    # still cannot initialize, retry the exact same render with CPU x264.
-    _release_llava_for_encoding()
+    # encode with NVENC; Gemma remains resident when Shorts will reuse it.
+    if not keep_verifier:
+        _release_llava_for_encoding()
     if USE_GPU:
         _nvenc_runtime_failed = False
-        print("  Final render: GPU memory cleared; attempting NVENC")
+        print(f"  Final render: verifier workers "
+              f"{'retained for Shorts' if keep_verifier else 'released;'} attempting NVENC")
 
     update_status(85, "Rendering final video (1080p + subs)...")
     ass_esc = str(ass_path).replace('\\','/').replace(':','\\\\:')
@@ -2296,7 +2394,7 @@ update_status(54, "Processing video...")
 # the verification model into that freed VRAM, once, before any threads exist.
 try:
     _load_llava()
-    print(f"  LLaVA verifier workers loaded before rendering: {len(_llava_workers)}")
+    print(f"  Gemma verifier workers loaded before rendering: {len(_llava_workers)}")
 except Exception as e:
     print(f"  ERROR: video verification workers failed to load ({str(e)[:120]}); refusing unverified output")
     update_status(0, "Video verification unavailable; render refused", "failed")
@@ -2304,7 +2402,7 @@ except Exception as e:
 
 o2 = OUTPUT_DIR/f"final_{JOB_ID}_WITH_SUBS.mp4"
 
-if render_video(sentences, audio, ass, logo, o2):
+if render_video(sentences, audio, ass, logo, o2, keep_verifier=True):
     update_status(93, "Uploading main video while preparing Shorts...")
     main_upload_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     main_upload_future = main_upload_executor.submit(upload_drive, o2)
@@ -2428,6 +2526,8 @@ if render_video(sentences, audio, ass, logo, o2):
         except Exception as e:
             print(f"  Shorts pipeline error: {e}")
 
+    if _llava_workers:
+        _release_llava_for_encoding()
     l2 = main_upload_future.result()
     main_upload_executor.shutdown(wait=True)
     if l2:
