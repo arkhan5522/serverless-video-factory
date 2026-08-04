@@ -520,112 +520,71 @@ def _local_sentence_query_pair(sentence_text):
     return "educational concept illustration", "documentary concept visualization"
 
 def _local_sentence_query_options(sentence_text):
-    """Build five distinct, sentence-aligned options without another API call."""
+    """Build a pool of distinct, sentence-aligned options without an API call.
+
+    Return more than the five final options because the caller also removes
+    duplicates against any partial Groq response. The previous implementation
+    padded by repeating its last option, so that de-duplication could leave a
+    sentence with fewer than five usable queries and abort the whole job.
+    """
     primary, backup = _local_sentence_query_pair(sentence_text)
-    candidates = [
-        primary,
-        backup,
-        f"{primary} closeup",
-        f"{backup} cinematic",
-        f"{primary} wide shot",
+    bases = [primary, backup]
+    suffixes = [
+        "", " closeup", " wide shot", " cinematic", " detail",
+        " documentary", " macro", " aerial view", " laboratory view",
+        " educational visual",
     ]
     options = []
-    for candidate in candidates:
-        candidate = re.sub(r"\s+", " ", str(candidate)).strip()
-        if 3 < len(candidate) < 60 and _safe(candidate) and candidate not in options:
-            options.append(candidate)
-    while len(options) < 5:
-        options.append(options[-1] if options else "educational concept illustration")
-    return options[:5]
+
+    def _add_variants(base):
+        base = re.sub(r"\s+", " ", str(base)).strip()
+        if not (3 < len(base) < 60 and _safe(base)):
+            return
+        for suffix in suffixes:
+            candidate = re.sub(r"\s+", " ", f"{base}{suffix}").strip()
+            if (3 < len(candidate) < 60 and _safe(candidate)
+                    and candidate not in options):
+                options.append(candidate)
+
+    for base in bases:
+        _add_variants(base)
+
+    # If the sentence contains restricted or unusable terms, retain a safe
+    # educational fallback rather than reusing an unsafe query or a neighboring
+    # sentence. These bases also provide enough unused variants when a partial
+    # Groq response happens to overlap the sentence-specific local terms.
+    for base in [
+        "educational concept illustration",
+        "documentary visual explanation",
+        "scientific concept diagram",
+        "abstract educational visualization",
+    ]:
+        _add_variants(base)
+
+    return options
 
 # ==========================================
-# openai/gpt-oss-120b is a REASONING model. Its internal reasoning tokens are
-# emitted before the visible answer and are drawn from the SAME completion
-# budget. With a small budget the model spends everything reasoning and returns
-# message.content == "" with finish_reason == "length" - the silent empty-batch
-# failure seen previously ("only parsed 0/8 queries. Raw model output: ''").
-# Three things prevent it:
-#   1. reasoning_effort="low" keeps the reasoning chain short.
-#   2. reasoning_format="hidden" returns only the final answer.
-#   3. max_completion_tokens (max_tokens is deprecated) sized for reasoning
-#      plus the real output.
-# Requests are additionally paced against the account's tokens-per-minute
-# ceiling, because this org is on the on_demand tier (observed limit 8000 TPM),
-# where an oversized or too-frequent request is rejected with HTTP 413.
-# Model choice: GPT-OSS-20B generates at ~1000 tokens/sec vs 120B's ~500
-# tokens/sec (per Groq's published model specs), roughly halving the wall-clock
-# cost of every batched query-matching and fresh-query-recovery call while
-# staying on the same 250K-token context and TPM-tier rules as 120B. The
-# structured, short-output query-generation task here does not need 120B's
-# extra reasoning depth, so the speed trade is a clear win for this pipeline.
+# Groq reasoning model configuration
+# ==========================================
+# The entire sentence set is sent in one request. There is deliberately no
+# client-side token reservation, request pacing, request ceiling, or output
+# cap: Groq receives the complete request immediately and controls any
+# provider-side limits itself. Hidden low-effort reasoning keeps the response
+# focused without adding local delays.
 _GROQ_MODEL = "openai/gpt-oss-20b"
-try:
-    _GROQ_TPM_LIMIT = max(2000, int(os.environ.get("GROQ_TPM_LIMIT", "8000")))
-except (TypeError, ValueError):
-    _GROQ_TPM_LIMIT = 8000
-# One request must stay clear of the ceiling on its own, not just on average.
-_GROQ_REQUEST_CEILING = int(_GROQ_TPM_LIMIT * 0.85)
-_groq_window_lock = threading.Lock()
-_groq_window = []          # [(charged_at, tokens)] over a trailing 60s window
 _groq_reasoning_supported = True
 
 
-def _groq_estimate_tokens(messages):
-    """Conservative prompt estimate (~3 chars/token plus per-message overhead)."""
-    chars = sum(len(str(message.get("content", ""))) for message in messages)
-    return int(chars / 3) + 32 * len(messages) + 16
-
-
-def _groq_reserve_budget(tokens_needed, label):
-    """Block until tokens_needed fits in the trailing 60-second TPM window."""
-    while True:
-        with _groq_window_lock:
-            now = time.time()
-            _groq_window[:] = [(ts, tk) for ts, tk in _groq_window if now - ts < 60.0]
-            used = sum(tk for _, tk in _groq_window)
-            # `not _groq_window` guarantees forward progress: a single request
-            # larger than the window can still be attempted rather than
-            # deadlocking the pipeline here.
-            if used + tokens_needed <= _GROQ_TPM_LIMIT or not _groq_window:
-                _groq_window.append((now, tokens_needed))
-                return
-            oldest = min(ts for ts, _ in _groq_window)
-            sleep_for = min(30.0, max(0.5, 60.0 - (now - oldest) + 0.25))
-        print(f"  Groq: pacing {label} {sleep_for:.1f}s "
-              f"({used}+{tokens_needed} tokens vs {_GROQ_TPM_LIMIT} TPM)")
-        time.sleep(sleep_for)
-
-
-def _groq_record_actual(reserved, actual):
-    """Charge any usage beyond the reservation so pacing tracks reality."""
-    if actual and actual > reserved:
-        with _groq_window_lock:
-            _groq_window.append((time.time(), actual - reserved))
-
-
-def _groq_complete(client, messages, label, max_completion_tokens,
-                   temperature, attempts=2):
-    """Run one Groq chat completion and always return a string (never None).
-
-    Retries once with a larger completion budget when the model returns empty
-    content, which is the signature of the budget being consumed by reasoning.
-    """
+def _groq_complete(client, messages, label, temperature, attempts=2):
+    """Run one Groq chat completion and always return a string (never None)."""
     global _groq_reasoning_supported
 
-    prompt_estimate = _groq_estimate_tokens(messages)
-    budget = max(256, int(max_completion_tokens))
     attempt = 0
     while attempt < attempts:
         attempt += 1
-        ceiling = max(256, _GROQ_REQUEST_CEILING - prompt_estimate)
-        budget = min(budget, ceiling)
-        reserved = prompt_estimate + budget
-        _groq_reserve_budget(reserved, label)
-
         kwargs = {
             "messages": messages,
             "model": _GROQ_MODEL,
-            "max_completion_tokens": budget,
             "temperature": temperature,
         }
         if _groq_reasoning_supported:
@@ -641,14 +600,12 @@ def _groq_complete(client, messages, label, max_completion_tokens,
                       f"({str(error)[:120]}); retrying without them")
                 _groq_reasoning_supported = False
                 attempt -= 1
-                budget = min(max(budget * 2, budget + 512), ceiling)
                 continue
             print(f"  Groq {label}: TypeError: {str(error)[:160]}")
             return ""
         except Exception as error:
             message_text = str(error)
-            lowered = message_text.lower()
-            if _groq_reasoning_supported and "reasoning" in lowered:
+            if _groq_reasoning_supported and "reasoning" in message_text.lower():
                 print(f"  Groq: server rejected reasoning controls "
                       f"({message_text[:120]}); retrying without them")
                 _groq_reasoning_supported = False
@@ -656,9 +613,6 @@ def _groq_complete(client, messages, label, max_completion_tokens,
                 continue
             print(f"  Groq {label} attempt {attempt}/{attempts} failed: "
                   f"{type(error).__name__}: {message_text[:180]}")
-            if "rate_limit" in lowered or "413" in message_text or "429" in message_text:
-                # Charge the full reservation and let the window drain.
-                time.sleep(min(20.0, 5.0 * attempt))
             if attempt >= attempts:
                 return ""
             continue
@@ -670,41 +624,24 @@ def _groq_complete(client, messages, label, max_completion_tokens,
         usage = getattr(response, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        total_tokens = int(getattr(usage, "total_tokens", 0) or
-                           (prompt_tokens + completion_tokens))
-        _groq_record_actual(reserved, total_tokens)
 
         if text.strip():
             return text
 
-        # Empty content: report the fields that identify WHY before retrying,
-        # so a future failure is never silent again.
+        # Empty content: report the fields that identify WHY before retrying.
         reasoning_text = str(getattr(message, "reasoning", None) or "")
         print(f"  Groq {label}: empty content on attempt {attempt}/{attempts} "
               f"(finish_reason={finish_reason}, prompt_tokens={prompt_tokens}, "
-              f"completion_tokens={completion_tokens}, budget={budget}, "
+              f"completion_tokens={completion_tokens}, "
               f"reasoning_chars={len(reasoning_text)})")
         if attempt >= attempts:
             break
-        # finish_reason == "length" with no content means reasoning ate the
-        # budget; a near-exhausted budget means the same thing.
-        if finish_reason == "length" or completion_tokens >= budget * 0.8:
-            grown = min(max(budget * 2, budget + 768), ceiling)
-            if grown <= budget:
-                print(f"  Groq {label}: completion budget already at the "
-                      f"per-request ceiling ({budget}); cannot grow further")
-                break
-            print(f"  Groq {label}: raising completion budget {budget} -> {grown}")
-            budget = grown
-        else:
-            time.sleep(1.5)
     return ""
 
 
-# Compact system prompt. The previous version was ~900 tokens and was resent on
-# EVERY batch, which alone consumed most of an 8000 TPM minute and forced the
-# request pacing/413 failures. The stock-scarcity guidance that drives query
-# quality is retained; only the redundant prose was removed.
+# Compact system prompt. The previous version repeated redundant prose in
+# multiple requests; the stock-scarcity guidance is retained while the main
+# sentence-matching request remains a single all-at-once call.
 _STOCK_QUERY_SYSTEM_PROMPT = """You write stock-footage search queries for Pexels/Pixabay narration sentences.
 
 Return one raw JSON object only. Each key is the exact 1-based sentence number and
@@ -745,12 +682,8 @@ def generate_queries_for_sentences(sentences):
     client = Groq(api_key=GROQ_KEY)
 
     # One unified request is intentional: all primary and fallback options are
-    # generated together, eliminating the old TPM-heavy batch/recovery loop.
+    # generated together, eliminating the old multi-request recovery loop.
     BATCH_SIZE = n
-
-    def _query_output_budget(sentence_count):
-        # Five short JSON strings per sentence plus a modest reasoning allowance.
-        return min(5600, 768 + sentence_count * 48)
 
     all_queries = [None] * n
     all_backups = [None] * n
@@ -770,7 +703,6 @@ def generate_queries_for_sentences(sentences):
                      "content": f"Generate five aligned stock queries for every sentence below:\n\n{numbered}"},
                 ],
                 label=f"unified all-sentences ({len(batch)})",
-                max_completion_tokens=_query_output_budget(len(batch)),
                 temperature=0.35,
                 attempts=1,
             )
@@ -924,16 +856,10 @@ _CLIP_QUERY_ROUNDS = 1  # all five options arrive in the single unified Groq cal
 _CLIP_CANDIDATES_PER_QUERY = 5
 
 
-# With many concurrent clip workers (e.g. 20), each calling Groq separately
-# for one unmatched sentence at a time was the dominant runtime cost: every
-# call paid a full ~437-token system prompt plus reserved completion budget,
-# and 8000 TPM only allows ~6-7 such calls per minute. A real run showed 174
-# of these single-sentence calls, which at ~1200 tokens each requires a
-# theoretical minimum of ~26 minutes purely from TPM pacing - almost exactly
-# matching the observed 20.6-minute clip-finding phase. Batching concurrent
-# recovery requests into ONE shared Groq call amortizes the fixed prompt cost
-# across many sentences and cuts total token usage (and therefore pacing
-# waits) by roughly the batch size.
+# Concurrent workers previously asked Groq separately for each unmatched
+# sentence. Batching concurrent recovery requests into ONE shared Groq call
+# reduces provider request count and amortizes the fixed prompt work across
+# several sentences, without introducing client-side request pacing.
 _fresh_query_batch_lock = threading.Lock()
 _fresh_query_pending = []  # list of dicts, see _request_fresh_sentence_queries
 _FRESH_QUERY_BATCH_WINDOW = 1.5  # seconds to collect concurrent requests
@@ -956,7 +882,6 @@ def _run_fresh_query_batch(batch):
                 f"{i + 1}. Previously failed: {previous}"
             )
         numbered = "\n".join(numbered_lines)
-        budget = min(2200, 420 + 220 * len(batch))
         text = _groq_complete(
             client,
             [
@@ -977,7 +902,6 @@ Rules:
                 {"role": "user", "content": f"Recover queries for these unmatched sentences:\n\n{numbered}"}
             ],
             label=f"batched fresh-query recovery ({len(batch)} sentences)",
-            max_completion_tokens=budget,
             temperature=0.65,
         )
         parsed_primary = {}
@@ -1085,8 +1009,8 @@ def generate_short_scripts(sentences, topic, n_shorts, target_seconds=60):
     Returns a list of dicts: {"script": str, "theme": str}
     """
     words_target = int(target_seconds / 60 * 150)  # ~150 wpm normal pace
-    # Capped so prompt + completion stay inside one request's TPM ceiling; the
-    # model only needs enough source material to pick hooks from.
+    # Keep the source excerpt bounded so short-script selection stays focused;
+    # this is prompt-content selection, not client-side request throttling.
     full_text = " ".join(s['text'] for s in sentences)[:8000]
 
     def _fallback_scripts():
@@ -1133,9 +1057,6 @@ Format exactly like this:
                 {"role": "user", "content": f"Source script:\n\n{full_text}\n\nWrite {n_shorts} standalone short scripts as JSON."}
             ],
             label="short-script writer",
-            # Each script is ~200 output tokens; leave room for all of them
-            # plus a short hidden reasoning chain.
-            max_completion_tokens=min(4096, 900 + n_shorts * 320),
             temperature=0.75,
         )
 
