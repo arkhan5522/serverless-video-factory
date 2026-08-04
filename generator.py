@@ -566,56 +566,63 @@ def _local_sentence_query_options(sentence_text):
 # ==========================================
 # Groq reasoning model configuration
 # ==========================================
-# The entire sentence set is sent in one request. There is deliberately no
-# client-side token reservation, request pacing, request ceiling, or output
-# cap: Groq receives the complete request immediately and controls any
-# provider-side limits itself. Hidden low-effort reasoning keeps the response
-# focused without adding local delays.
-_GROQ_MODEL = "openai/gpt-oss-20b"
-_groq_reasoning_supported = True
+# Query generation is split across two independent model requests. Each
+# request has a bounded output size so the pair stays below the provider's
+# 8,000-TPM organization limit; there is no client-side pacing or waiting.
+_GROQ_MODELS = ("openai/gpt-oss-20b", "openai/gpt-oss-120b")
+_QUERY_BATCH_MAX_COMPLETION_TOKENS = 2200
 
 
-def _groq_complete(client, messages, label, temperature, attempts=2):
-    """Run one Groq chat completion and always return a string (never None)."""
-    global _groq_reasoning_supported
-
+def _groq_complete(client, messages, label, temperature, model,
+                   max_completion_tokens=None, attempts=2):
+    """Run one Groq completion and always return text, never None."""
     attempt = 0
     while attempt < attempts:
         attempt += 1
         kwargs = {
             "messages": messages,
-            "model": _GROQ_MODEL,
+            "model": model,
             "temperature": temperature,
         }
-        if _groq_reasoning_supported:
-            kwargs["reasoning_effort"] = "low"
-            kwargs["reasoning_format"] = "hidden"
+        if max_completion_tokens is not None:
+            kwargs["max_completion_tokens"] = max_completion_tokens
+        kwargs["reasoning_effort"] = "low"
+        kwargs["reasoning_format"] = "hidden"
 
         try:
             response = client.chat.completions.create(**kwargs)
         except TypeError as error:
-            # Older groq SDKs do not accept the reasoning kwargs at all.
-            if _groq_reasoning_supported:
-                print(f"  Groq: SDK rejected reasoning controls "
-                      f"({str(error)[:120]}); retrying without them")
-                _groq_reasoning_supported = False
-                attempt -= 1
-                continue
-            print(f"  Groq {label}: TypeError: {str(error)[:160]}")
-            return ""
+            # Older SDKs may not accept the reasoning controls. Retry this
+            # request without them, without changing its model or prompt.
+            if "reasoning_effort" in kwargs:
+                kwargs.pop("reasoning_effort", None)
+                kwargs.pop("reasoning_format", None)
+                try:
+                    response = client.chat.completions.create(**kwargs)
+                except Exception as retry_error:
+                    print(f"  Groq {label}: retry without reasoning controls failed: "
+                          f"{type(retry_error).__name__}: {str(retry_error)[:180]}")
+                    return ""
+            else:
+                print(f"  Groq {label}: TypeError: {str(error)[:160]}")
+                return ""
         except Exception as error:
             message_text = str(error)
-            if _groq_reasoning_supported and "reasoning" in message_text.lower():
-                print(f"  Groq: server rejected reasoning controls "
-                      f"({message_text[:120]}); retrying without them")
-                _groq_reasoning_supported = False
-                attempt -= 1
+            if "reasoning" in message_text.lower():
+                kwargs.pop("reasoning_effort", None)
+                kwargs.pop("reasoning_format", None)
+                try:
+                    response = client.chat.completions.create(**kwargs)
+                except Exception as retry_error:
+                    print(f"  Groq {label}: retry without reasoning controls failed: "
+                          f"{type(retry_error).__name__}: {str(retry_error)[:180]}")
+                    return ""
+            else:
+                print(f"  Groq {label} attempt {attempt}/{attempts} failed: "
+                      f"{type(error).__name__}: {message_text[:180]}")
+                if attempt >= attempts:
+                    return ""
                 continue
-            print(f"  Groq {label} attempt {attempt}/{attempts} failed: "
-                  f"{type(error).__name__}: {message_text[:180]}")
-            if attempt >= attempts:
-                return ""
-            continue
 
         choice = response.choices[0] if getattr(response, "choices", None) else None
         message = getattr(choice, "message", None)
@@ -624,24 +631,19 @@ def _groq_complete(client, messages, label, temperature, attempts=2):
         usage = getattr(response, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-
+        print(f"  Groq {label}: model={model}, finish={finish_reason}, "
+              f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
+              f"content_chars={len(text)}")
         if text.strip():
             return text
-
-        # Empty content: report the fields that identify WHY before retrying.
-        reasoning_text = str(getattr(message, "reasoning", None) or "")
-        print(f"  Groq {label}: empty content on attempt {attempt}/{attempts} "
-              f"(finish_reason={finish_reason}, prompt_tokens={prompt_tokens}, "
-              f"completion_tokens={completion_tokens}, "
-              f"reasoning_chars={len(reasoning_text)})")
         if attempt >= attempts:
             break
     return ""
 
 
-# Compact system prompt. The previous version repeated redundant prose in
-# multiple requests; the stock-scarcity guidance is retained while the main
-# sentence-matching request remains a single all-at-once call.
+# Compact system prompt shared by both model batches. The main sentence set is
+# split before the requests so neither model is asked to emit hundreds of
+# entries in one completion.
 _STOCK_QUERY_SYSTEM_PROMPT = """You write stock-footage search queries for Pexels/Pixabay narration sentences.
 
 Return one raw JSON object only. Each key is the exact 1-based sentence number and
@@ -661,13 +663,13 @@ Rules for every query:
 
 
 def generate_queries_for_sentences(sentences):
-    """Generate five aligned visual-search options for every sentence in one
-    unified Groq request.
+    """Generate five aligned visual queries using two parallel Groq batches.
 
-    The function returns one list of five queries per sentence. No recovery
-    Groq calls are made; missing or malformed entries are filled with
-    same-sentence local options so alignment is never lost and the clip finder
-    always has five attempts available.
+    The sentence list is split in half before the API calls. GPT-OSS-20B and
+    GPT-OSS-120B process their halves concurrently, keeping each request small
+    enough for the provider's 8,000-TPM organization limit. A partial, empty,
+    refused, or malformed response never shifts sentence alignment: every
+    missing entry is filled from the same sentence's local fallback pool.
     """
     if not GROQ_KEY or not sentences:
         raise RuntimeError(
@@ -675,134 +677,126 @@ def generate_queries_for_sentences(sentences):
             "refusing to use generic footage"
         )
 
-    n = len(sentences)
-    print(f"  Groq: matching {n} sentences to visuals...")
-
     from groq import Groq
-    client = Groq(api_key=GROQ_KEY)
 
-    # One unified request is intentional: all primary and fallback options are
-    # generated together, eliminating the old multi-request recovery loop.
-    BATCH_SIZE = n
+    n = len(sentences)
+    midpoint = max(1, (n + 1) // 2)
+    batches = [
+        (0, sentences[:midpoint], _GROQ_MODELS[0]),
+        (midpoint, sentences[midpoint:], _GROQ_MODELS[1]),
+    ]
+    batches = [item for item in batches if item[1]]
+    print(f"  Groq: matching {n} sentences with {len(batches)} parallel batches "
+          f"({_GROQ_MODELS[0]} + {_GROQ_MODELS[1]})...")
 
-    all_queries = [None] * n
-    all_backups = [None] * n
-
-    for batch_start in range(0, n, BATCH_SIZE):
-        batch = sentences[batch_start:batch_start + BATCH_SIZE]
-        # Numbered locally within the batch (1..len(batch)) - offset back to
-        # global index when parsing, so per-batch parsing stays simple.
-        numbered = "\n".join([f"{i+1}. {s['text'][:140]}" for i, s in enumerate(batch)])
-
+    def _parse_batch_result(raw_result, batch):
+        """Return local sentence index -> cleaned option list."""
+        raw_result = (raw_result or "").strip()
+        parsed = None
         try:
-            result = _groq_complete(
-                client,
-                [
-                    {"role": "system", "content": _STOCK_QUERY_SYSTEM_PROMPT},
-                    {"role": "user",
-                     "content": f"Generate five aligned stock queries for every sentence below:\n\n{numbered}"},
-                ],
-                label=f"unified all-sentences ({len(batch)})",
-                temperature=0.35,
-                attempts=1,
-            )
+            parsed = json.loads(raw_result)
+        except (TypeError, ValueError):
+            match = re.search(r"\{.*\}", raw_result, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except (TypeError, ValueError):
+                    parsed = None
 
-            # Parse keyed JSON so a missing sentence can never shift every
-            # later query onto the wrong sentence. Keep a line fallback for
-            # older SDK/model formatting behavior.
-            parsed_count = 0
-            raw_result = (result or "").strip()
-            parsed = None
+        parsed_options = {}
+        if isinstance(parsed, dict):
+            for key, values in parsed.items():
+                try:
+                    local_idx = int(str(key)) - 1
+                except (TypeError, ValueError):
+                    continue
+                if not 0 <= local_idx < len(batch):
+                    continue
+                if isinstance(values, str):
+                    values = [values]
+                if not isinstance(values, list):
+                    continue
+                cleaned_options = []
+                for value in values:
+                    cleaned = re.sub(r"\s+", " ", str(value)).strip().strip('"\'')
+                    if (3 < len(cleaned) < 60 and _safe(cleaned)
+                            and cleaned not in cleaned_options):
+                        cleaned_options.append(cleaned)
+                if cleaned_options:
+                    parsed_options[local_idx] = cleaned_options[:5]
+
+        # A numbered-line fallback is useful when a model emits valid content
+        # but ignores the raw-JSON-only instruction. It only fills entries not
+        # already recovered from keyed JSON.
+        if not parsed_options:
+            for line in raw_result.splitlines():
+                match = re.match(r'^\s*(\d+)[\.:\)\-]\s*(.+)$', line)
+                if not match:
+                    continue
+                local_idx = int(match.group(1)) - 1
+                cleaned = re.sub(r"\s+", " ", match.group(2)).strip().strip('"\'')
+                if (0 <= local_idx < len(batch) and 3 < len(cleaned) < 60
+                        and _safe(cleaned)):
+                    parsed_options[local_idx] = [cleaned]
+        return parsed_options
+
+    def _run_batch(batch_start, batch, model):
+        numbered = "\n".join(
+            f"{i + 1}. {sentence['text'][:140]}"
+            for i, sentence in enumerate(batch)
+        )
+        client = Groq(api_key=GROQ_KEY)
+        result = _groq_complete(
+            client,
+            [
+                {"role": "system", "content": _STOCK_QUERY_SYSTEM_PROMPT},
+                {"role": "user", "content":
+                 "Generate five aligned stock queries for every sentence below. "
+                 "The numbering is local to this batch:\n\n" + numbered},
+            ],
+            label=f"query batch {batch_start + 1}-{batch_start + len(batch)}",
+            temperature=0.35,
+            model=model,
+            max_completion_tokens=_QUERY_BATCH_MAX_COMPLETION_TOKENS,
+            attempts=1,
+        )
+        parsed = _parse_batch_result(result, batch)
+        print(f"  Groq {model}: parsed {len(parsed)}/{len(batch)} batch sentences")
+        if len(parsed) < len(batch):
+            print(f"    Raw model output (first 300 chars): {(result or '')[:300]!r}")
+        return batch_start, parsed
+
+    parsed_by_global_index = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(batches)) as executor:
+        futures = [executor.submit(_run_batch, *batch_info) for batch_info in batches]
+        for future in concurrent.futures.as_completed(futures):
             try:
-                parsed = json.loads(raw_result)
-            except (TypeError, ValueError):
-                match = re.search(r"\{.*\}", raw_result, re.DOTALL)
-                if match:
-                    try:
-                        parsed = json.loads(match.group(0))
-                    except (TypeError, ValueError):
-                        parsed = None
+                batch_start, parsed = future.result()
+                for local_idx, options in parsed.items():
+                    parsed_by_global_index[batch_start + local_idx] = options
+            except Exception as error:
+                print(f"  Groq parallel query batch failed: {type(error).__name__}: "
+                      f"{str(error)[:180]}")
 
-            if isinstance(parsed, dict):
-                for key, values in parsed.items():
-                    try:
-                        local_idx = int(str(key)) - 1
-                    except (TypeError, ValueError):
-                        continue
-                    if not 0 <= local_idx < len(batch):
-                        continue
-                    if isinstance(values, str):
-                        values = [values]
-                    if not isinstance(values, list):
-                        continue
-                    cleaned_options = []
-                    for value in values:
-                        cleaned = re.sub(r"\s+", " ", str(value)).strip().strip('"\'')
-                        if (3 < len(cleaned) < 60 and _safe(cleaned)
-                                and cleaned not in cleaned_options):
-                            cleaned_options.append(cleaned)
-                    if cleaned_options:
-                        all_queries[batch_start + local_idx] = cleaned_options[0]
-                        all_backups[batch_start + local_idx] = cleaned_options[1:5]
-                        parsed_count += 1
-
-            if not parsed_count:
-                for line in raw_result.splitlines():
-                    match = re.match(r'^\s*(\d+)[\.:\)\-]\s*(.+)$', line)
-                    if not match:
-                        continue
-                    local_idx = int(match.group(1)) - 1
-                    cleaned = match.group(2).strip().strip('"\'')
-                    if (0 <= local_idx < len(batch) and 3 < len(cleaned) < 60
-                            and _safe(cleaned)):
-                        all_queries[batch_start + local_idx] = cleaned
-                        all_backups[batch_start + local_idx] = []
-                        parsed_count += 1
-
-            if parsed_count < len(batch):
-                print(f"  WARNING: unified Groq response covered {parsed_count}/{len(batch)} "
-                      "sentences; local same-sentence options will fill the gaps")
-                print(f"    Raw model output (first 300 chars): {raw_result[:300]!r}")
-
-        except Exception as e:
-            print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
-            # leave this batch's entries as None -> filled by fallback below
-
-    # No recovery Groq calls: the unified request is deliberately the only
-    # query-generation API call. Local aligned options fill omissions below.
-
-    # Normalize every sentence to exactly five usable options. Groq options
-    # remain first; local options only fill missing/invalid tail entries.
+    query_options = []
     for sentence_idx, sentence in enumerate(sentences):
         options = []
-        primary = all_queries[sentence_idx]
-        if primary:
-            options.append(str(primary).strip())
-        raw_backups = all_backups[sentence_idx]
-        if isinstance(raw_backups, str):
-            raw_backups = [raw_backups]
-        for candidate in raw_backups or []:
+        for candidate in parsed_by_global_index.get(sentence_idx, []):
             candidate = str(candidate).strip()
             if (3 < len(candidate) < 60 and _safe(candidate)
                     and candidate not in options):
                 options.append(candidate)
-        for candidate in _local_sentence_query_options(sentence["text"]):
-            if candidate not in options:
-                options.append(candidate)
+        options.extend(
+            candidate for candidate in _local_sentence_query_options(sentence["text"])
+            if candidate not in options
+        )
         if len(options) < 5:
             raise RuntimeError(
                 f"Unable to create five aligned visual queries for sentence {sentence_idx + 1}"
             )
-        all_queries[sentence_idx] = options[0]
-        all_backups[sentence_idx] = options[1:5]
-
-    # Show matching for debug, including the complete fallback headroom.
-    query_options = []
-    for i in range(len(sentences)):
-        options = [all_queries[i]] + all_backups[i]
-        query_options.append(options)
-        if i < 3:
-            print(f"    [{i+1}] '{sentences[i]['text'][:35]}...' -> {options}")
+        query_options.append(options[:5])
+        if sentence_idx < 3:
+            print(f"    [{sentence_idx + 1}] '{sentence['text'][:35]}...' -> {options[:5]}")
 
     return query_options
 
@@ -852,7 +846,7 @@ def _sentence_query_variants(attempts):
 # A bounded search is essential: stock providers expose finite pages, and
 # cycling already-used URLs forever can otherwise keep a Kaggle job alive for
 # hours. The five aligned options are generated before clip search begins.
-_CLIP_QUERY_ROUNDS = 1  # all five options arrive in the single unified Groq call
+_CLIP_QUERY_ROUNDS = 1  # all five options arrive from the two parallel Groq batches
 _CLIP_CANDIDATES_PER_QUERY = 5
 
 
@@ -903,6 +897,9 @@ Rules:
             ],
             label=f"batched fresh-query recovery ({len(batch)} sentences)",
             temperature=0.65,
+            model=_GROQ_MODELS[0],
+            max_completion_tokens=600,
+            attempts=1,
         )
         parsed_primary = {}
         parsed_backup = {}
@@ -1058,6 +1055,9 @@ Format exactly like this:
             ],
             label="short-script writer",
             temperature=0.75,
+            model=_GROQ_MODELS[1],
+            max_completion_tokens=1400,
+            attempts=1,
         )
 
         raw = (r or "").strip()
@@ -1562,8 +1562,8 @@ def _find_verified_normalized_clip(sent, index, orientation, tag=""):
                 print(f"    {orientation.title()} clip {index}: candidate error "
                       f"({type(e).__name__}: {str(e)[:100]})")
 
-        # All five options were generated in the single unified request. No
-        # per-sentence Groq refresh is performed after this bounded pass.
+        # All five options were generated by the two parallel batch requests.
+        # No per-sentence Groq refresh is performed after this bounded pass.
         break
 
     # All query rounds exhausted without a verified+normalized clip. Instead
@@ -1853,14 +1853,22 @@ def generate_audio(text, ref_audio, out_path):
     print(f"  TTS: {'Spanish (V3)' if IS_SPANISH else 'English'} on {device}")
     _log_resource_snapshot("TTS start")
     try:
-        # Use one Chatterbox model replica per available GPU so long-form
-        # narration chunks generate concurrently instead of only ever using
-        # cuda:0. TTS was previously the single largest single-GPU-only
-        # phase (~600s for a ~10-minute script) while the second T4 sat
-        # completely idle. This mirrors the same per-device-worker pattern
-        # already used for MiniCPM verification elsewhere in this file.
+        # Load multiple independent replicas per GPU. Chatterbox generation is
+        # autoregressive, so one replica cannot saturate a T4 while another
+        # T4 is idle; two replicas per GPU lets the scheduler keep both cards
+        # busy without assuming every GPU has enough VRAM for an unlimited
+        # number of copies. Every extra load has a free-VRAM gate and an OOM
+        # fallback, so smaller or already-occupied GPUs simply use fewer.
         gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
         candidate_devices = [f"cuda:{i}" for i in range(gpu_count)] if gpu_count else [device]
+        try:
+            tts_replicas_per_gpu = max(1, int(os.environ.get("TTS_REPLICAS_PER_GPU", "2")))
+        except (TypeError, ValueError):
+            tts_replicas_per_gpu = 2
+        try:
+            tts_min_free_gb = max(1.0, float(os.environ.get("TTS_MIN_FREE_GB", "4.0")))
+        except (TypeError, ValueError):
+            tts_min_free_gb = 4.0
 
         def _load_tts_model(dev):
             if IS_SPANISH:
@@ -1878,13 +1886,36 @@ def generate_audio(text, ref_audio, out_path):
 
         models = []
         devices_used = []
-        for dev in candidate_devices:
-            try:
-                models.append(_load_tts_model(dev))
-                devices_used.append(dev)
-            except Exception as e:
-                print(f"  TTS: could not load a model replica on {dev} "
-                      f"({str(e)[:100]}); continuing without it")
+        for gpu_index, dev in enumerate(candidate_devices):
+            replicas_on_device = 0
+            for replica_index in range(tts_replicas_per_gpu):
+                if gpu_count:
+                    try:
+                        free_bytes, _total_bytes = torch.cuda.mem_get_info(gpu_index)
+                        free_gb = free_bytes / (1024 ** 3)
+                    except Exception:
+                        free_gb = 0.0
+                    if free_gb < tts_min_free_gb:
+                        print(f"  TTS: skipping replica {replica_index + 1} on {dev} "
+                              f"({free_gb:.1f} GB free, need >= {tts_min_free_gb:.1f} GB)")
+                        break
+                try:
+                    models.append(_load_tts_model(dev))
+                    devices_used.append(dev)
+                    replicas_on_device += 1
+                    print(f"  TTS: replica {replicas_on_device}/{tts_replicas_per_gpu} loaded on {dev}")
+                except Exception as e:
+                    print(f"  TTS: could not load replica {replica_index + 1} on {dev} "
+                          f"({type(e).__name__}: {str(e)[:120]}); continuing without it")
+                    try:
+                        with torch.cuda.device(dev) if gpu_count else _nullcontext():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    # A failed first load usually means this GPU cannot host
+                    # this model; avoid repeatedly triggering the same OOM.
+                    if replica_index == 0:
+                        break
         if not models:
             raise RuntimeError("No Chatterbox TTS model could be loaded on any device")
         if len(devices_used) > 1:
@@ -1974,8 +2005,9 @@ def generate_audio(text, ref_audio, out_path):
         else:
             _worker(0, models[0])
 
-        wavs = [w for w in wavs if w is not None]
-        if not wavs: return False
+        if not wavs or any(waveform is None for waveform in wavs):
+            print("  TTS: at least one chunk could not be generated; refusing a truncated narration")
+            return False
         full = wavs[0]
         for w in wavs[1:]:
             full = torch.cat([full, torch.zeros((full.shape[0], int(0.15*sr))), w], dim=1)
@@ -2000,85 +2032,198 @@ def generate_audio(text, ref_audio, out_path):
     print("  Enhancing audio...")
     _log_resource_snapshot("Enhance start")
     try:
-        from unittest.mock import MagicMock
-        # Mock every deepspeed submodule that resemble_enhance imports
-        mock_names = [
-            'deepspeed', 'deepspeed.accelerator', 'deepspeed.runtime',
-            'deepspeed.runtime.engine', 'deepspeed.runtime.config',
-            'deepspeed.runtime.utils', 'deepspeed.utils',
-            'deepspeed.ops', 'deepspeed.ops.adam', 'deepspeed.comm',
-        ]
-        for name in mock_names:
-            sys.modules[name] = MagicMock()
-        sys.modules['deepspeed.accelerator'].get_accelerator = MagicMock()
-        sys.modules['deepspeed.runtime.engine'].DeepSpeedEngine = MagicMock()
-        sys.modules['deepspeed.runtime.utils'].clip_grad_norm_ = MagicMock()
-        
-        from resemble_enhance.enhancer.inference import enhance as re_enhance
+        # Resemble Enhance keeps module-level STFT/model state. Threads in
+        # this process previously caused cross-device window mismatches, so
+        # each GPU gets a separate Python process with a separate import and
+        # model state. The parent only writes chunks, launches workers, and
+        # concatenates their results in the original order.
         dwav, osr = torchaudio.load(str(raw_path))
         if dwav.shape[0] > 1:
             dwav = dwav.mean(dim=0, keepdim=True)
-        
+        osr = int(osr)
+        esr = 44100
         try:
             enhance_chunk_seconds = max(20, int(os.environ.get("ENHANCE_CHUNK_SECONDS", "40")))
         except (TypeError, ValueError):
             enhance_chunk_seconds = 40
         chunk_s = enhance_chunk_seconds * osr
-        esr = 44100
-        total = dwav.shape[1]
+        total = int(dwav.shape[1])
         n_chunks = (total + chunk_s - 1) // chunk_s
-        # NOTE: dual-GPU dispatch was attempted here and reverted. A real run
-        # showed resemble_enhance's enhance() keeps some internal state (e.g.
-        # its STFT window buffer) pinned to whichever device first
-        # initialized it, rather than being safely re-entrant per explicit
-        # device argument across threads. Concurrent calls on a second device
-        # failed with "stft input and window must be on the same device" and
-        # silently fell back to plain resampling (no enhancement at all) for
-        # every affected chunk - a real audio-quality regression, not just a
-        # performance issue. Enhance therefore stays single-GPU/sequential
-        # until the library is verified safe for this pattern.
-        print(f"  Processing {n_chunks} enhancement chunks ({enhance_chunk_seconds}s target)...")
+        print(f"  Processing {n_chunks} enhancement chunks ({enhance_chunk_seconds}s target) in isolated workers...")
 
-        def _enhance_piece(chunk, label):
+        enhance_root = TEMP_DIR / "enhance_workers"
+        enhance_root.mkdir(parents=True, exist_ok=True)
+        worker_script = enhance_root / "enhance_worker.py"
+        worker_script.write_text(r'''import json
+import os
+import sys
+from pathlib import Path
+
+import torch
+import torchaudio
+from unittest.mock import MagicMock
+
+# resemble-enhance imports deepspeed even when its inference path does not
+# need a real DeepSpeed installation. Keep the child self-contained.
+_mock_names = [
+    "deepspeed", "deepspeed.accelerator", "deepspeed.runtime",
+    "deepspeed.runtime.engine", "deepspeed.runtime.config",
+    "deepspeed.runtime.utils", "deepspeed.utils", "deepspeed.ops",
+    "deepspeed.ops.adam", "deepspeed.comm",
+]
+for _name in _mock_names:
+    sys.modules[_name] = MagicMock()
+sys.modules["deepspeed.accelerator"].get_accelerator = MagicMock()
+sys.modules["deepspeed.runtime.engine"].DeepSpeedEngine = MagicMock()
+sys.modules["deepspeed.runtime.utils"].clip_grad_norm_ = MagicMock()
+
+if os.environ.get("VIDEO_FACTORY_DISABLE_CUDNN") == "1":
+    torch.backends.cudnn.enabled = False
+
+from resemble_enhance.enhancer.inference import enhance
+
+_DEVICE = sys.argv[2] if len(sys.argv) > 2 else ("cuda" if torch.cuda.is_available() else "cpu")
+if _DEVICE.startswith("cuda") and torch.cuda.is_available():
+    try:
+        torch.cuda.set_device(int(_DEVICE.split(":", 1)[1]))
+    except (IndexError, ValueError):
+        pass
+
+
+def _resample(waveform, sample_rate):
+    result = torchaudio.transforms.Resample(int(sample_rate), 44100)(waveform)
+    return result.detach().cpu()
+
+
+def _enhance_piece(waveform, sample_rate, label):
+    try:
+        enhanced, enhanced_rate = enhance(
+            dwav=waveform.squeeze(0),
+            sr=int(sample_rate),
+            device=_DEVICE,
+            lambd=0.6,
+        )
+        enhanced_rate = int(enhanced_rate)
+        enhanced = enhanced.detach().cpu()
+        if enhanced.ndim == 1:
+            enhanced = enhanced.unsqueeze(0)
+        if enhanced_rate != 44100:
+            enhanced = _resample(enhanced, enhanced_rate)
+        print(f"    Chunk {label}: OK (44100Hz)", flush=True)
+        return enhanced
+    except Exception as error:
+        # Large chunks can exceed one GPU's available memory. Retry in two
+        # smaller pieces before accepting the deterministic resampling path.
+        if waveform.shape[1] > 20 * int(sample_rate) + 1:
+            midpoint = waveform.shape[1] // 2
+            left = _enhance_piece(waveform[:, :midpoint], sample_rate, f"{label}a")
+            right = _enhance_piece(waveform[:, midpoint:], sample_rate, f"{label}b")
+            return torch.cat([left, right], dim=1)
+        print(f"    Chunk {label}: fallback ({type(error).__name__}: {str(error)[:100]})", flush=True)
+        return _resample(waveform, sample_rate)
+
+
+if __name__ == "__main__":
+    manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    for item in manifest:
+        input_path = Path(item["input"])
+        output_path = Path(item["output"])
+        waveform, sample_rate = torchaudio.load(str(input_path))
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        result = _enhance_piece(waveform, int(sample_rate), str(item["index"]))
+        torchaudio.save(str(output_path), result, 44100)
+''', encoding="utf-8")
+
+        worker_count = min(
+            n_chunks,
+            torch.cuda.device_count() if torch.cuda.is_available() else 1,
+        )
+        worker_devices = (
+            [f"cuda:{index}" for index in range(worker_count)]
+            if torch.cuda.is_available() else ["cpu"]
+        )
+        assignments = [[] for _ in range(worker_count)]
+        output_paths = []
+        for chunk_index, start in enumerate(range(0, total, chunk_s), 1):
+            input_path = enhance_root / f"chunk_{chunk_index:04d}.wav"
+            output_path = enhance_root / f"enhanced_{chunk_index:04d}.wav"
+            torchaudio.save(str(input_path), dwav[:, start:start + chunk_s], osr)
+            spec = {"index": chunk_index, "input": str(input_path), "output": str(output_path)}
+            assignments[(chunk_index - 1) % worker_count].append(spec)
+            output_paths.append(output_path)
+
+        manifests = []
+        for worker_index, specs in enumerate(assignments):
+            manifest_path = enhance_root / f"manifest_{worker_index}.json"
+            manifest_path.write_text(json.dumps(specs), encoding="utf-8")
+            manifests.append(manifest_path)
+
+        child_env = os.environ.copy()
+        child_env["PYTHONUNBUFFERED"] = "1"
+        if _CUDNN_FORCE_DISABLED:
+            child_env["VIDEO_FACTORY_DISABLE_CUDNN"] = "1"
+        try:
+            worker_timeout = max(120, int(os.environ.get("ENHANCE_WORKER_TIMEOUT_SECONDS", "900")))
+        except (TypeError, ValueError):
+            worker_timeout = 900
+
+        def _run_enhance_worker(worker_index):
+            command = [
+                sys.executable,
+                str(worker_script),
+                str(manifests[worker_index]),
+                worker_devices[worker_index],
+            ]
             try:
-                hw, piece_sr = re_enhance(
-                    dwav=chunk.squeeze(0), sr=osr, device=device, lambd=0.6
+                completed = subprocess.run(
+                    command,
+                    env=child_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=worker_timeout,
                 )
-                piece_sr = int(piece_sr)
-                hw = hw.detach().cpu()
-                if piece_sr != 44100:
-                    hw = torchaudio.transforms.Resample(piece_sr, 44100)(hw.unsqueeze(0)).squeeze(0)
-                print(f"    Chunk {label}: OK (44100Hz)")
-                return hw.unsqueeze(0), 44100
-            except Exception as e:
-                # If a larger chunk exceeds available VRAM, retry it as two
-                # original-size pieces before falling back to resampling.
-                # This preserves enhancement whenever possible and avoids
-                # turning a memory optimization into a silent quality loss.
-                try:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
-                if chunk.shape[1] > 20 * osr + 1:
-                    midpoint = chunk.shape[1] // 2
-                    left, left_sr = _enhance_piece(chunk[:, :midpoint], f"{label}a")
-                    right, right_sr = _enhance_piece(chunk[:, midpoint:], f"{label}b")
-                    if left_sr == right_sr:
-                        return torch.cat([left, right], dim=1), left_sr
-                print(f"    Chunk {label}: fallback ({str(e)[:80]})")
-                fallback = torchaudio.transforms.Resample(osr, 44100)(chunk).cpu()
-                return fallback, 44100
+                return worker_index, completed.returncode, completed.stdout or completed.stderr or ""
+            except Exception as error:
+                return worker_index, -1, f"{type(error).__name__}: {error}"
+
+        print(f"  Enhancement workers: {len(worker_devices)} ({', '.join(worker_devices)}), "
+              f"round-robin chunk dispatch")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(worker_devices)) as executor:
+            worker_results = list(executor.map(_run_enhance_worker, range(len(worker_devices))))
+        for worker_index, return_code, output in worker_results:
+            if output.strip():
+                print(f"  Enhance worker {worker_devices[worker_index]} output:\n{output.rstrip()}")
+            if return_code != 0:
+                print(f"  Enhance worker {worker_devices[worker_index]} exited with code {return_code}; "
+                      "missing chunks will use resampling fallback")
 
         parts = []
-        for chunk_index, i in enumerate(range(0, total, chunk_s), 1):
-            piece, piece_sr = _enhance_piece(dwav[:, i:i+chunk_s], chunk_index)
-            parts.append(piece)
+        fallback_resampler = torchaudio.transforms.Resample(osr, esr)
+        for chunk_index, (start, output_path) in enumerate(
+                zip(range(0, total, chunk_s), output_paths), 1):
+            expected = dwav[:, start:start + chunk_s]
+            if output_path.exists() and output_path.stat().st_size > 1000:
+                try:
+                    piece, piece_sr = torchaudio.load(str(output_path))
+                    if piece.shape[0] > 1:
+                        piece = piece.mean(dim=0, keepdim=True)
+                    if int(piece_sr) != esr:
+                        piece = torchaudio.transforms.Resample(int(piece_sr), esr)(piece)
+                    parts.append(piece.cpu())
+                    continue
+                except Exception as error:
+                    print(f"  Enhance chunk {chunk_index}: output read failed ({str(error)[:100]})")
+            print(f"  Enhance chunk {chunk_index}: parent resampling fallback")
+            parts.append(fallback_resampler(expected).cpu())
 
         final = torch.cat(parts, dim=1)
         torchaudio.save(str(out_path), final, esr)
-        print(f"  Enhanced: {esr}Hz, {final.shape[1]/esr:.1f}s")
-        del parts, final, dwav; torch.cuda.empty_cache(); gc.collect()
+        print(f"  Enhanced: {esr}Hz, {final.shape[1] / esr:.1f}s")
+        del parts, final, dwav
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
         _log_resource_snapshot("Enhance end")
         return True
     except Exception as e:
