@@ -423,8 +423,9 @@ _USED_URLS_LOCK = threading.Lock()
 # two independent providers in parallel avoids serial 12-second stalls while
 # still giving each provider enough time for normal network conditions.
 _STOCK_API_TIMEOUT = (3, 5)
-AI_QUERIES = []
-AI_BACKUPS = []
+# Five sentence-aligned stock-query options generated in one unified Groq call.
+# Each entry is [primary, backup_1, backup_2, backup_3, backup_4].
+AI_QUERY_OPTIONS = []
 
 # Shorts count by long-video duration:
 #   5 min  -> 2 shorts
@@ -518,9 +519,25 @@ def _local_sentence_query_pair(sentence_text):
         return f"{core} documentary", f"{core} educational illustration"
     return "educational concept illustration", "documentary concept visualization"
 
+def _local_sentence_query_options(sentence_text):
+    """Build five distinct, sentence-aligned options without another API call."""
+    primary, backup = _local_sentence_query_pair(sentence_text)
+    candidates = [
+        primary,
+        backup,
+        f"{primary} closeup",
+        f"{backup} cinematic",
+        f"{primary} wide shot",
+    ]
+    options = []
+    for candidate in candidates:
+        candidate = re.sub(r"\s+", " ", str(candidate)).strip()
+        if 3 < len(candidate) < 60 and _safe(candidate) and candidate not in options:
+            options.append(candidate)
+    while len(options) < 5:
+        options.append(options[-1] if options else "educational concept illustration")
+    return options[:5]
 
-# ==========================================
-# 3A. GROQ REQUEST LAYER (reasoning-safe + TPM-aware)
 # ==========================================
 # openai/gpt-oss-120b is a REASONING model. Its internal reasoning tokens are
 # emitted before the visible answer and are drawn from the SAME completion
@@ -688,38 +705,32 @@ def _groq_complete(client, messages, label, max_completion_tokens,
 # EVERY batch, which alone consumed most of an 8000 TPM minute and forced the
 # request pacing/413 failures. The stock-scarcity guidance that drives query
 # quality is retained; only the redundant prose was removed.
-_STOCK_QUERY_SYSTEM_PROMPT = """You write stock-footage search queries (Pexels/Pixabay) for narration sentences.
+_STOCK_QUERY_SYSTEM_PROMPT = """You write stock-footage search queries for Pexels/Pixabay narration sentences.
 
-For each numbered sentence, output exactly two lines:
-N. primary query
-Nb. backup query
+Return one raw JSON object only. Each key is the exact 1-based sentence number and
+its value is an array of EXACTLY FIVE different search-query strings.
+Example: {"1":["primary query","backup query","third query","fourth query","fifth query"]}
 
-Rules:
-- English only, 3-6 words, describing what a camera can actually film.
-- The query must represent that sentence's MEANING, not just its keywords.
-- Many subjects (diseases, internal organs, abstract science, niche tech) have no literal stock footage. Never search the literal term; choose the closest findable visual that still conveys the same idea:
-  "the kidney filters toxins from blood" -> medical illustration human anatomy
-  "minerals crystallize into stones" -> crystal formation macro closeup
-  "the economy is collapsing" -> stock market crash graph red
-  "a rare genetic disorder" -> dna helix research laboratory
-- Never substitute generic unrelated footage (random nature, ocean, space) just because the literal topic is hard; stay thematically connected to the sentence.
-- The backup must be a DIFFERENT angle on the SAME sentence, never generic filler.
+Rules for every query:
+- English only, 3-4 words, describing something a camera can actually film.
+- Represent the sentence's meaning, not just isolated keywords.
+- For medical, abstract, or niche subjects choose the closest findable thematic
+  visual rather than literal terms with no stock footage.
+- Keep all five options thematically tied to the SAME sentence and use different
+  visual angles so they are useful fallbacks.
+- Never use unrelated nature, ocean, space, or generic filler.
 - No people, faces, bodies, women, religion, violence, or NSFW.
-- Output only the numbered lines, nothing else."""
+- Include every sentence number exactly once; output no markdown or explanation."""
 
 
 def generate_queries_for_sentences(sentences):
-    """
-    Send sentences to Groq in small, bounded batches, get back a mapping of
-    each sentence to its ideal visual search query PLUS a topic-relevant backup
-    query. Small requests avoid GPT-OSS TPM rejection and make truncation local
-    to at most one short batch instead of losing most of a long script.
+    """Generate five aligned visual-search options for every sentence in one
+    unified Groq request.
 
-    Returns (queries, backups) - two parallel lists. `backups` gives a
-    still-on-topic alternate search term to try if the primary query
-    returns no usable stock footage, instead of falling back to the
-    generic FALLBACK list (which was the direct cause of unrelated
-    footage like ocean/waterfall clips appearing in e.g. medical topics).
+    The function returns one list of five queries per sentence. No recovery
+    Groq calls are made; missing or malformed entries are filled with
+    same-sentence local options so alignment is never lost and the clip finder
+    always has five attempts available.
     """
     if not GROQ_KEY or not sentences:
         raise RuntimeError(
@@ -733,17 +744,13 @@ def generate_queries_for_sentences(sentences):
     from groq import Groq
     client = Groq(api_key=GROQ_KEY)
 
-    # Keep every sentence request well below Groq's TPM ceiling. With the
-    # compact system prompt a 12-sentence batch is ~600 prompt tokens, so
-    # fewer, adequately-budgeted requests replace many starved ones.
-    BATCH_SIZE = 12
-    RECOVERY_BATCH_SIZE = 8
+    # One unified request is intentional: all primary and fallback options are
+    # generated together, eliminating the old TPM-heavy batch/recovery loop.
+    BATCH_SIZE = n
 
     def _query_output_budget(sentence_count):
-        # Room for a short hidden reasoning chain PLUS two lines per sentence.
-        # The old 240-640 range was below what gpt-oss-120b needs to emit any
-        # visible content at all once reasoning tokens are counted.
-        return min(2400, 512 + sentence_count * 72)
+        # Five short JSON strings per sentence plus a modest reasoning allowance.
+        return min(5600, 768 + sentence_count * 48)
 
     all_queries = [None] * n
     all_backups = [None] * n
@@ -752,7 +759,7 @@ def generate_queries_for_sentences(sentences):
         batch = sentences[batch_start:batch_start + BATCH_SIZE]
         # Numbered locally within the batch (1..len(batch)) - offset back to
         # global index when parsing, so per-batch parsing stays simple.
-        numbered = "\n".join([f"{i+1}. {s['text'][:100]}" for i, s in enumerate(batch)])
+        numbered = "\n".join([f"{i+1}. {s['text'][:140]}" for i, s in enumerate(batch)])
 
         try:
             result = _groq_complete(
@@ -760,158 +767,112 @@ def generate_queries_for_sentences(sentences):
                 [
                     {"role": "system", "content": _STOCK_QUERY_SYSTEM_PROMPT},
                     {"role": "user",
-                     "content": f"Match each sentence to a video search query:\n\n{numbered}"},
+                     "content": f"Generate five aligned stock queries for every sentence below:\n\n{numbered}"},
                 ],
-                label=f"batch {batch_start}-{batch_start+len(batch)}",
+                label=f"unified all-sentences ({len(batch)})",
                 max_completion_tokens=_query_output_budget(len(batch)),
-                temperature=0.5,
+                temperature=0.35,
+                attempts=1,
             )
-            # Parse by EXPLICIT leading index (e.g. "1. some query" -> index 0,
-            # "1b. backup query" -> backup for index 0), not by line order.
-            # This prevents misalignment: if Groq skips a number, returns a
-            # blank/rejected line, or merges lines, sequential-order parsing
-            # would silently shift every subsequent query onto the WRONG
-            # sentence. That was the root cause of Spanish (and other
-            # long-sentence scripts) queries ending up mismatched with
-            # their actual sentence content.
-            parsed_count = 0
-            for line in (result or "").strip().split('\n'):
-                line = line.strip()
-                mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
-                if mb:
-                    local_idx = int(mb.group(1)) - 1
-                    cleaned = mb.group(2).strip().strip('"\'')
-                    if 3 < len(cleaned) < 60 and _safe(cleaned) and 0 <= local_idx < len(batch):
-                        all_backups[batch_start + local_idx] = cleaned
-                    continue
-                m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line)
-                if not m:
-                    continue
-                local_idx = int(m.group(1)) - 1
-                cleaned = m.group(2).strip().strip('"\'')
-                if 3 < len(cleaned) < 60 and _safe(cleaned) and 0 <= local_idx < len(batch):
-                    all_queries[batch_start + local_idx] = cleaned
-                    parsed_count += 1
 
-            # Diagnostic: if we parsed far fewer queries than sentences in
-            # this batch, something is wrong with the model's output format
-            # (e.g. it ignored the numbering instruction, wrapped in
-            # markdown, or refused part of the request) - previously this
-            # failed completely silently, with sentences just quietly
-            # defaulting to random FALLBACK queries with zero explanation.
-            if parsed_count < len(batch) * 0.5:
-                print(f"  WARNING: batch {batch_start}-{batch_start+len(batch)} only parsed "
-                      f"{parsed_count}/{len(batch)} queries. Raw model output (first 300 chars):")
-                print(f"    {(result or '')[:300]!r}")
+            # Parse keyed JSON so a missing sentence can never shift every
+            # later query onto the wrong sentence. Keep a line fallback for
+            # older SDK/model formatting behavior.
+            parsed_count = 0
+            raw_result = (result or "").strip()
+            parsed = None
+            try:
+                parsed = json.loads(raw_result)
+            except (TypeError, ValueError):
+                match = re.search(r"\{.*\}", raw_result, re.DOTALL)
+                if match:
+                    try:
+                        parsed = json.loads(match.group(0))
+                    except (TypeError, ValueError):
+                        parsed = None
+
+            if isinstance(parsed, dict):
+                for key, values in parsed.items():
+                    try:
+                        local_idx = int(str(key)) - 1
+                    except (TypeError, ValueError):
+                        continue
+                    if not 0 <= local_idx < len(batch):
+                        continue
+                    if isinstance(values, str):
+                        values = [values]
+                    if not isinstance(values, list):
+                        continue
+                    cleaned_options = []
+                    for value in values:
+                        cleaned = re.sub(r"\s+", " ", str(value)).strip().strip('"\'')
+                        if (3 < len(cleaned) < 60 and _safe(cleaned)
+                                and cleaned not in cleaned_options):
+                            cleaned_options.append(cleaned)
+                    if cleaned_options:
+                        all_queries[batch_start + local_idx] = cleaned_options[0]
+                        all_backups[batch_start + local_idx] = cleaned_options[1:5]
+                        parsed_count += 1
+
+            if not parsed_count:
+                for line in raw_result.splitlines():
+                    match = re.match(r'^\s*(\d+)[\.:\)\-]\s*(.+)$', line)
+                    if not match:
+                        continue
+                    local_idx = int(match.group(1)) - 1
+                    cleaned = match.group(2).strip().strip('"\'')
+                    if (0 <= local_idx < len(batch) and 3 < len(cleaned) < 60
+                            and _safe(cleaned)):
+                        all_queries[batch_start + local_idx] = cleaned
+                        all_backups[batch_start + local_idx] = []
+                        parsed_count += 1
+
+            if parsed_count < len(batch):
+                print(f"  WARNING: unified Groq response covered {parsed_count}/{len(batch)} "
+                      "sentences; local same-sentence options will fill the gaps")
+                print(f"    Raw model output (first 300 chars): {raw_result[:300]!r}")
 
         except Exception as e:
             print(f"  Groq error on batch {batch_start}-{batch_start+len(batch)}: {e}")
             # leave this batch's entries as None -> filled by fallback below
 
-    # Recover incomplete batches without changing index alignment. Keep every
-    # recovery request bounded too; never send the full missing-index list to
-    # Groq, and do not fall back to one request per sentence.
-    missing_indices = [i for i, query in enumerate(all_queries) if not query]
-    for recovery_round in range(1, 3):
-        if not missing_indices:
-            break
-        recovery_missing = list(missing_indices)
-        print(f"  Groq: recovering {len(recovery_missing)} missing sentence queries "
-              f"in chunks of <= {RECOVERY_BATCH_SIZE} (attempt {recovery_round}/2)...")
-        for chunk_start in range(0, len(recovery_missing), RECOVERY_BATCH_SIZE):
-            chunk_indices = recovery_missing[chunk_start:chunk_start + RECOVERY_BATCH_SIZE]
-            requested = set(chunk_indices)
-            numbered_missing = "\n".join(
-                f"{i + 1}. {sentences[i]['text'][:140]}" for i in chunk_indices
+    # No recovery Groq calls: the unified request is deliberately the only
+    # query-generation API call. Local aligned options fill omissions below.
+
+    # Normalize every sentence to exactly five usable options. Groq options
+    # remain first; local options only fill missing/invalid tail entries.
+    for sentence_idx, sentence in enumerate(sentences):
+        options = []
+        primary = all_queries[sentence_idx]
+        if primary:
+            options.append(str(primary).strip())
+        raw_backups = all_backups[sentence_idx]
+        if isinstance(raw_backups, str):
+            raw_backups = [raw_backups]
+        for candidate in raw_backups or []:
+            candidate = str(candidate).strip()
+            if (3 < len(candidate) < 60 and _safe(candidate)
+                    and candidate not in options):
+                options.append(candidate)
+        for candidate in _local_sentence_query_options(sentence["text"]):
+            if candidate not in options:
+                options.append(candidate)
+        if len(options) < 5:
+            raise RuntimeError(
+                f"Unable to create five aligned visual queries for sentence {sentence_idx + 1}"
             )
-            try:
-                result = _groq_complete(
-                    client,
-                    [
-                        {"role": "system", "content": """Return one primary and one backup STOCK FOOTAGE query for every numbered sentence. The numbers are global sentence numbers and must not be changed or skipped.
+        all_queries[sentence_idx] = options[0]
+        all_backups[sentence_idx] = options[1:5]
 
-Rules:
-- Queries must be in English, 3-6 words, and describe something a camera can film.
-- They must clearly represent the exact sentence meaning and remain thematically related.
-- For abstract or medical ideas, choose the closest findable visual category, not random nature, ocean, space, or other filler.
-- No people, faces, bodies, women, religion, violence, or NSFW.
-- Output ONLY these two lines per sentence:
-14. primary query
-14b. backup query"""},
-                        {"role": "user", "content":
-                         f"Recover queries for these missing global sentence numbers:\n\n{numbered_missing}"}
-                    ],
-                    label=f"recovery chunk {chunk_start // RECOVERY_BATCH_SIZE + 1}",
-                    max_completion_tokens=_query_output_budget(len(chunk_indices)),
-                    temperature=0.2,
-                )
-                recovered = 0
-                for line in (result or "").strip().split("\n"):
-                    line = line.strip()
-                    mb = re.match(r'^\s*(\d+)b[\.\)\-]\s*(.+)$', line, re.IGNORECASE)
-                    if mb:
-                        global_idx = int(mb.group(1)) - 1
-                        cleaned = mb.group(2).strip().strip('"\'')
-                        if (global_idx in requested and 3 < len(cleaned) < 60
-                                and _safe(cleaned)):
-                            all_backups[global_idx] = cleaned
-                        continue
-                    m = re.match(r'^\s*(\d+)[\.\)\-]\s*(.+)$', line)
-                    if not m:
-                        continue
-                    global_idx = int(m.group(1)) - 1
-                    cleaned = m.group(2).strip().strip('"\'')
-                    if (global_idx in requested and 3 < len(cleaned) < 60
-                            and _safe(cleaned)):
-                        if not all_queries[global_idx]:
-                            recovered += 1
-                        all_queries[global_idx] = cleaned
-                print(f"  Groq: recovered {recovered}/{len(chunk_indices)} primary queries "
-                      f"in recovery chunk {chunk_start // RECOVERY_BATCH_SIZE + 1}")
-            except Exception as e:
-                print(f"  Groq recovery chunk {chunk_start // RECOVERY_BATCH_SIZE + 1} "
-                      f"failed: {type(e).__name__}: {str(e)[:140]}")
-        missing_indices = [i for i, query in enumerate(all_queries) if not query]
+    # Show matching for debug, including the complete fallback headroom.
+    query_options = []
+    for i in range(len(sentences)):
+        options = [all_queries[i]] + all_backups[i]
+        query_options.append(options)
+        if i < 3:
+            print(f"    [{i+1}] '{sentences[i]['text'][:35]}...' -> {options}")
 
-    # Do not issue an unbounded one-request-per-sentence precision tail. Any
-    # entries still missing after two bounded recovery passes receive the
-    # existing same-sentence local fallback below, preserving alignment without
-    # putting another burst of pressure on Groq.
-    missing_indices = [i for i, query in enumerate(all_queries) if not query]
-
-    if missing_indices:
-        print(
-            "  WARNING: Groq still omitted sentence queries for positions "
-            f"{[i + 1 for i in missing_indices]}; using aligned local stock-query fallbacks"
-        )
-        for missing_idx in missing_indices:
-            primary, backup = _local_sentence_query_pair(
-                sentences[missing_idx]["text"]
-            )
-            all_queries[missing_idx] = primary
-            all_backups[missing_idx] = backup
-            print(
-                f"    Local fallback [{missing_idx + 1}]: "
-                f"'{primary}' / '{backup}'"
-            )
-
-    # This should be unreachable because the local fallback always returns two
-    # non-empty strings, but keep the invariant explicit if that helper is
-    # changed later.
-    still_missing = [i for i, query in enumerate(all_queries) if not query]
-    if still_missing:
-        raise RuntimeError(
-            "Unable to create aligned visual queries for sentence positions "
-            f"{[i + 1 for i in still_missing]}"
-        )
-    queries = list(all_queries)
-    backups = [all_backups[i] if all_backups[i] else queries[i] for i in range(n)]
-
-    # Show matching for debug
-    for i in range(min(3, len(queries), len(sentences))):
-        print(f"    [{i+1}] '{sentences[i]['text'][:35]}...' -> '{queries[i]}' (backup: '{backups[i]}')")
-
-    return queries, backups
+    return query_options
 
 FALLBACK = [
     "technology data center servers", "futuristic city aerial night",
@@ -933,15 +894,15 @@ def _safe(q):
 
 
 def _query_attempts(index, orig_index=None):
-    """Return only sentence-specific queries; never add generic footage."""
+    """Return all five sentence-specific options; never use generic footage."""
     query_index = orig_index if orig_index is not None else index
-    if query_index < 0 or query_index >= len(AI_QUERIES):
-        raise RuntimeError(f"No AI visual query exists for sentence {query_index + 1}")
-    primary = str(AI_QUERIES[query_index] or '').strip()
-    if not primary:
+    if query_index < 0 or query_index >= len(AI_QUERY_OPTIONS):
+        raise RuntimeError(f"No AI visual queries exist for sentence {query_index + 1}")
+    options = [str(value).strip() for value in (AI_QUERY_OPTIONS[query_index] or [])]
+    options = [value for value in options if value and _safe(value)]
+    if not options:
         raise RuntimeError(f"Primary visual query is empty for sentence {query_index + 1}")
-    backup = str(AI_BACKUPS[query_index] or '').strip() if query_index < len(AI_BACKUPS) else ''
-    return [primary] + ([backup] if backup and backup != primary else [])
+    return list(dict.fromkeys(options))
 
 
 def _sentence_query_variants(attempts):
@@ -958,8 +919,8 @@ def _sentence_query_variants(attempts):
 
 # A bounded search is essential: stock providers expose finite pages, and
 # cycling already-used URLs forever can otherwise keep a Kaggle job alive for
-# hours. After each failed round, Groq supplies fresh sentence-specific terms.
-_CLIP_QUERY_ROUNDS = 4  # initial queries plus up to three targeted Groq refreshes
+# hours. The five aligned options are generated before clip search begins.
+_CLIP_QUERY_ROUNDS = 1  # all five options arrive in the single unified Groq call
 _CLIP_CANDIDATES_PER_QUERY = 5
 
 
@@ -1597,6 +1558,40 @@ def search_and_download_vertical(query, idx, duration, tag="", verify=True, norm
     return None
 
 
+def _pad_clip_to_duration(clip_path, source_duration, target_duration):
+    """Extend a too-short clip to exactly target_duration by holding its last
+    frame for the missing seconds. Used only as the final safety net when no
+    stock candidate reaches the required length, so every clip entering the
+    concat list has EXACTLY its allotted duration. An intentional, clearly
+    logged partial-second freeze on one clip is far safer than an unplanned
+    total-duration deficit: the latter makes the concatenated video shorter
+    than its narration, which some players render as the LAST frame of the
+    whole video freezing while the remaining audio keeps playing.
+    """
+    clip_path = Path(clip_path)
+    padded_path = clip_path.with_name(clip_path.stem + "_padded" + clip_path.suffix)
+    pad_needed = max(0.05, target_duration - source_duration)
+    vf = f"tpad=stop_mode=clone:stop_duration={pad_needed:.3f}"
+    cmd = (["ffmpeg", "-y", "-nostdin", "-i", str(clip_path), "-vf", vf,
+            "-t", f"{target_duration:.3f}"] + _enc_args()
+           + ["-pix_fmt", "yuv420p", "-an", str(padded_path)])
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+    except Exception:
+        result = None
+    if (result is not None and result.returncode == 0
+            and padded_path.exists() and padded_path.stat().st_size > 2000):
+        try:
+            os.remove(clip_path)
+        except OSError:
+            pass
+        return str(padded_path)
+    # Padding itself failed (rare) - the unpadded clip is still better than no
+    # clip at all; the caller's own duration-deficit recovery is the last line
+    # of defense against the shortfall this would otherwise create.
+    return str(clip_path)
+
+
 def _find_verified_normalized_clip(sent, index, orientation, tag=""):
     """Find an exact sentence match using bounded stock/Groq retry rounds."""
     duration = max(2.5 if orientation == "portrait" else 3.5,
@@ -1608,7 +1603,7 @@ def _find_verified_normalized_clip(sent, index, orientation, tag=""):
     for round_no in range(_CLIP_QUERY_ROUNDS):
         page = round_no + 1
         print(f"    {orientation.title()} clip {index}: query round {round_no + 1}/{_CLIP_QUERY_ROUNDS}")
-        for query in queries[:2]:
+        for query in queries:
             try:
                 if orientation == "portrait":
                     raw = search_and_download_vertical(
@@ -1646,16 +1641,9 @@ def _find_verified_normalized_clip(sent, index, orientation, tag=""):
                 print(f"    {orientation.title()} clip {index}: candidate error "
                       f"({type(e).__name__}: {str(e)[:100]})")
 
-        if round_no + 1 >= _CLIP_QUERY_ROUNDS:
-            break
-        fresh = _request_fresh_sentence_queries(
-            sent['text'], previous_queries, orientation
-        )
-        if not fresh:
-            print(f"    {orientation.title()} clip {index}: Groq returned no new queries; stopping bounded search")
-            break
-        previous_queries.extend(fresh)
-        queries = fresh
+        # All five options were generated in the single unified request. No
+        # per-sentence Groq refresh is performed after this bounded pass.
+        break
 
     # All query rounds exhausted without a verified+normalized clip. Instead
     # of aborting the entire video render (which wastes a 40-minute Kaggle
@@ -1666,8 +1654,12 @@ def _find_verified_normalized_clip(sent, index, orientation, tag=""):
     print(f"    {orientation.title()} clip {index}: all {_CLIP_QUERY_ROUNDS} rounds exhausted, "
           f"attempting unverified fallback for sentence {index + 1}")
     fallback_query = queries[0] if queries else previous_queries[0] if previous_queries else None
+    # Track the best (longest) duration-invalid candidate seen, so if every
+    # attempt comes back too short, the safety-net pad below still has
+    # something to extend instead of raising outright.
+    best_short_candidate = None
     if fallback_query:
-        for page in range(1, 3):
+        for page in range(1, 4):
             try:
                 if orientation == "portrait":
                     raw = search_and_download_vertical(
@@ -1688,13 +1680,47 @@ def _find_verified_normalized_clip(sent, index, orientation, tag=""):
                 )
                 try: os.remove(raw)
                 except OSError: pass
-                if normalized:
+                if not normalized:
+                    continue
+                if _normalized_duration_is_usable(normalized, duration):
                     print(f"    {orientation.title()} clip {index}: UNVERIFIED fallback accepted "
                           f"(query: '{fallback_query[:50]}')")
+                    if best_short_candidate:
+                        try: os.remove(best_short_candidate[0])
+                        except OSError: pass
                     return index, normalized
+                # Duration-invalid: keep it only if it is the longest one seen
+                # so far (closest to filling the slot), discard the rest.
+                try:
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                         "-of", "default=noprint_wrappers=1:nokey=1", str(normalized)],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    actual = float(probe.stdout.strip())
+                except Exception:
+                    actual = 0.0
+                if actual > 0 and (best_short_candidate is None or actual > best_short_candidate[1]):
+                    if best_short_candidate:
+                        try: os.remove(best_short_candidate[0])
+                        except OSError: pass
+                    best_short_candidate = (normalized, actual)
+                else:
+                    try: os.remove(normalized)
+                    except OSError: pass
             except Exception as e:
                 print(f"    {orientation.title()} clip {index}: unverified fallback error "
                       f"({type(e).__name__}: {str(e)[:80]})")
+
+    if best_short_candidate:
+        candidate_path, candidate_duration = best_short_candidate
+        padded = _pad_clip_to_duration(candidate_path, candidate_duration, duration)
+        if padded:
+            print(f"    {orientation.title()} clip {index}: UNVERIFIED fallback accepted with "
+                  f"{max(0.0, duration - candidate_duration):.2f}s freeze-frame pad "
+                  f"(source was {candidate_duration:.2f}s, needed {duration:.2f}s; "
+                  f"query: '{fallback_query[:50]}')")
+            return index, padded
 
     raise RuntimeError(
         f"No verified {orientation} clip found for sentence position {index + 1} "
@@ -1763,6 +1789,44 @@ def render_short(short_idx, sentences_slice, audio_path, ass_path, logo_path, ou
         fallback_cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path] + _enc_args() + [visual_path]
         subprocess.run(fallback_cmd, capture_output=True, timeout=60)
     if not os.path.exists(visual_path): return False
+
+    # Defense in depth: every clip entering the concat list is now padded to
+    # its exact allotted duration (see _pad_clip_to_duration), so this should
+    # rarely trigger. If a mismatch still slips through (e.g. concat-copy GOP
+    # rounding), catch it here rather than silently muxing a visual track
+    # shorter than its audio - some players hold the last decoded frame while
+    # trailing audio keeps playing, which looks like the video freezing.
+    def _probe_short_dur(path):
+        try:
+            r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                capture_output=True, text=True, timeout=15)
+            return float(r.stdout.strip())
+        except Exception:
+            return 0.0
+
+    vdur = _probe_short_dur(visual_path)
+    adur = _probe_short_dur(audio_path)
+    if vdur > 0 and adur > 0 and vdur < adur - 0.3:
+        print(f"  Short {short_idx+1}: concatenated visual is {adur - vdur:.2f}s short "
+              f"({vdur:.2f}s vs {adur:.2f}s audio); re-encoding to check for concat rounding")
+        reencoded = f"visual_{tag}_reencoded.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an", reencoded],
+            capture_output=True, timeout=120,
+        )
+        if os.path.exists(reencoded):
+            new_vdur = _probe_short_dur(reencoded)
+            if new_vdur > vdur:
+                os.replace(reencoded, visual_path)
+                vdur = new_vdur
+            else:
+                try: os.remove(reencoded)
+                except OSError: pass
+        if vdur < adur - 0.3:
+            print(f"  Short {short_idx+1}: WARNING - visual still {adur - vdur:.2f}s short after "
+                  f"re-encode; output audio may run past the last video frame")
 
     enc = _enc_args()
     ass_esc = str(ass_path).replace('\\','/').replace(':','\\\\:')
@@ -2042,26 +2106,28 @@ def generate_audio(text, ref_audio, out_path):
         esr = 44100
         total = dwav.shape[1]
         n_chunks = (total + chunk_s - 1) // chunk_s
-        # Enhancement chunks are independent - dispatch across every
-        # available GPU instead of only ever using the first, the same
-        # per-device-worker pattern already used for TTS and MiniCPM
-        # verification above. re_enhance() already accepts an explicit
-        # device argument, so no library changes are needed.
-        enhance_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        enhance_devices = [f"cuda:{i}" for i in range(enhance_gpu_count)] if enhance_gpu_count else [device]
-        print(f"  Processing {n_chunks} enhancement chunks ({enhance_chunk_seconds}s target) "
-              f"across {len(enhance_devices)} device(s)...")
+        # NOTE: dual-GPU dispatch was attempted here and reverted. A real run
+        # showed resemble_enhance's enhance() keeps some internal state (e.g.
+        # its STFT window buffer) pinned to whichever device first
+        # initialized it, rather than being safely re-entrant per explicit
+        # device argument across threads. Concurrent calls on a second device
+        # failed with "stft input and window must be on the same device" and
+        # silently fell back to plain resampling (no enhancement at all) for
+        # every affected chunk - a real audio-quality regression, not just a
+        # performance issue. Enhance therefore stays single-GPU/sequential
+        # until the library is verified safe for this pattern.
+        print(f"  Processing {n_chunks} enhancement chunks ({enhance_chunk_seconds}s target)...")
 
-        def _enhance_piece(chunk, label, dev):
+        def _enhance_piece(chunk, label):
             try:
                 hw, piece_sr = re_enhance(
-                    dwav=chunk.squeeze(0), sr=osr, device=dev, lambd=0.6
+                    dwav=chunk.squeeze(0), sr=osr, device=device, lambd=0.6
                 )
                 piece_sr = int(piece_sr)
                 hw = hw.detach().cpu()
                 if piece_sr != 44100:
                     hw = torchaudio.transforms.Resample(piece_sr, 44100)(hw.unsqueeze(0)).squeeze(0)
-                print(f"    Chunk {label}: OK (44100Hz, {dev})")
+                print(f"    Chunk {label}: OK (44100Hz)")
                 return hw.unsqueeze(0), 44100
             except Exception as e:
                 # If a larger chunk exceeds available VRAM, retry it as two
@@ -2069,36 +2135,24 @@ def generate_audio(text, ref_audio, out_path):
                 # This preserves enhancement whenever possible and avoids
                 # turning a memory optimization into a silent quality loss.
                 try:
-                    with torch.cuda.device(dev):
+                    if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                 except Exception:
                     pass
                 if chunk.shape[1] > 20 * osr + 1:
                     midpoint = chunk.shape[1] // 2
-                    left, left_sr = _enhance_piece(chunk[:, :midpoint], f"{label}a", dev)
-                    right, right_sr = _enhance_piece(chunk[:, midpoint:], f"{label}b", dev)
+                    left, left_sr = _enhance_piece(chunk[:, :midpoint], f"{label}a")
+                    right, right_sr = _enhance_piece(chunk[:, midpoint:], f"{label}b")
                     if left_sr == right_sr:
                         return torch.cat([left, right], dim=1), left_sr
                 print(f"    Chunk {label}: fallback ({str(e)[:80]})")
                 fallback = torchaudio.transforms.Resample(osr, 44100)(chunk).cpu()
                 return fallback, 44100
 
-        chunk_starts = list(range(0, total, chunk_s))
-        parts = [None] * len(chunk_starts)
-
-        def _enhance_worker(worker_index, dev):
-            for idx in range(worker_index, len(chunk_starts), len(enhance_devices)):
-                i = chunk_starts[idx]
-                piece, piece_sr = _enhance_piece(dwav[:, i:i+chunk_s], idx + 1, dev)
-                parts[idx] = piece
-
-        if len(enhance_devices) > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(enhance_devices)) as ex:
-                futures = [ex.submit(_enhance_worker, w, dev) for w, dev in enumerate(enhance_devices)]
-                for f in futures:
-                    f.result()
-        else:
-            _enhance_worker(0, enhance_devices[0])
+        parts = []
+        for chunk_index, i in enumerate(range(0, total, chunk_s), 1):
+            piece, piece_sr = _enhance_piece(dwav[:, i:i+chunk_s], chunk_index)
+            parts.append(piece)
 
         final = torch.cat(parts, dim=1)
         torchaudio.save(str(out_path), final, esr)
@@ -2944,8 +2998,8 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verif
     #
     # FIX: instead of freeze-padding (which produces a long dead/frozen
     # frame - unacceptable for anything more than ~1s), fetch REAL
-    # additional stock clips to cover the deficit, using fresh queries
-    # from AI_QUERIES/FALLBACK so the extra footage still looks intentional.
+    # additional stock clips to cover the deficit, using the already-generated
+    # sentence-specific options so the extra footage still looks intentional.
     def _probe_dur(path):
         try:
             r = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
@@ -3187,13 +3241,12 @@ def _prepare_short_assets(short_index, script_text, short_audio):
         play_res=(1080, 1920),
         max_chars=20,
     )
-    short_queries, short_backups = generate_queries_for_sentences(short_sentences)
+    short_query_options = generate_queries_for_sentences(short_sentences)
     return {
         "sentences": short_sentences,
         "word_data": short_word_data,
         "ass": short_ass,
-        "queries": short_queries,
-        "backups": short_backups,
+        "query_options": short_query_options,
     }
 
 
@@ -3311,7 +3364,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=2) as prep_executor:
         TEMP_DIR / "subs.ass",
         word_data=word_data if word_data else None,
     )
-    AI_QUERIES, AI_BACKUPS = query_future.result()
+    AI_QUERY_OPTIONS = query_future.result()
     subtitle_future.result()
 
 # Subtitles (word-level highlighting if available)
@@ -3408,17 +3461,14 @@ if render_video(sentences, audio, ass, logo, o2, keep_verifier=True):
                     assets = asset_future.result()
                     short_sentences = assets["sentences"]
                     short_ass = assets["ass"]
-                    short_queries = assets["queries"]
-                    short_backups = assets["backups"]
+                    short_query_options = assets["query_options"]
                 except Exception as e:
                     print(f"  Short {si+1}: preparation failed ({type(e).__name__}: {str(e)[:160]})")
                     short_failures.append((si + 1, "transcription/query preparation failed"))
                     continue
 
-                saved_queries = AI_QUERIES
-                saved_backups = AI_BACKUPS
-                AI_QUERIES = short_queries
-                AI_BACKUPS = short_backups
+                saved_query_options = AI_QUERY_OPTIONS
+                AI_QUERY_OPTIONS = short_query_options
                 try:
                     short_out = OUTPUT_DIR / f"short_{JOB_ID}_{si+1}.mp4"
                     ok = render_short(
@@ -3432,8 +3482,7 @@ if render_video(sentences, audio, ass, logo, o2, keep_verifier=True):
                             release_verifier=False,
                         )
                 finally:
-                    AI_QUERIES = saved_queries
-                    AI_BACKUPS = saved_backups
+                    AI_QUERY_OPTIONS = saved_query_options
 
                 if ok:
                     short_uploads.append((
