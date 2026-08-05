@@ -3209,34 +3209,29 @@ _YOUTUBE_TOKEN_MAP = {
 }
 
 def _download_youtube_token(channel):
-    """Download the YouTube token file from the repo's tokens/ folder."""
+    """Locate the YouTube token file from Kaggle input datasets or local directory."""
     token_filename = _YOUTUBE_TOKEN_MAP.get(channel)
     if not token_filename:
         return None
-    # The workflow downloads tokens/ contents into the working directory
+    # Primary: Kaggle dataset path (tokens uploaded as a Kaggle dataset)
+    kaggle_path = Path("/kaggle/input/tokens") / token_filename
+    if kaggle_path.exists():
+        print(f"  YouTube: found token at {kaggle_path}")
+        return kaggle_path
+    # Alternative Kaggle dataset name patterns
+    for dataset_name in ["youtube-tokens", "yt-tokens", "token"]:
+        alt_path = Path(f"/kaggle/input/{dataset_name}") / token_filename
+        if alt_path.exists():
+            print(f"  YouTube: found token at {alt_path}")
+            return alt_path
+    # Local fallback (for testing)
     local_path = Path(token_filename)
     if local_path.exists():
         return local_path
-    # Try tokens/ subdirectory as fallback
-    alt_path = Path("tokens") / token_filename
-    if alt_path.exists():
-        return alt_path
-    # Try downloading from GitHub repo
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
-    gh_token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN", "")
-    if repo and gh_token:
-        url = f"https://api.github.com/repos/{repo}/contents/tokens/{token_filename}"
-        try:
-            resp = requests.get(url, headers={
-                "Authorization": f"token {gh_token}",
-                "Accept": "application/vnd.github.v3.raw"
-            }, timeout=15)
-            if resp.status_code == 200:
-                local_path.write_bytes(resp.content)
-                print(f"  YouTube: downloaded {token_filename} from repo")
-                return local_path
-        except Exception as e:
-            print(f"  YouTube: could not download token from repo ({e})")
+    alt_local = Path("tokens") / token_filename
+    if alt_local.exists():
+        return alt_local
+    print(f"  YouTube: token file '{token_filename}' not found in any expected location")
     return None
 
 
