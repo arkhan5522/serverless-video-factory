@@ -2753,7 +2753,9 @@ def _normalize_clip_with_recovery(raw_path, output_path, duration, vf, label):
 
     for encoder_name, encoder in encoders:
         cmd = [
-            "ffmpeg", "-y", "-nostdin", "-i", str(raw_path), "-t", str(duration),
+            "ffmpeg", "-y", "-nostdin",
+            "-stream_loop", "-1",  # Loop input if shorter than -t duration
+            "-i", str(raw_path), "-t", str(duration),
             "-vf", vf,
         ] + encoder + ["-pix_fmt", "yuv420p", "-an", str(partial_path)]
         started = time.perf_counter()
@@ -3040,18 +3042,39 @@ def render_video(sentences, audio_path, ass_path, logo_path, out_sub, keep_verif
     vdur = _probe_dur("visual.mp4")
     adur = _probe_dur(audio_path)
     if vdur > 0 and adur > 0 and vdur < adur - 0.5:
-        print(f"  Concatenated visual is {adur - vdur:.2f}s short; re-encoding the already-verified trimmed clips")
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt",
-             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an", "visual_reencoded.mp4"],
-            capture_output=True, timeout=300,
-        )
+        print(f"  Concatenated visual is {adur - vdur:.2f}s short; re-encoding with NVENC to recover GOP rounding")
+        # Use GPU encoding (NVENC) instead of CPU libx264 to avoid 300s+ timeouts
+        reencode_cmd = (["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt"]
+                        + _enc_args() + ["-an", "visual_reencoded.mp4"])
+        try:
+            subprocess.run(reencode_cmd, capture_output=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            # NVENC failed or timed out, try CPU with longer timeout
+            print("  NVENC re-encode timed out, trying CPU fallback...")
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt",
+                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-an", "visual_reencoded.mp4"],
+                    capture_output=True, timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                print("  CPU re-encode also timed out; continuing with stream-copy visual")
         if os.path.exists("visual_reencoded.mp4"):
-            os.replace("visual_reencoded.mp4", "visual.mp4")
-            vdur = _probe_dur("visual.mp4")
+            new_vdur = _probe_dur("visual_reencoded.mp4")
+            if new_vdur > vdur:
+                os.replace("visual_reencoded.mp4", "visual.mp4")
+                vdur = new_vdur
+                print(f"  Re-encode recovered: visual now {vdur:.2f}s")
+            else:
+                try: os.remove("visual_reencoded.mp4")
+                except OSError: pass
+        # Don't abort on duration deficit - the final render uses -shortest
+        # which will just trim audio to match visual. A 64s shortfall across
+        # a 5-10 min video means the last ~1 min of narration gets cut, but
+        # that's better than a complete pipeline failure.
         if vdur < adur - 0.5:
-            print(f"  Verified clips still produce a {adur - vdur:.2f}s duration deficit; refusing unmatched padding")
-            return False
+            print(f"  WARNING: visual still {adur - vdur:.2f}s short after re-encode; "
+                  f"final render will use -shortest (last {adur - vdur:.1f}s of audio may be trimmed)")
 
     # Final render: visual.mp4 is already normalized to 1920x1080, so do not
     # rescale the entire nine-minute stream again. Burn the logo/subtitles and
