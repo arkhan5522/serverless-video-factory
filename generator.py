@@ -405,6 +405,7 @@ VOICE_PATH = """{{VOICE_PATH_PLACEHOLDER}}"""
 LOGO_PATH = """{{LOGO_PATH_PLACEHOLDER}}"""
 JOB_ID = """{{JOB_ID_PLACEHOLDER}}"""
 LANGUAGE = """{{LANGUAGE_PLACEHOLDER}}"""
+YOUTUBE_CHANNEL = """{{YOUTUBE_CHANNEL_PLACEHOLDER}}"""
 
 GEMINI_KEYS = [k.strip() for k in os.environ.get("GEMINI_API_KEY","").split(",") if k.strip()]
 ASSEMBLY_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
@@ -1057,6 +1058,7 @@ def generate_short_scripts(sentences, topic, n_shorts, target_seconds=60):
         from groq import Groq
         client = Groq(api_key=GROQ_KEY)
         lang_instruction = "Write in Spanish." if IS_SPANISH else "Write in English."
+        lang_reminder = "IMPORTANT: The entire script text MUST be written in Spanish (español)." if IS_SPANISH else ""
 
         r = _groq_complete(
             client,
@@ -1069,14 +1071,14 @@ RULES:
 - Each script must be a SELF-CONTAINED mini-narration, NOT a literal excerpt or copy-paste of the source text. Rewrite/condense the idea into a tight, punchy standalone script.
 - Each script should be approximately {words_target} words (for ~{target_seconds} seconds of narration at normal pace).
 - Start with a strong HOOK in the first sentence - something that stops someone scrolling (a surprising claim, a question, a cliffhanger).
-- {lang_instruction}
+- {lang_instruction} {lang_reminder}
 - Each script must make complete sense on its own with zero external context needed.
 - Family-friendly, no NSFW, no violence, no religion-baiting content.
 - Return ONLY a JSON array, nothing else. No markdown, no explanation.
 
 Format exactly like this:
 [{{"script": "full standalone narration text here...", "theme": "short label like 'the vanishing lake'"}}]"""},
-                {"role": "user", "content": f"Source script:\n\n{full_text}\n\nWrite {n_shorts} standalone short scripts as JSON."}
+                {"role": "user", "content": f"Source script:\n\n{full_text}\n\nWrite {n_shorts} standalone short scripts as JSON. {lang_instruction}"}
             ],
             label="short-script writer",
             temperature=0.75,
@@ -3194,6 +3196,172 @@ def upload_drive(fp):
         link=f"https://drive.google.com/file/d/{fid2}/view?usp=sharing"; print(f"  -> {link}"); return link
     return None
 
+
+# ==========================================
+# YOUTUBE UPLOAD (Token auto-refresh)
+# ==========================================
+# Token files are downloaded from the repo's tokens/ folder during workflow setup.
+# reloj_ciego -> token-reloj.json
+# metas_360   -> token-metas.json
+_YOUTUBE_TOKEN_MAP = {
+    "reloj_ciego": "token-reloj.json",
+    "metas_360": "token-metas.json",
+}
+
+def _download_youtube_token(channel):
+    """Download the YouTube token file from the repo's tokens/ folder."""
+    token_filename = _YOUTUBE_TOKEN_MAP.get(channel)
+    if not token_filename:
+        return None
+    # The workflow downloads tokens/ contents into the working directory
+    local_path = Path(token_filename)
+    if local_path.exists():
+        return local_path
+    # Try tokens/ subdirectory as fallback
+    alt_path = Path("tokens") / token_filename
+    if alt_path.exists():
+        return alt_path
+    # Try downloading from GitHub repo
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    gh_token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN", "")
+    if repo and gh_token:
+        url = f"https://api.github.com/repos/{repo}/contents/tokens/{token_filename}"
+        try:
+            resp = requests.get(url, headers={
+                "Authorization": f"token {gh_token}",
+                "Accept": "application/vnd.github.v3.raw"
+            }, timeout=15)
+            if resp.status_code == 200:
+                local_path.write_bytes(resp.content)
+                print(f"  YouTube: downloaded {token_filename} from repo")
+                return local_path
+        except Exception as e:
+            print(f"  YouTube: could not download token from repo ({e})")
+    return None
+
+
+def upload_youtube(fp, title=None, description=None, tags=None):
+    """Upload video to YouTube using auto-refreshed OAuth token. Always unlisted."""
+    if not os.path.exists(fp):
+        return None
+    channel = YOUTUBE_CHANNEL.strip().lower()
+    if channel == "none" or not channel:
+        return None
+
+    token_path = _download_youtube_token(channel)
+    if not token_path or not token_path.exists():
+        print(f"  YouTube: no token file found for channel '{channel}', skipping upload")
+        return None
+
+    print(f"  YouTube: uploading {os.path.basename(fp)} to channel '{channel}'...")
+
+    try:
+        token_data = json.loads(token_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  YouTube: failed to read token file ({e})")
+        return None
+
+    # Refresh the access token using refresh_token + client credentials
+    refresh_token = token_data.get("refresh_token")
+    client_id = token_data.get("client_id")
+    client_secret = token_data.get("client_secret")
+    token_uri = token_data.get("token_uri", "https://oauth2.googleapis.com/token")
+
+    if not all([refresh_token, client_id, client_secret]):
+        print("  YouTube: token file missing refresh_token/client_id/client_secret")
+        return None
+
+    try:
+        refresh_resp = requests.post(token_uri, data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }, timeout=15)
+        refresh_json = refresh_resp.json()
+        access_token = refresh_json.get("access_token")
+        if not access_token:
+            error = refresh_json.get("error_description", refresh_json.get("error", "unknown"))
+            print(f"  YouTube: token refresh failed ({error})")
+            return None
+        print(f"  YouTube: token refreshed successfully")
+    except Exception as e:
+        print(f"  YouTube: token refresh request failed ({e})")
+        return None
+
+    # Build video metadata
+    if not title:
+        title = f"Video {JOB_ID}"
+    if not description:
+        description = "Automated upload"
+    if not tags:
+        tags = ["documentary", "automation"]
+
+    metadata = {
+        "snippet": {
+            "title": title[:100],
+            "description": description[:5000],
+            "tags": tags[:15],
+            "categoryId": "22",
+        },
+        "status": {
+            "privacyStatus": "unlisted",
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+    # Initiate resumable upload
+    file_size = os.path.getsize(fp)
+    try:
+        init_resp = requests.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos"
+            "?uploadType=resumable&part=snippet,status",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Type": "video/mp4",
+                "X-Upload-Content-Length": str(file_size),
+            },
+            json=metadata,
+            timeout=30,
+        )
+        if init_resp.status_code != 200:
+            print(f"  YouTube: initiate upload failed ({init_resp.status_code}: "
+                  f"{init_resp.text[:200]})")
+            return None
+        upload_url = init_resp.headers.get("Location")
+        if not upload_url:
+            print("  YouTube: no upload URL in response headers")
+            return None
+    except Exception as e:
+        print(f"  YouTube: initiate upload request failed ({e})")
+        return None
+
+    # Upload the file
+    try:
+        with open(fp, "rb") as f:
+            upload_resp = requests.put(
+                upload_url,
+                headers={
+                    "Content-Length": str(file_size),
+                    "Content-Type": "video/mp4",
+                },
+                data=f,
+                timeout=1800,  # 30 min timeout for large files
+            )
+        if upload_resp.status_code in [200, 201]:
+            video_id = upload_resp.json().get("id", "")
+            link = f"https://youtu.be/{video_id}"
+            print(f"  YouTube: upload complete -> {link}")
+            return link
+        else:
+            print(f"  YouTube: upload failed ({upload_resp.status_code}: "
+                  f"{upload_resp.text[:200]})")
+            return None
+    except Exception as e:
+        print(f"  YouTube: upload request failed ({e})")
+        return None
+
 def generate_script(topic, mins):
     words=int(mins*180); lang="Write in Spanish." if IS_SPANISH else "Write in English."
     prompt=f"Write a documentary narration about '{topic}'. {words} words.\n{lang}\nRules: Only narration. No brackets. Islamic guidelines. Family-friendly."
@@ -3538,6 +3706,20 @@ if render_video(sentences, audio, ass, logo, o2, keep_verifier=True):
             if short_failures:
                 print(f"  Shorts failures: {short_failures}")
                 msg += f"({len(short_failures)} short(s) failed - check logs)\n"
+
+            # YouTube upload for shorts
+            if YOUTUBE_CHANNEL.strip().lower() not in ("none", ""):
+                for si, sc in enumerate(short_scripts):
+                    short_path = OUTPUT_DIR / f"short_{JOB_ID}_{si+1}.mp4"
+                    if short_path.exists():
+                        yt_short = upload_youtube(
+                            short_path,
+                            title=f"{sc.get('theme', f'Short {si+1}')} #shorts"[:100],
+                            description=sc.get("script", "")[:5000],
+                            tags=["shorts", "documentary", "facts", "education"],
+                        )
+                        if yt_short:
+                            msg += f"YouTube Short {si+1}: {yt_short}\n"
         except Exception as e:
             print(f"  Shorts pipeline error: {e}")
 
@@ -3547,6 +3729,17 @@ if render_video(sentences, audio, ass, logo, o2, keep_verifier=True):
     main_upload_executor.shutdown(wait=True)
     if l2:
         msg += f"Video: {l2}\n"
+
+    # YouTube upload (main video)
+    yt_link = upload_youtube(
+        o2,
+        title=TOPIC[:100] if MODE == "topic" else f"Video {JOB_ID}",
+        description=text[:5000] if text else "Automated documentary",
+        tags=["documentary", "education", "facts"],
+    )
+    if yt_link:
+        msg += f"YouTube: {yt_link}\n"
+
     update_status(100, msg, "completed", l2)
     print(f"\n  {msg}")
 else:
