@@ -135,7 +135,7 @@ jobs:
             "is_private": "true",
             "enable_gpu": "true",
             "enable_internet": "true",
-            "dataset_sources": [],
+            "dataset_sources": ["devtechinsights/tokens"],
             "kernel_sources": [],
             "competition_sources": []
           }' > kernel-metadata.json
