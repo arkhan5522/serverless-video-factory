@@ -570,6 +570,7 @@ def _local_sentence_query_options(sentence_text):
 # request has a bounded output size so the pair stays below the provider's
 # 8,000-TPM organization limit; there is no client-side pacing or waiting.
 _GROQ_MODELS = ("openai/gpt-oss-120b", "openai/gpt-oss-120b")
+_GROQ_FALLBACK_MODEL = "llama-3.1-8b-instant"
 _QUERY_BATCH_MAX_COMPLETION_TOKENS = 2200
 
 
@@ -764,6 +765,30 @@ def generate_queries_for_sentences(sentences):
         print(f"  Groq {model}: parsed {len(parsed)}/{len(batch)} batch sentences")
         if len(parsed) < len(batch):
             print(f"    Raw model output (first 300 chars): {(result or '')[:300]!r}")
+
+        # Fallback: if primary model refused or returned nothing usable,
+        # retry the entire batch with llama-3.1-8b-instant
+        if len(parsed) == 0 and _GROQ_FALLBACK_MODEL:
+            print(f"  Groq {model}: 0 parsed — retrying batch with fallback model {_GROQ_FALLBACK_MODEL}...")
+            fallback_result = _groq_complete(
+                client,
+                [
+                    {"role": "system", "content": _STOCK_QUERY_SYSTEM_PROMPT},
+                    {"role": "user", "content":
+                     "Generate five aligned stock queries for every sentence below. "
+                     "The numbering is local to this batch:\n\n" + numbered},
+                ],
+                label=f"query batch {batch_start + 1}-{batch_start + len(batch)} (fallback)",
+                temperature=0.35,
+                model=_GROQ_FALLBACK_MODEL,
+                max_completion_tokens=_QUERY_BATCH_MAX_COMPLETION_TOKENS,
+                attempts=2,
+            )
+            parsed = _parse_batch_result(fallback_result, batch)
+            print(f"  Groq {_GROQ_FALLBACK_MODEL} fallback: parsed {len(parsed)}/{len(batch)} batch sentences")
+            if len(parsed) < len(batch):
+                print(f"    Fallback raw output (first 300 chars): {(fallback_result or '')[:300]!r}")
+
         return batch_start, parsed
 
     parsed_by_global_index = {}
