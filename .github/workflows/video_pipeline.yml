@@ -38,6 +38,9 @@ jobs:
           USER_JOB_ID: ${{ github.event.client_payload.job_id }}
           USER_LANGUAGE: ${{ github.event.client_payload.language || 'english' }}
           
+          # YOUTUBE CHANNEL SELECTION
+          USER_YOUTUBE_CHANNEL: ${{ github.event.client_payload.youtube_channel || 'none' }}
+          
           # NEW ADVANCED SETTINGS - CRITICAL FIX
           USER_SUBTITLE_STYLE: ${{ github.event.client_payload.subtitle_style || 'mrbeast_yellow' }}
           USER_AUDIO_SPEED: ${{ github.event.client_payload.audio_speed || '1.0' }}
@@ -82,6 +85,8 @@ jobs:
               '{{LOGO_PATH_PLACEHOLDER}}': os.environ.get('USER_LOGO_PATH', ''),
               '{{JOB_ID_PLACEHOLDER}}': os.environ.get('USER_JOB_ID', 'debug_run'),
               '{{LANGUAGE_PLACEHOLDER}}': os.environ.get('USER_LANGUAGE', 'english'),
+              # YOUTUBE CHANNEL
+              '{{YOUTUBE_CHANNEL_PLACEHOLDER}}': os.environ.get('USER_YOUTUBE_CHANNEL', 'none'),
               # NEW ADVANCED SETTINGS
               '{{SUBTITLE_STYLE_PLACEHOLDER}}': os.environ.get('USER_SUBTITLE_STYLE', 'mrbeast_yellow'),
               '{{AUDIO_SPEED_PLACEHOLDER}}': os.environ.get('USER_AUDIO_SPEED', '1.0'),
