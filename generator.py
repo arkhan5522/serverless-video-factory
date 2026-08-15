@@ -3637,6 +3637,18 @@ if render_video(sentences, audio, ass, logo, o2, keep_verifier=True):
             short_links = []
             short_failures = []  # (short_num, reason) for end-of-run summary
 
+            # Release the MiniCPM verifier BEFORE shorts TTS to free GPU VRAM.
+            # Without this, GPU0 has ~3GB free and GPU1 has ~0.7GB free — not
+            # enough for Chatterbox TTS which needs 4+ GB. The verifier will be
+            # reloaded before shorts clip verification starts.
+            _release_llava_for_encoding()
+            if torch.cuda.is_available():
+                for _gpu_idx in range(torch.cuda.device_count()):
+                    with torch.cuda.device(_gpu_idx):
+                        torch.cuda.empty_cache()
+                gc.collect()
+            print("  Shorts: released verifier VRAM for TTS")
+
             # Generate short audio serially because generate_audio loads and
             # uses shared CUDA/TTS state. While the GPU generates the next
             # short, the previous short's transcription, subtitles, and Groq
@@ -3665,8 +3677,14 @@ if render_video(sentences, audio, ass, logo, o2, keep_verifier=True):
             short_asset_executor.shutdown(wait=False)
 
             # Rendering remains sequential: each short uses the shared Qwen
-            # workers and NVENC lock. The verifier models stay loaded between
-            # Shorts so the next short does not pay the model-load cost again.
+            # workers and NVENC lock. Reload the verifier now that TTS is done
+            # and has freed GPU memory.
+            try:
+                _load_llava()
+                print(f"  Shorts: verifier reloaded ({len(_llava_workers)} workers)")
+            except Exception as e:
+                print(f"  Shorts: verifier reload failed ({e}); shorts will skip clip verification")
+
             short_upload_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
             short_uploads = []
             for si, short_audio, asset_future in prepared_shorts:
